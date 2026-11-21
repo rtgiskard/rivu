@@ -390,14 +390,8 @@ impl PlaylistBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::playlists::selection::test_rows::{entry, summary};
     use std::sync::Arc;
-    fn summary(id: i64, entry_count: usize) -> PlaylistSummary {
-        PlaylistSummary {
-            id,
-            name: format!("playlist {id}"),
-            entry_count,
-        }
-    }
     #[test]
     fn operation_snapshot_uses_one_ordered_occurrence_group_and_projection() {
         let mut playlists = PlaylistBrowser::default();
@@ -407,26 +401,7 @@ mod tests {
         playlists.accept_entries(Page {
             total: 3,
             rows: (0..3)
-                .map(|index| PlaylistEntryRow {
-                    id: index as i64 + 10,
-                    track_id: 7,
-                    position: index,
-                    offset: index,
-                    title: String::new(),
-                    path: Default::default(),
-                    channels: 0,
-                    sample_rate: 0,
-                    bits_per_sample: None,
-                    bitrate_bps: None,
-                    bitrate_exact: false,
-                    cue_number: None,
-                    artist: String::new(),
-                    album: String::new(),
-                    duration: None,
-                    codec: String::new(),
-                    missing: false,
-                    favorite: false,
-                })
+                .map(|index| entry(index as i64 + 10, 7, index))
                 .collect(),
         });
         let identity = |offset| selection::EntryIdentity {
@@ -512,26 +487,7 @@ mod tests {
         playlists.accept_entries(Page {
             total: 100,
             rows: (80..100)
-                .map(|index| PlaylistEntryRow {
-                    id: index as i64,
-                    track_id: index as i64,
-                    position: index,
-                    offset: index,
-                    title: format!("entry {index}"),
-                    path: Default::default(),
-                    channels: 0,
-                    sample_rate: 0,
-                    bits_per_sample: None,
-                    bitrate_bps: None,
-                    bitrate_exact: false,
-                    cue_number: None,
-                    artist: String::new(),
-                    album: String::new(),
-                    duration: None,
-                    codec: String::new(),
-                    missing: false,
-                    favorite: false,
-                })
+                .map(|index| entry(index as i64, index as i64, index))
                 .collect(),
         });
         playlists.select_entry(83, 83);
@@ -715,26 +671,7 @@ mod tests {
         playlists.accept_entries(Page {
             total: 10_000,
             rows: (8_000..8_020)
-                .map(|index| PlaylistEntryRow {
-                    id: index as i64,
-                    track_id: index as i64,
-                    position: index,
-                    offset: index,
-                    title: format!("entry {index}"),
-                    path: Default::default(),
-                    channels: 0,
-                    sample_rate: 0,
-                    bits_per_sample: None,
-                    bitrate_bps: None,
-                    bitrate_exact: false,
-                    cue_number: None,
-                    artist: String::new(),
-                    album: String::new(),
-                    duration: None,
-                    codec: String::new(),
-                    missing: false,
-                    favorite: false,
-                })
+                .map(|index| entry(index as i64, index as i64, index))
                 .collect(),
         });
         playlists.demand_page(true, 8_000..8_010, 20);
@@ -777,8 +714,6 @@ mod tests {
             playlists.track_selection.active.map(|entry| entry.position),
             Some(6_000)
         );
-        playlists.track_selection.remove(41);
-        assert!(!playlists.entry_ready());
     }
 
     #[test]

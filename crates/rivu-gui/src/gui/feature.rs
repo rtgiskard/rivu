@@ -31,6 +31,24 @@ impl FeatureContext {
     }
 }
 
+#[cfg(test)]
+impl FeatureContext {
+    /// English labels over a live frontend handle, as feature tests need.
+    pub(super) fn for_test(handle: FrontendHandle) -> Self {
+        let i18n = Arc::new(Localizer::new("en-US"));
+        let labels = i18n
+            .fixed_texts()
+            .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+            .collect();
+        Self {
+            snapshots: Rc::new(SnapshotSource::new(handle)),
+            i18n,
+            labels: Rc::new(labels),
+            scroll: Default::default(),
+        }
+    }
+}
+
 /// One UI-thread snapshot cache shared by feature owners and the window.
 ///
 /// Core remains authoritative. Reading after a query completion may refresh the

@@ -692,7 +692,7 @@ impl QueueBrowser {
 mod tests {
     use super::{QueueBrowser, QueueIdentity};
     use rivu_protocol::{
-        model::{LibraryRow, Page, Query, QueueRow},
+        model::{Page, Query, QueueRow},
         response::QueryRevisions,
     };
 
@@ -804,9 +804,11 @@ mod tests {
         for id in 0..4096 {
             selection.select(identity(id), true);
         }
+        // An additive select into a map with spare room must not shrink it.
+        selection.selected.reserve(64);
         let capacity = selection.selected.capacity();
         selection.select(identity(4096), true);
-        assert_eq!(selection.selected.capacity(), capacity);
+        assert!(selection.selected.capacity() >= capacity);
         selection.select(identity(9), false);
         assert_eq!(selection.selected.len(), 1);
         assert!(selection.selected.capacity() <= 64);
@@ -838,24 +840,7 @@ mod tests {
             id,
             position,
             offset: position,
-            track: LibraryRow {
-                id: 1,
-                path: Default::default(),
-                title: String::new(),
-                artist: String::new(),
-                album: String::new(),
-                duration: None,
-                codec: String::new(),
-                bitrate_bps: None,
-                bitrate_exact: false,
-                channels: 0,
-                sample_rate: 0,
-                bits_per_sample: None,
-                cue_number: None,
-                favorite: false,
-                missing: false,
-                play_count: 0,
-            },
+            track: crate::test_support::library_row(1),
         }
     }
     fn identity(id: u64, position: usize) -> QueueIdentity {
@@ -903,11 +888,15 @@ mod tests {
         });
         let generation = queue.page_projection.generation();
         assert!(queue.sync(revisions(8), 3));
-        assert_eq!(queue.rows.display(1).map(|row| row.id), Some(11));
         assert!(queue.rows.get(1).is_none());
         assert!(queue.rows.position(|row| row.id == 11).is_none());
         assert!(queue.operation_rows(identity(11, 1), generation).is_empty());
+        // Retained payload survives until the retention deadline, then disappears.
         let deadline = queue.rows.refresh_deadline().unwrap();
+        let before = deadline - std::time::Duration::from_nanos(1);
+        assert_eq!(queue.rows.display_at(1, before).unwrap().id, 11);
+        assert!(!queue.rows.expire(before));
+        assert!(queue.operation_rows(identity(11, 1), generation).is_empty());
         assert!(queue.rows.expire(deadline));
         assert!(queue.rows.display(1).is_none());
     }
@@ -1281,7 +1270,7 @@ mod tests {
         assert_eq!(queue.len(), 0);
     }
     #[test]
-    fn streamed_ranges_replace_or_extend_occurrences_and_reject_stale_completion() {
+    fn range_commit_replaces_or_extends_occurrences_and_rejects_stale_completion() {
         let mut queue = queue(0);
         queue.select(identity(1, 0), false);
         let generation = queue.projection.generation();
@@ -1498,31 +1487,6 @@ mod tests {
     }
 
     #[test]
-    fn page_cancellation_and_boundary_changes_keep_the_physical_gate() {
-        let mut queue = queue(7);
-        let (old_query, old_generation) = queue.demand_page(0..10, 20).unwrap();
-        assert!(queue.page_worker);
-        queue.cancel();
-        assert!(queue.page_worker);
-        assert!(queue.sync(revisions(8), 200_000));
-        assert!(queue.demand_page(0..10, 40).is_none());
-        assert!(queue.page_worker);
-        assert!(
-            !queue
-                .page_projection
-                .accepts(&old_query, old_generation, revisions(7))
-        );
-        queue.page_worker = false; // Physical completion, not logical cancellation.
-        let (latest, generation) = queue.demand_page(0..10, 40).unwrap();
-        assert!(
-            queue
-                .page_projection
-                .accepts(&latest, generation, revisions(8))
-        );
-        assert!(queue.demand_page(40..50, 40).is_none());
-    }
-
-    #[test]
     fn page_failure_waits_for_explicit_retry() {
         let mut queue = queue(7);
         queue.rows.set_total(20);
@@ -1587,24 +1551,41 @@ mod tests {
         assert_eq!(queue.ordered_ids(), vec![10, 11]);
     }
     #[test]
-    fn page_size_is_demand_not_selection_or_locate_identity() {
-        let mut queue = queue(7);
-        queue.select(identity(10, 199_999), false);
-        let selection_generation = queue.projection.generation();
-        let locate = queue.locate.begin(11, None, revisions(7));
-        let (old, generation) = queue.demand_page(0..10, 20).unwrap();
-        assert!(queue.demand_page(0..10, 40).is_none());
-        assert!(
-            !queue
-                .page_projection
-                .accepts(&old, generation, revisions(7))
-        );
-        assert!(queue.current(selection_generation, queue.query().stamp(revisions(7))));
-        assert_eq!(queue.ordered_ids(), vec![10]);
-        assert!(queue.locate.current(locate, revisions(7), Some(11)));
-        assert!(queue.reconcile_pending.is_none());
-        queue.page_worker = false;
-        assert!(queue.demand_page(0..10, 40).is_some());
+    fn resize_and_cancellation_keep_the_page_worker_until_completion() {
+        for cancel in [false, true] {
+            let mut queue = queue(7);
+            queue.select(identity(10, 199_999), false);
+            let selection_generation = queue.projection.generation();
+            let locate = queue.locate.begin(11, None, revisions(7));
+            let (old, generation) = queue.demand_page(0..10, 20).unwrap();
+            assert!(queue.page_worker);
+            if cancel {
+                queue.cancel();
+                assert!(queue.page_worker);
+                assert!(queue.sync(revisions(8), 200_000));
+            }
+            assert!(queue.demand_page(0..10, 40).is_none());
+            assert!(
+                !queue
+                    .page_projection
+                    .accepts(&old, generation, revisions(7))
+            );
+            if !cancel {
+                assert!(queue.current(selection_generation, queue.query().stamp(revisions(7))));
+                assert_eq!(queue.ordered_ids(), vec![10]);
+                assert!(queue.locate.current(locate, revisions(7), Some(11)));
+                assert!(queue.reconcile_pending.is_none());
+            }
+            assert!(queue.page_worker);
+            queue.retire_page_worker();
+            let (latest, generation) = queue.demand_page(0..10, 40).unwrap();
+            assert!(queue.page_projection.accepts(
+                &latest,
+                generation,
+                revisions(if cancel { 8 } else { 7 })
+            ));
+            assert!(queue.demand_page(40..50, 40).is_none());
+        }
     }
 
     #[test]

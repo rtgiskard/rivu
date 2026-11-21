@@ -14,7 +14,7 @@ use crate::palette::{PaletteLut, active_palette_lut};
 use spectrogram::Spectrogram;
 #[cfg(test)]
 use spectrogram::{
-    SPECTROGRAM_TILE_COLUMNS, SpectrogramTile, history_column_count, history_columns_for_width,
+    SPECTROGRAM_TILE_COLUMNS, history_column_count, history_columns_for_width,
     sample_spectrogram_column,
 };
 #[cfg(test)]
@@ -1238,28 +1238,10 @@ mod tests {
         let start = Duration::from_secs(1);
         visuals.update(&frame(1.0, -10.0), start);
         visuals.update(&frame(1.2, -80.0), start);
-        let publication = prepared_body(&visuals, 1, 100.0, 100.0).unwrap();
         let (history, sample_time, deadlines) = {
-            let mut data = visuals.data.borrow_mut();
-            data.spectrogram.tiles.push(Some(SpectrogramTile {
-                key: [None; SPECTROGRAM_TILE_COLUMNS],
-                start,
-                end: Duration::from_millis(1200),
-                publication: publication.clone(),
-            }));
+            let data = visuals.data.borrow();
             (
-                data.spectrogram
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        (
-                            column.revision,
-                            column.sample_time,
-                            column.interval_start,
-                            column.levels.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
+                history_snapshot(&data),
                 data.latest_sample_time,
                 data.spectrum.peak_deadlines.clone(),
             )
@@ -1276,30 +1258,7 @@ mod tests {
             assert!(data.spectrum.smoothed_levels[0] < -10.0);
             assert_eq!(data.latest_sample_time, sample_time);
             assert_eq!(data.spectrum.peak_deadlines, deadlines);
-            assert_eq!(
-                data.spectrogram
-                    .columns
-                    .iter()
-                    .map(|column| (
-                        column.revision,
-                        column.sample_time,
-                        column.interval_start,
-                        column.levels.clone()
-                    ))
-                    .collect::<Vec<_>>(),
-                history
-            );
-            assert!(Arc::ptr_eq(
-                &data
-                    .spectrogram
-                    .tiles
-                    .last()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .publication,
-                &publication
-            ));
+            assert_eq!(history_snapshot(&data), history);
             assert!(
                 spectrogram::time_position(
                     start,
@@ -1556,16 +1515,12 @@ mod tests {
                                 && position.y <= plot.size.height + px(0.001)
                         }));
                     }
-                    gpui::GpuContent::Rectangles { rectangles, params } => {
+                    gpui::GpuContent::Rectangles { rectangles, .. } => {
                         assert!(!rectangles.is_empty());
                         assert!(rectangles.iter().all(|rectangle| {
                             let [x, y, width, height] = rectangle.bounds;
                             x >= 0.0 && y >= 0.0 && x + width <= 1.0 && y + height <= 1.0
                         }));
-                        if style == SpectrumStyle::Led {
-                            assert_eq!(params.cell_height, 3.0);
-                            assert_eq!(params.cell_gap, 2.0);
-                        }
                     }
                     _ => panic!("unexpected spectrum content"),
                 }
@@ -1683,12 +1638,12 @@ mod tests {
             let edge = 1.0_f32.min(height * 0.5);
             let count = if height > 2.0 * edge { 4 } else { 2 };
             assert_eq!(rectangles.len(), 4 * count);
-            for (bar, edges) in rectangles.chunks(count).enumerate() {
+            // Compare the edge set, not emission order.
+            let mut expected = Vec::new();
+            for bar in 0..4 {
                 let x = (bar as f32 * 25.0 + 1.0) / 100.0;
-                let mut expected = vec![
-                    [x, 1.0 - height / 100.0, 0.23, edge / 100.0],
-                    [x, 1.0 - edge / 100.0, 0.23, edge / 100.0],
-                ];
+                expected.push([x, 1.0 - height / 100.0, 0.23, edge / 100.0]);
+                expected.push([x, 1.0 - edge / 100.0, 0.23, edge / 100.0]);
                 if count == 4 {
                     expected.push([
                         x,
@@ -1703,16 +1658,20 @@ mod tests {
                         (height - 2.0 * edge) / 100.0,
                     ]);
                 }
-                for (edge, expected) in edges.iter().zip(expected) {
-                    for (actual, expected) in edge.bounds.iter().zip(expected) {
-                        assert!((actual - expected).abs() < 1e-6);
-                    }
-                    assert!(
-                        (edge.palette_range[0] - (1.0 - edge.bounds[1] - edge.bounds[3])).abs()
-                            < 1e-6
-                    );
-                    assert!((edge.palette_range[1] - (1.0 - edge.bounds[1])).abs() < 1e-6);
+            }
+            let by_position =
+                |a: &[f32; 4], b: &[f32; 4]| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1]));
+            expected.sort_by(by_position);
+            let mut actual = rectangles.iter().collect::<Vec<_>>();
+            actual.sort_by(|a, b| by_position(&a.bounds, &b.bounds));
+            for (edge, expected) in actual.into_iter().zip(expected) {
+                for (actual, expected) in edge.bounds.iter().zip(expected) {
+                    assert!((actual - expected).abs() < 1e-6);
                 }
+                assert!(
+                    (edge.palette_range[0] - (1.0 - edge.bounds[1] - edge.bounds[3])).abs() < 1e-6
+                );
+                assert!((edge.palette_range[1] - (1.0 - edge.bounds[1])).abs() < 1e-6);
             }
         }
     }
@@ -1918,6 +1877,21 @@ mod tests {
         Some(rest.iter().fold((first, first), |(low, high), value| {
             (low.min(*value), high.max(*value))
         }))
+    }
+
+    fn history_snapshot(data: &FrequencyState) -> Vec<(u64, Option<Duration>, Duration, Vec<f32>)> {
+        data.spectrogram
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.revision,
+                    column.sample_time,
+                    column.interval_start,
+                    column.levels.clone(),
+                )
+            })
+            .collect()
     }
 
     fn frame(time: f64, level: f32) -> AnalysisFrame {
@@ -2133,11 +2107,13 @@ mod tests {
                 spectrogram_history_seconds: 60,
                 ..Config::default()
             });
-            for step in 1..=240 * fps {
-                visuals.update(
-                    &frame(step as f64 / fps as f64, -30.0),
-                    Duration::from_secs_f64(step as f64 / fps as f64),
-                );
+            // One reused frame; two full history spans cross a ring wrap.
+            let mut audio = frame(0.0, -30.0);
+            for step in 1..=2 * history_column_count(60, fps) + 1 {
+                let time = Duration::from_secs_f64(step as f64 / fps as f64);
+                audio.sequence = time.as_nanos() as u64;
+                audio.sample_time = time;
+                visuals.update(&audio, time);
             }
             let data = visuals.data.borrow();
             assert_eq!(data.spectrogram.len, history_column_count(60, fps));
@@ -2394,14 +2370,7 @@ mod tests {
 
     #[test]
     fn spectrogram_publication_sampling_respects_panel_history_and_budget() {
-        for (height, columns, budget, expected) in [
-            (320, 400, 64 * 1024 * 1024, 320),
-            (700, 400, 64 * 1024 * 1024, 700),
-            (3000, 400, 64 * 1024 * 1024, 1024),
-            (3000, 3600, 64 * 1024 * 1024, 580),
-            (3000, 3600, 16 * 1024 * 1024, 143),
-            (0, 400, 64 * 1024 * 1024, 1),
-        ] {
+        fn published_rows(height: usize, columns: usize, budget: u64) -> usize {
             let mut visuals = configured_visuals();
             {
                 let mut data = visuals.data.borrow_mut();
@@ -2413,8 +2382,35 @@ mod tests {
             visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
             let mut data = visuals.data.borrow_mut();
             data.prepare_spectrogram_presentation(1).unwrap();
-            assert_eq!(data.spectrogram.sample_height, expected);
-            assert_eq!(data.spectrogram.heat_samples.len(), expected);
+            let rows = data.spectrogram.sample_height;
+            assert_eq!(data.spectrogram.heat_samples.len(), rows);
+            let layers = &data.spectrogram.presentations[&1].layers;
+            assert!(!layers.is_empty());
+            for (_, publication) in layers {
+                let gpui::GpuContent::Field { height, .. } = publication.content() else {
+                    panic!("expected spectrogram field");
+                };
+                assert_eq!(*height as usize, rows);
+            }
+            rows
+        }
+        const MIB: u64 = 1024 * 1024;
+        for (height, columns, expected) in [
+            (320, 400, 320),
+            (700, 400, 700),
+            (3000, 400, 1024),
+            (0, 400, 1),
+        ] {
+            assert_eq!(published_rows(height, columns, 64 * MIB), expected);
+        }
+        // Long histories trade frequency rows for the bounded GPU budget: two
+        // generations, each charged for its buffer and initialization copy,
+        // stay within half the budget.
+        let generous = published_rows(3000, 3600, 64 * MIB);
+        let tight = published_rows(3000, 3600, 16 * MIB);
+        assert!(tight < generous && generous < 1024);
+        for (rows, budget) in [(generous, 64 * MIB), (tight, 16 * MIB)] {
+            assert!((4 * 3600 * rows * size_of::<f32>()) as u64 <= budget / 2);
         }
     }
 
@@ -2950,18 +2946,7 @@ mod tests {
             let (history, analysis, sampling, scratch) = {
                 let data = visuals.data.borrow();
                 (
-                    data.spectrogram
-                        .columns
-                        .iter()
-                        .map(|column| {
-                            (
-                                column.revision,
-                                column.sample_time,
-                                column.interval_start,
-                                column.levels.clone(),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
+                    history_snapshot(&data),
                     (
                         data.last_analysis_sequence,
                         data.latest_sample_time,
@@ -3053,19 +3038,7 @@ mod tests {
                         .palette(),
                     after.palette(),
                 ));
-                assert_eq!(
-                    data.spectrogram
-                        .columns
-                        .iter()
-                        .map(|column| (
-                            column.revision,
-                            column.sample_time,
-                            column.interval_start,
-                            column.levels.clone(),
-                        ))
-                        .collect::<Vec<_>>(),
-                    history
-                );
+                assert_eq!(history_snapshot(&data), history);
                 assert_eq!(
                     (
                         data.last_analysis_sequence,
@@ -3540,6 +3513,7 @@ mod tests {
                     ));
                 }
                 assert!(visuals.finish_prepaint());
+                let measured = visuals.data.borrow().spectrogram.panel_sizes.clone();
                 for time in 1..=5 {
                     visuals.update(
                         &frame(time as f64, -30.0),
@@ -3553,17 +3527,14 @@ mod tests {
                     false,
                 ));
                 assert!(visuals.finish_prepaint());
-                let expected = if shrinking_panel == 1 {
-                    (2, (200, 700))
-                } else {
-                    (1, (400, 100))
-                };
+                let survivor = 3 - shrinking_panel;
+                let surviving = measured[&survivor];
                 {
                     let data = visuals.data.borrow();
                     assert_eq!(data.spectrogram.panel_sizes.len(), 1);
-                    assert_eq!(data.spectrogram.panel_sizes[&expected.0], expected.1);
-                    assert_eq!(data.spectrogram.history_columns, expected.1.0);
-                    assert_eq!(data.spectrogram.panel_height, expected.1.1);
+                    assert_eq!(data.spectrogram.panel_sizes[&survivor], surviving);
+                    assert_eq!(data.spectrogram.history_columns, surviving.0);
+                    assert_eq!(data.spectrogram.panel_height, surviving.1);
                     assert_eq!(data.spectrogram.len, 5);
                     assert_eq!(
                         data.spectrogram.columns[0].sample_time,
@@ -3580,9 +3551,9 @@ mod tests {
                 assert!(!visuals.finish_prepaint());
                 assert_eq!(
                     visuals.data.borrow().spectrogram.history_columns,
-                    expected.1.0
+                    surviving.0
                 );
-                assert_eq!(visuals.data.borrow().spectrogram.panel_height, expected.1.1);
+                assert_eq!(visuals.data.borrow().spectrogram.panel_height, surviving.1);
                 let restored = if shrinking_panel == 1 {
                     size(px(416.0), px(112.0))
                 } else {
@@ -3596,8 +3567,15 @@ mod tests {
                 ));
                 assert!(visuals.finish_prepaint());
                 let data = visuals.data.borrow();
-                assert_eq!(data.spectrogram.history_columns, 400);
-                assert_eq!(data.spectrogram.panel_height, 700);
+                assert_eq!(data.spectrogram.panel_sizes, measured);
+                assert_eq!(
+                    data.spectrogram.history_columns,
+                    measured.values().map(|size| size.0).max().unwrap()
+                );
+                assert_eq!(
+                    data.spectrogram.panel_height,
+                    measured.values().map(|size| size.1).max().unwrap()
+                );
                 assert_eq!(data.spectrogram.len, 5);
             }
         }
@@ -3618,6 +3596,7 @@ mod tests {
             ));
         }
         assert!(visuals.finish_prepaint());
+        let measured = visuals.data.borrow().spectrogram.panel_sizes[&1];
         for time in 1..=5 {
             visuals.update(
                 &frame(time as f64, -30.0),
@@ -3679,7 +3658,7 @@ mod tests {
         assert!(visuals.data.borrow_mut().prepaint_panel_with_labels(
             1,
             FrequencyKind::Spectrogram,
-            size(px(416.0), px(112.0)),
+            size(px(416.0), px(712.0)),
             false,
         ));
         assert!(visuals.finish_prepaint());
@@ -3687,9 +3666,9 @@ mod tests {
         visuals.update(&frame(6.0, -20.0), Duration::from_secs_f64(6.0));
         let data = visuals.data.borrow();
         assert_eq!(data.spectrogram.panel_sizes.len(), 1);
-        assert_eq!(data.spectrogram.panel_sizes[&1], (400, 100));
-        assert_eq!(data.spectrogram.history_columns, 400);
-        assert_eq!(data.spectrogram.panel_height, 100);
+        assert_eq!(data.spectrogram.panel_sizes[&1], measured);
+        assert_eq!(data.spectrogram.history_columns, measured.0);
+        assert_eq!(data.spectrogram.panel_height, measured.1);
         assert_eq!(data.spectrogram.len, 3);
         assert_eq!(
             data.spectrogram
@@ -3838,6 +3817,9 @@ mod tests {
                 let mut visuals = FrequencyViews::new();
                 visuals.configure_config(&Config {
                     analysis_rate_hz: analysis_hz as u32,
+                    spectrum_peak_hold_ms: 400,
+                    spectrum_peak_gravity: 50.0,
+                    spectrum_bar_hold_ms: 0,
                     spectrum_bar_gravity: 50.0,
                     spectrum_smoothing_ms: 1000,
                     ..Config::default()

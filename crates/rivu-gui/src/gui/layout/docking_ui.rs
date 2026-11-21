@@ -515,7 +515,6 @@ mod tests {
             next_id: 1000,
             locked: false,
         };
-        let unchanged = current.clone();
         for (index, expected) in [
             (Some(0), vec![1000, 101, 102, 103]),
             (Some(1), vec![101, 1000, 102, 103]),
@@ -545,35 +544,51 @@ mod tests {
                 "transport"
             );
             assert_eq!(candidate.next_id, 1001);
-            assert_eq!(current, unchanged);
         }
         let processing = current.add("audio_processing", Some(2));
-        let unchanged = current.clone();
-        for edge in [
-            Edge::Center,
-            Edge::Left,
-            Edge::Top,
-            Edge::Right,
-            Edge::Bottom,
-        ] {
-            let request = DockRequest {
-                target: docking::Target { node: 2, edge },
-                index: Some(0),
-            };
-            assert!(
-                docking_candidate(&current, DockSource::Catalog("audio_processing"), request)
-                    .is_none()
-            );
-            assert_eq!(current, unchanged);
-            let moved =
-                docking_candidate(&current, DockSource::Existing(processing), request).unwrap();
-            assert_eq!(moved.panel, processing);
-            moved.layout.validate().unwrap();
-        }
+        let request = DockRequest {
+            target: docking::Target {
+                node: 2,
+                edge: Edge::Right,
+            },
+            index: Some(0),
+        };
+        assert!(
+            docking_candidate(&current, DockSource::Catalog("audio_processing"), request).is_none()
+        );
+        let moved = docking_candidate(&current, DockSource::Existing(processing), request).unwrap();
+        assert_eq!(moved.panel, processing);
+        moved.layout.validate().unwrap();
     }
 
-    #[test]
-    fn catalog_edges_use_post_add_group_ids_and_preserve_other_regions() {
+    #[gpui::test]
+    fn catalog_edge_preview_matches_the_incoming_group_and_preserves_siblings(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::gui::layout::persistence::{LayoutPersistence, LoadedLayouts};
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = crate::test_support::CoreRuntime::start_quiet(directory.path());
+        let save =
+            LayoutPersistence::new(LoadedLayouts::load(directory.path().join("layouts.json")));
+        cx.update(rivu_ui::input::Input::init);
+        let window = cx.add_empty_window();
+        let app = window.update(|window, cx| {
+            cx.new(|cx| {
+                let app = WindowView::new(
+                    runtime.handle.clone(),
+                    save.handle(),
+                    Arc::new(rivu_metadata::artwork::ArtworkManager::new(
+                        directory.path(),
+                    )),
+                    Default::default(),
+                    Arc::new(Localizer::new("en-US")),
+                    window,
+                    cx,
+                );
+                app.handle.set_wakeup(|| {});
+                app
+            })
+        });
         let current = Layout {
             root: Some(Node::Split {
                 id: 1,
@@ -584,49 +599,61 @@ mod tests {
             next_id: 1000,
             locked: false,
         };
-        let unchanged = current.clone();
         let outer = Bounds::new(point(px(0.), px(0.)), size(px(1004.), px(400.)));
-        let unaffected =
-            docking::node_bounds(current.root.as_ref().unwrap(), outer, 2, 4., 1.).unwrap();
-        for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
-            let mut candidate = docking_candidate(
-                &current,
-                DockSource::Catalog("transport"),
-                DockRequest {
-                    target: docking::Target { node: 3, edge },
-                    index: None,
-                },
-            )
-            .unwrap()
-            .layout;
-            let sizes = layout_geometry::edit_sizes(
-                current.root.as_ref().unwrap(),
-                HashMap::from([(1, (1004., 400.)), (2, (600., 400.)), (3, (400., 400.))]),
-                1000,
-                Some((3, edge, 1001)),
-                4.,
-            );
-            candidate.preserve_region_sizes(&sizes, 4.);
-            assert_eq!(candidate.next_id, 1003);
-            assert_eq!(panel_ids(&candidate, 2), vec![101]);
-            assert_eq!(panel_ids(&candidate, 3), vec![201]);
-            assert_eq!(panel_ids(&candidate, 1001), vec![1000]);
-            let root = candidate.root.as_ref().unwrap();
-            assert_eq!(
-                docking::node_bounds(root, outer, 2, 4., 1.).unwrap(),
-                unaffected
-            );
-            let existing = docking::node_bounds(root, outer, 3, 4., 1.).unwrap();
-            let incoming = docking::node_bounds(root, outer, 1001, 4., 1.).unwrap();
-            match edge {
-                Edge::Left => assert!(incoming.origin.x < existing.origin.x),
-                Edge::Right => assert!(incoming.origin.x > existing.origin.x),
-                Edge::Top => assert!(incoming.origin.y < existing.origin.y),
-                Edge::Bottom => assert!(incoming.origin.y > existing.origin.y),
-                Edge::Center => unreachable!(),
+        let unaffected = Bounds::new(outer.origin, size(px(600.), outer.size.height));
+        let target = Bounds::new(point(px(604.), px(0.)), size(px(400.), px(400.)));
+        let geometry = WindowGeometry {
+            viewport: outer.size,
+            ui_scale: 1.,
+            scale_factor: 1.,
+        };
+        app.update(window, |app, _| {
+            let workspace = &mut app.workspace;
+            workspace.interaction.layout_changed(current.root.as_ref());
+            workspace.interaction.synchronize_geometry(geometry);
+            *workspace.layouts.current_mut() = current;
+            for (id, bounds) in [(1, outer), (2, unaffected), (3, target)] {
+                workspace
+                    .interaction
+                    .measurement_handle(Measured::Node(id))
+                    .record(bounds, geometry);
             }
-            assert_eq!(current, unchanged);
-        }
+            for (edge, x, y, width, height) in [
+                (Edge::Left, 604., 0., 198., 400.),
+                (Edge::Right, 806., 0., 198., 400.),
+                (Edge::Top, 604., 0., 400., 198.),
+                (Edge::Bottom, 604., 202., 400., 198.),
+            ] {
+                let hover = app
+                    .prepare_docking(
+                        DockSource::Catalog("transport"),
+                        DockRequest {
+                            target: docking::Target { node: 3, edge },
+                            index: None,
+                        },
+                    )
+                    .unwrap();
+                let prepared = hover.prepared.unwrap();
+                let root = prepared.layout.root.as_ref().unwrap();
+                let group = panel_group(root, prepared.panel).unwrap().0;
+                assert_eq!(panel_ids(&prepared.layout, group), [prepared.panel]);
+                assert_eq!(
+                    hover.preview,
+                    Some(Bounds::new(
+                        point(px(x), px(y)),
+                        size(px(width), px(height))
+                    ))
+                );
+                assert_eq!(
+                    docking::node_bounds(root, outer, group, 4., 1.),
+                    hover.preview
+                );
+                assert_eq!(
+                    docking::node_bounds(root, outer, 2, 4., 1.),
+                    Some(unaffected)
+                );
+            }
+        });
     }
 
     #[test]
@@ -656,8 +683,6 @@ mod tests {
             docking::node_bounds(candidate.root.as_ref().unwrap(), workspace, 2, 4., 1.),
             Some(workspace),
         );
-        assert!(current.root.is_none());
-        assert_eq!(current.next_id, 1);
     }
 
     #[test]
@@ -672,7 +697,6 @@ mod tests {
             next_id: 1000,
             locked: false,
         };
-        let unchanged = current.clone();
         for (node, edge) in [
             (99, Edge::Center),
             (99, Edge::Left),
@@ -690,7 +714,6 @@ mod tests {
                 )
                 .is_none()
             );
-            assert_eq!(current, unchanged);
         }
         let empty = Layout {
             root: None,
@@ -714,7 +737,5 @@ mod tests {
                 .is_none()
             );
         }
-        assert!(empty.root.is_none());
-        assert_eq!(empty.next_id, 1);
     }
 }

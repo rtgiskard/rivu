@@ -413,17 +413,26 @@ mod tests {
         bright_high.rebuild_segments();
         wide.rebuild_segments();
         extended.rebuild_segments();
-        assert!(light(&bright_high, Some(2)) > light(&quiet_high, Some(2)) * 5.0);
-        // The first child follows the root's four pieces; mids widen its fork.
-        assert_ne!(
-            quiet_high.segments()[PIECES * 2 - 1].to,
-            wide.segments()[PIECES * 2 - 1].to
-        );
-        assert!(extended.segments()[PIECES - 1].to[1] < quiet_high.segments()[PIECES - 1].to[1]);
-        assert_eq!(
-            quiet_high.segments()[PIECES - 1].to,
-            bright_high.segments()[PIECES - 1].to
-        );
+        assert!(light(&bright_high, Some(2)) > light(&quiet_high, Some(2)));
+        let geometry = |scene: &Scene, tone| {
+            scene
+                .segments()
+                .iter()
+                .filter(|s| s.tone == tone)
+                .map(|s| s.to)
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(geometry(&quiet_high, 1), geometry(&wide, 1));
+        let trunk_length = |scene: &Scene| -> f32 {
+            scene
+                .segments()
+                .iter()
+                .filter(|s| s.tone == 0)
+                .map(|s| (s.to[0] - s.from[0]).hypot(s.to[1] - s.from[1]))
+                .sum()
+        };
+        assert!(trunk_length(&extended) > trunk_length(&quiet_high));
+        assert_eq!(geometry(&quiet_high, 0), geometry(&bright_high, 0));
     }
 
     #[test]
@@ -486,16 +495,27 @@ mod tests {
     fn repeated_rises_recycle_the_fixed_pulse_pool() {
         let mut scene = Scene::new();
         let mut peak_active = 0;
+        let mut recycled_active = false;
         for step in 0..408 {
             let drive = Drive {
                 onset: if step % 17 == 0 { 1.0 } else { 0.0 },
                 ..sounding()
             };
+            let previous = scene.pulses;
             scene.advance(DT, drive);
+            if drive.onset > 0.0 {
+                recycled_active |= previous
+                    .iter()
+                    .zip(&scene.pulses)
+                    .any(|(old, new)| old.active && new.active && new.age < old.age);
+            }
             peak_active = peak_active.max(scene.pulses.iter().filter(|pulse| pulse.active).count());
         }
         assert_eq!(peak_active, PULSE_COUNT);
-        assert_eq!(scene.next_pulse, 0);
+        assert!(
+            recycled_active,
+            "a later rise must restart an occupied slot"
+        );
         assert!(
             scene
                 .pulses

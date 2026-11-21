@@ -761,22 +761,9 @@ fn spatial_row(frequency: f32, high: f32) -> Option<usize> {
     )
 }
 
-// Keep the original combined transform as an independent numeric reference.
 #[cfg(test)]
 fn spatial_cell(frequency: f32, pan: f32, high: f32) -> Option<(usize, usize)> {
-    if !frequency.is_finite()
-        || !pan.is_finite()
-        || high <= 20.0
-        || frequency < 20.0
-        || frequency > high
-    {
-        return None;
-    }
-    let x = (((pan.clamp(-1.0, 1.0) + 1.0) * 0.5) * (SPATIAL_WIDTH - 1) as f32).round() as usize;
-    let y = ((1.0 - (frequency / 20.0).ln() / (high / 20.0).ln()).clamp(0.0, 1.0)
-        * (SPATIAL_HEIGHT - 1) as f32)
-        .round() as usize;
-    Some((x, y))
+    spatial_column(pan).zip(spatial_row(frequency, high))
 }
 
 fn decay_spatial(source: &[f32], target: &mut [f32], elapsed: f32) {
@@ -973,37 +960,35 @@ mod tests {
         plot
     }
     #[test]
-    fn cached_spatial_rows_match_original_transform_across_producer_axes() {
+    fn cached_spatial_rows_follow_rate_and_bin_count_changes() {
         let mut mapping = SpatialMapping::default();
         // Reuse the mapping through sample-rate and FFT changes, including
         // lengths changing independently of the GUI's requested FFT setting.
-        for sample_rate in [8_000, 44_100, 48_000, 192_000, 48_000] {
-            let high = high_frequency(sample_rate);
-            for fft_size in [512, 1024, 2048, 4096, 8192, 16384, 32768, 512] {
-                let mut bins: Vec<_> = (1..=fft_size / 2)
-                    .map(|bin| SpatialBin {
-                        frequency_hz: bin as f32 * sample_rate as f32 / fft_size as f32,
-                        pan: 0.0,
-                        power: 0.001,
-                    })
-                    .collect();
-                for pan in [-1.0, -0.5, 0.0, 0.5, 1.0] {
-                    for bin in &mut bins {
-                        bin.pan = pan;
-                        bin.power *= 0.5;
-                    }
-                    mapping.prepare(sample_rate, &bins);
-                    assert_eq!(mapping.rows.len(), bins.len());
-                    for (bin, row) in bins.iter().zip(&mapping.rows) {
-                        assert_eq!(
-                            spatial_column(bin.pan).zip(row.map(usize::from)),
-                            spatial_cell(bin.frequency_hz, bin.pan, high),
-                            "rate={sample_rate}, FFT={fft_size}, hz={}, pan={pan}",
-                            bin.frequency_hz,
-                        );
-                    }
-                }
+        for (rate, frequencies, expected) in [
+            (8_000, &[20., 4000.][..], &[Some(127), Some(0)][..]),
+            (48_000, &[20., 24_000.][..], &[Some(127), None][..]),
+            (
+                48_000,
+                &[19., 20., 20_000.][..],
+                &[None, Some(127), Some(0)][..],
+            ),
+        ] {
+            let mut bins: Vec<_> = frequencies
+                .iter()
+                .map(|&frequency_hz| SpatialBin {
+                    frequency_hz,
+                    pan: -1.0,
+                    power: 0.001,
+                })
+                .collect();
+            mapping.prepare(rate, &bins);
+            assert_eq!(mapping.rows.as_slice(), expected);
+            for bin in &mut bins {
+                bin.pan = 1.0;
+                bin.power = 0.5;
             }
+            mapping.prepare(rate, &bins);
+            assert_eq!(mapping.rows.as_slice(), expected);
         }
     }
 

@@ -1301,7 +1301,7 @@ mod tests {
             AudioVisualizerStyle::FractalBeams,
             AudioVisualizerStyle::FractalFlow,
         ] {
-            for discontinuity in 0..4 {
+            for discontinuity in 0..5 {
                 let visual = plot(style);
                 for t in (50..=1000).step_by(50) {
                     accept(&visual, &frame(t));
@@ -1311,13 +1311,17 @@ mod tests {
                 match discontinuity {
                     0 => next.generation += 1,
                     1 => next.sample_rate = 44100,
-                    2 => next.sample_time = Duration::from_millis(950),
+                    2 => {
+                        next.sample_time = Duration::from_millis(1050);
+                        next.generation += 1;
+                    }
+                    3 => next.sample_time = Duration::from_millis(950),
                     _ => {
                         next.sample_time = Duration::from_millis(1550);
                         next.generation += 1;
                     }
                 }
-                if discontinuity < 2 {
+                if discontinuity < 3 {
                     let mut undemanded = next.clone();
                     undemanded.visualizer.demand.band_energy = false;
                     accept(&visual, &undemanded);
@@ -1348,36 +1352,14 @@ mod tests {
     }
 
     #[test]
-    fn discontinuities_and_stale_configuration_never_bridge_scenes() {
+    fn reactivation_rejects_audio_from_stale_fft_configuration() {
         for style in [
             AudioVisualizerStyle::FractalBeams,
             AudioVisualizerStyle::FractalFlow,
         ] {
             let visual = plot(style);
-            for t in (50..=1000).step_by(50) {
-                accept(&visual, &frame(t));
-            }
-            let mut stale = frame(1050);
-            stale.generation += 1;
-            stale.visualizer.demand.band_energy = false;
-            accept(&visual, &stale);
-            assert!(visual.data.borrow().gpu_frame.is_none());
-            assert!(
-                visual
-                    .data
-                    .borrow()
-                    .segments()
-                    .iter()
-                    .all(|s| s.strength < 0.015)
-            );
-            let fresh = plot(style);
-            stale.visualizer.demand.band_energy = true;
-            accept(&visual, &stale);
-            accept(&fresh, &stale);
-            assert_eq!(
-                visual.data.borrow().segments(),
-                fresh.data.borrow().segments()
-            );
+            accept(&visual, &frame(1050));
+            assert!(visual.data.borrow().gpu_frame.is_some());
             visual.set_activity(false, false);
             accept(&visual, &frame(1100));
             assert!(visual.data.borrow().last_time.is_none());

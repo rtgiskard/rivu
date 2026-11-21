@@ -1517,33 +1517,15 @@ mod tests {
     }
 
     fn press(cx: &mut TestAppContext, handle: AnyWindowHandle, position: Point<Pixels>) {
-        use gpui::InputEvent as _;
         cx.update_window(handle, |_, window, cx| {
-            window.dispatch_event(
-                MouseDownEvent {
-                    button: MouseButton::Left,
-                    position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
+            test_support::press_left(window, cx, position)
         })
         .unwrap();
     }
 
     fn release(cx: &mut TestAppContext, handle: AnyWindowHandle, position: Point<Pixels>) {
-        use gpui::InputEvent as _;
         cx.update_window(handle, |_, window, cx| {
-            window.dispatch_event(
-                MouseUpEvent {
-                    button: MouseButton::Left,
-                    position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
+            test_support::release_left(window, cx, position)
         })
         .unwrap();
         draw(cx, handle);
@@ -1590,24 +1572,12 @@ mod tests {
     fn accepted_graph_ack_without_fresh_read_cannot_settle_undo(cx: &mut TestAppContext) {
         let (_directory, _runtime, processing, _window) = fixture(cx);
         processing.update(cx, |this, cx| {
-            let before = this.state.system.config.processing_graph.clone();
-            this.graph_editor.undo.push_back(before.clone());
-            this.graph_editor.pending = Some(PendingEdit {
-                before: before.clone(),
-                action: HistoryAction::Edit,
-                submitted: Vec::new(),
-                equalizer_submitted: None,
-                equalizer_target: None,
-                accepted: false,
-                observed: false,
-                observation_after: None,
-                select_after: None,
-            });
+            stage_pending_draft(this, cx);
             // A previously seen publication is not a post-command observation.
             let mut state = (*this.state).clone();
             Arc::make_mut(&mut state.system.config)
                 .processing_graph
-                .revision = before.revision + 1;
+                .revision += 1;
             this.state = Rc::new(state);
             this.graph_ack(rivu_protocol::response::AckStatus::Succeeded, false, cx);
             this.reconcile_graph(cx);
@@ -1615,7 +1585,7 @@ mod tests {
             assert!(pending.accepted);
             assert!(!pending.observed);
             assert_eq!(this.graph_editor.undo.len(), 1);
-            assert!(this.graph_editor.redo.is_empty());
+            assert_eq!(this.graph_editor.redo.len(), 1);
         });
     }
 
@@ -1759,6 +1729,27 @@ mod tests {
         assert_eq!(committed.processing_graph.revision, revision + 1);
     }
 
+    fn publish_after_profile_render(
+        runtime: &CoreRuntime,
+        processing: &Entity<AudioProcessing>,
+        latest: GraphNodeKind,
+        cx: &mut TestAppContext,
+    ) -> Rc<GuiSnapshot> {
+        replace_backend_node(
+            runtime,
+            GraphNodeKind::Denoise {
+                config: Default::default(),
+                profile: None,
+            },
+        );
+        let rendered = processing.update(cx, |this, cx| {
+            this.reconcile(this.context.snapshot(), cx);
+            Rc::clone(&this.state)
+        });
+        replace_backend_node(runtime, latest);
+        rendered
+    }
+
     #[gpui::test]
     async fn stale_rendered_profile_action_cannot_revert_newer_denoise_config_or_profile(
         cx: &mut TestAppContext,
@@ -1771,28 +1762,18 @@ mod tests {
                 end_seconds: 4.,
             }),
         ] {
-            replace_backend_node(
-                &runtime,
-                GraphNodeKind::Denoise {
-                    config: Default::default(),
-                    profile: None,
-                },
-            );
-            let rendered = processing.update(cx, |this, cx| {
-                this.reconcile(this.context.snapshot(), cx);
-                Rc::clone(&this.state)
-            });
             let config = rivu_dsp::denoise::DenoiseConfig {
                 spectral_gain_floor_db: -18.5,
                 ..Default::default()
             };
             let latest = GraphNodeKind::Denoise { config, profile };
-            replace_backend_node(&runtime, latest.clone());
+            let rendered = publish_after_profile_render(&runtime, &processing, latest.clone(), cx);
             let revision = runtime.handle.config_snapshot().processing_graph.revision;
             processing.update(cx, |this, cx| {
                 // Snapshot delivery can advance state before an old frame's callback fires.
                 this.reconcile(this.context.snapshot(), cx);
                 this.activate_graph_profile(3, &rendered, cx);
+                assert_eq!(this.pending, 0, "a stale callback must not submit");
             });
             wait_for_commands(cx, &processing, handle).await;
             let committed = runtime.handle.config_snapshot();
@@ -1804,19 +1785,9 @@ mod tests {
     #[gpui::test]
     fn profile_action_reconciles_newer_context_before_submitting(cx: &mut TestAppContext) {
         let (_directory, runtime, processing, _handle) = fixture(cx);
-        replace_backend_node(
+        let rendered = publish_after_profile_render(
             &runtime,
-            GraphNodeKind::Denoise {
-                config: Default::default(),
-                profile: None,
-            },
-        );
-        let rendered = processing.update(cx, |this, cx| {
-            this.reconcile(this.context.snapshot(), cx);
-            Rc::clone(&this.state)
-        });
-        replace_backend_node(
-            &runtime,
+            &processing,
             GraphNodeKind::Denoise {
                 config: Default::default(),
                 profile: Some(rivu_format::config::processing_graph::NoiseSelection {
@@ -1824,6 +1795,7 @@ mod tests {
                     end_seconds: 5.,
                 }),
             },
+            cx,
         );
         let revision = runtime.handle.config_snapshot().processing_graph.revision;
         processing.update(cx, |this, cx| {
@@ -1870,9 +1842,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn removed_workbench_ignores_events_from_its_last_frame(cx: &mut TestAppContext) {
-        use gpui::InputEvent as _;
-
+    fn panel_removal_retires_the_painted_workbench(cx: &mut TestAppContext) {
         struct WorkbenchWindow(Entity<AudioProcessing>);
         impl Render for WorkbenchWindow {
             fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1888,35 +1858,11 @@ mod tests {
         });
         let handle = workbench.into();
         draw(cx, handle);
-        cx.update_window(handle, |_, window, cx| {
-            processing.update(cx, |this, cx| {
-                this.sync_panels(&Default::default(), true, cx);
-                assert!(this.graph_editor.workbench.panel.is_none());
-            });
-            // Keep the rendered frame: these are the listeners from the removed panel.
-            window.dispatch_event(
-                MouseMoveEvent {
-                    position: point(px(40.), px(40.)),
-                    pressed_button: Some(MouseButton::Left),
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-            window.dispatch_event(
-                MouseUpEvent {
-                    button: MouseButton::Left,
-                    position: point(px(40.), px(40.)),
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-            processing.read_with(cx, |this, _| {
-                assert!(this.graph_editor.workbench.panel.is_none());
-            });
-        })
-        .unwrap();
+        processing.update(cx, |this, cx| {
+            assert_eq!(this.graph_editor.workbench.panel, Some(PANEL));
+            this.sync_panels(&Default::default(), true, cx);
+            assert!(this.graph_editor.workbench.panel.is_none());
+        });
     }
 
     #[gpui::test]
@@ -2537,7 +2483,7 @@ mod tests {
             this.command_active = true;
             let state = Rc::make_mut(&mut this.state);
             Arc::make_mut(&mut state.system.config).processing_bypassed = true;
-            state.current_track = Some(Arc::new(crate::test_support::artwork_track(
+            state.current_track = Some(Arc::new(rivu_protocol::test_support::artwork_track(
                 "source.wav".into(),
             )));
             this.graph_editor.selected = Some(1);

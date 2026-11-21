@@ -2005,7 +2005,7 @@ mod tests {
             (format!("{root}/boundaries/0"), json!(0.6)),
             (format!("{root}/boundaries"), json!([])),
             (format!("{root}/children/0/active"), json!(0)),
-            (format!("{root}/children/0/panels/0/kind"), json!("custom")),
+            (format!("{root}/children/1/panels/0/kind"), json!("custom")),
             (format!("{root}/children/0/panels/1/show_tab_bar"), json!(false)),
             (format!("{root}/children/0/panels/0/style"), json!("rings")),
             (format!("{root}/children/0/panels/0/reference_lines"), json!(false)),
@@ -2023,20 +2023,6 @@ mod tests {
                     replacement;
             } else {
                 *changed.pointer_mut(&path).unwrap() = replacement;
-            }
-            // Changing the kind also removes options that do not belong to it.
-            if path.ends_with("/kind") {
-                let panel = changed["layouts"]["Work"]["root"]["children"][0]["panels"][0]
-                    .as_object_mut()
-                    .unwrap();
-                for key in [
-                    "style",
-                    "reference_lines",
-                    "labels",
-                    "oscilloscope_overlay_channels",
-                ] {
-                    panel.remove(key);
-                }
             }
             let changed = decoded(changed).unwrap();
             assert!(!original.persisted_eq(&changed), "{path}");
@@ -2822,37 +2808,6 @@ mod tests {
     }
 
     #[test]
-    fn measured_reconciliation_preserves_untouched_sibling_pixels_after_local_insertion() {
-        let mut layout = Layout {
-            next_id: 20,
-            locked: false,
-            root: Some(split(
-                1,
-                Axis::Horizontal,
-                vec![tabs(2, "a"), tabs(4, "b"), tabs(6, "c")],
-                &[0.6, 0.8],
-            )),
-        };
-        let incoming = layout.add("incoming", Some(4));
-        let incoming_tabs = layout.next_id;
-        assert!(layout.move_panel(incoming, 4, Edge::Right, None));
-        let sizes = std::collections::HashMap::from([
-            (1, (1010.0, 500.0)),
-            (2, (600.0, 500.0)),
-            (4, (97.5, 500.0)),
-            (incoming_tabs, (97.5, 500.0)),
-            (6, (200.0, 500.0)),
-        ]);
-        layout.preserve_region_sizes(&sizes, 5.0);
-        let spans: Vec<_> = split_geometry(boundaries(&layout), 4, 1010.0, 5.0, 2.0).collect();
-        assert_eq!(
-            spans.iter().map(|span| span.1).collect::<Vec<_>>(),
-            vec![600.0, 97.5, 97.5, 200.0]
-        );
-        layout.validate().unwrap();
-    }
-
-    #[test]
     fn loading_does_not_restore_deleted_templates_or_replace_user_layouts() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("layout.json");
@@ -3053,44 +3008,28 @@ mod tests {
 
     #[test]
     fn artwork_persistence_rejects_incomplete_invalid_and_misplaced_options() {
+        fn reject_artwork(kind: &str, artwork: &Value, label: &str) {
+            let root = json!({"type":"tabs", "panels":[{"kind":kind, "artwork":artwork}]});
+            assert!(decoded(one_layout(root)).is_err(), "{label}");
+        }
         let valid = serde_json::to_value(artwork_options(rivu_format::config::ArtworkStyle::Plain))
             .unwrap();
         for field in ["style", "mode", "direction", "period_seconds"] {
             let mut incomplete = valid.clone();
             incomplete.as_object_mut().unwrap().remove(field);
-            assert!(
-                decoded(one_layout(
-                    json!({"type":"tabs", "panels":[{"kind":"artwork", "artwork":incomplete}]})
-                ))
-                .is_err()
-            );
+            reject_artwork("artwork", &incomplete, &format!("missing {field}"));
         }
         for period in [json!(0), json!(-1), json!(null), json!("20")] {
             let mut invalid = valid.clone();
-            invalid["period_seconds"] = period;
-            assert!(
-                decoded(one_layout(
-                    json!({"type":"tabs", "panels":[{"kind":"artwork", "artwork":invalid}]})
-                ))
-                .is_err()
-            );
+            invalid["period_seconds"] = period.clone();
+            reject_artwork("artwork", &invalid, &format!("period {period}"));
         }
         for kind in ["library", "audio_visualizer"] {
-            assert!(
-                decoded(one_layout(
-                    json!({"type":"tabs", "panels":[{"kind":kind, "artwork":valid}]})
-                ))
-                .is_err()
-            );
+            reject_artwork(kind, &valid, kind);
         }
         let mut unknown = valid;
         unknown["fps"] = json!(60);
-        assert!(
-            decoded(one_layout(
-                json!({"type":"tabs", "panels":[{"kind":"artwork", "artwork":unknown}]})
-            ))
-            .is_err()
-        );
+        reject_artwork("artwork", &unknown, "unknown key");
     }
 
     #[test]

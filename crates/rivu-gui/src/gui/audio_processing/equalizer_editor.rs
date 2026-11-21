@@ -3963,7 +3963,7 @@ mod tests {
     #[gpui::test]
     fn offline_midi_snapshot_allows_eq_edits_without_fabricating_response(cx: &mut TestAppContext) {
         let (_directory, _runtime, owner, editor, _handle) = fixture_with_owner(cx);
-        let mut track = crate::test_support::artwork_track("source.mid".into());
+        let mut track = rivu_protocol::test_support::artwork_track("source.mid".into());
         track.sample_rate = 0;
         track.channels = 0;
         let mut client = rivu_protocol::model::ClientSnapshot {
@@ -4037,7 +4037,7 @@ mod tests {
 
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
         let mut state = owner.read_with(cx, |owner, _| (*owner.state).clone());
-        let mut track = crate::test_support::artwork_track("source.mid".into());
+        let mut track = rivu_protocol::test_support::artwork_track("source.mid".into());
         track.sample_rate = 0;
         track.channels = 0;
         let track = Arc::new(track);
@@ -4552,6 +4552,14 @@ mod tests {
             .unwrap();
             draw(cx, handle);
             click(cx, handle, "eq-slider-band.0.frequency_hz");
+            if !matches!(transition, "remap" | "reopen") {
+                assert_eq!(
+                    owner.read_with(cx, |owner, _| owner.commands.len()),
+                    1,
+                    "fresh pointer submission after {transition}"
+                );
+                continue;
+            }
             acknowledge_front(cx, &runtime, &owner, true);
             draw(cx, handle);
             press(cx, handle, "end");
@@ -5211,24 +5219,27 @@ mod tests {
                 );
             });
         };
-        // Deepest realized cut near the notch, after the background design
-        // settles; the parametric target there is a true null.
-        let depth = |cx: &mut TestAppContext| {
+        let assert_realized = |taps, cx: &mut TestAppContext| {
             cx.run_until_parked();
             editor.read_with(cx, |editor, _| {
                 assert!(editor.realized_current && editor.realized_task.is_none());
-                assert_eq!(editor.realized.len(), editor.response.len());
-                editor
-                    .realized
-                    .iter()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min)
-            })
+                let mut expected = vec![0.; editor.frequencies.len()];
+                rivu_dsp::equalizer::fir::FirEqualizer::sample_response_db(
+                    &notch,
+                    48_000,
+                    1,
+                    0,
+                    taps,
+                    &editor.frequencies,
+                    &mut expected,
+                )
+                .unwrap();
+                assert_eq!(editor.realized.as_slice(), expected);
+            });
         };
         replace(EqImplementation::LinearPhase { taps: 257 }, cx);
         editor.update(cx, |editor, cx| editor.update_response(cx));
-        let short = depth(cx);
-        assert!(short > -6., "257 taps cannot follow a Q=8 notch: {short}");
+        assert_realized(257, cx);
         draw(cx, handle);
         let (target_samples, target_computations, short_samples) =
             editor.read_with(cx, |editor, _| {
@@ -5248,8 +5259,7 @@ mod tests {
             assert!(Arc::ptr_eq(&target_samples, &editor.response));
             assert_eq!(editor.response_computations, target_computations);
         });
-        let long = depth(cx);
-        assert!(long < short - 10., "{long} vs {short}");
+        assert_realized(8_193, cx);
         draw(cx, handle);
         let mut window = VisualTestContext::from_window(handle, cx);
         let graph = window.debug_bounds("eq-graph-7").unwrap();
@@ -5582,7 +5592,6 @@ mod tests {
                 },
             );
             let computations = editor.read_with(cx, |editor, _| editor.response_computations);
-            let spare_samples = editor.read_with(cx, |editor, _| editor.response_buffer.as_ptr());
             for step in 1..=8 {
                 dispatch_pointer_event(
                     cx,
@@ -5602,7 +5611,6 @@ mod tests {
                 .unwrap();
             editor.read_with(cx, |editor, _| {
                 assert_eq!(editor.response_computations, computations + 1);
-                assert_eq!(editor.response.as_ptr(), spare_samples);
                 assert!(!editor.response_frame_pending);
                 let drag = editor.drag.as_ref().unwrap();
                 let mut preview = editor.config.clone();

@@ -1,5 +1,44 @@
 use super::*;
 
+pub fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
+    let counts: Vec<_> = peaks
+        .iter()
+        .map(|value| u64::from(value.is_some()))
+        .collect();
+    WaveformFrame {
+        revision: 1,
+        path: Some(PathBuf::from("track.flac")),
+        duration: Some(10.0),
+        span_seconds: 10.0,
+        bin_frames: 80_000,
+        bin_count: peaks.len() as u64,
+        identity: Some(WaveformIdentity {
+            content: None,
+            sample_rate: 8_000,
+        }),
+        max_peak: peaks.iter().flatten().copied().fold(1.0, f32::max),
+        bin_revisions: counts.clone(),
+        rms_counts: counts.clone(),
+        left_rms_counts: counts.clone(),
+        right_rms_counts: counts,
+        rms: peaks.clone(),
+        left_peaks: peaks.clone(),
+        right_peaks: peaks.clone(),
+        left_rms: peaks.clone(),
+        right_rms: peaks.clone(),
+        peaks,
+        ..WaveformFrame::default()
+    }
+}
+
+pub fn track(path: &str, decoder_hint: DecoderHint) -> Track {
+    Track {
+        duration: Some(10.0),
+        decoder_hint,
+        ..rivu_protocol::test_support::track(1, path)
+    }
+}
+
 /// In-memory fixture access for application-owner integration tests.
 /// This module is unavailable in normal builds.
 impl Waveform {
@@ -44,14 +83,6 @@ impl Waveform {
             .borrow_mut()
             .panels
             .insert(id, (bounds, Some(duration)));
-    }
-
-    pub fn test_seek_seconds(&self, position: Point<Pixels>, panel: Option<u64>) -> Option<f64> {
-        self.interaction.borrow().seek_seconds(position, panel)
-    }
-
-    pub fn test_seek_duration(&mut self, duration: f64) {
-        self.interaction.borrow_mut().seek_duration = Some(duration);
     }
 
     pub fn test_remove_panel(&mut self, id: u64) -> Option<u64> {

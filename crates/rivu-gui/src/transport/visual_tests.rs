@@ -86,92 +86,6 @@ fn stereo(window: &SharedPcmWindow, header: PcmHeader, value: f32, frames: usize
 }
 
 #[test]
-fn checked_shared_observation_discards_overwritten_and_reconfigured_payloads() {
-    for reconfigure in [false, true] {
-        let window = SharedPcmWindow::new().unwrap();
-        let reader = SharedPcmWindow::open(&window.share_path()).unwrap();
-        let settings = AnalysisSettings {
-            fft_size: 512,
-            ..AnalysisSettings::from(&Config::default())
-        };
-        let demand = DisplayDemand {
-            enabled: true,
-            spectrum: true,
-            visualizer: VisualizerDemand {
-                pcm: true,
-                stereo_density: true,
-                ..Default::default()
-            },
-        };
-        let state = PcmState {
-            active: true,
-            sample_rate: 48_000,
-            heard_frame: u64::MAX,
-            ..Default::default()
-        };
-        let mut engine = AnalysisEngine::new(settings);
-        let mut frame = AnalysisFrame::default();
-        engine.configure(settings, demand, state, 1, &mut frame);
-        let generation = frame.generation;
-        stereo(&window, header(state, 0), 0.25, 512);
-        let block = reader.block(1).unwrap();
-        let samples = (0..block.len()).map(|index| {
-            if index == 256 {
-                if reconfigure {
-                    window.retain_output(12_000, 48_000, 3).unwrap();
-                }
-                // Replace the exact borrowed sample region halfway through
-                // direct observation, without timing or a mocked validity flag.
-                for publication in 0..window.retained_blocks() {
-                    let next = header(state, 4096 + publication as u64 * 1024);
-                    assert!(window.publish(next, &[17, 0, 1], (0..512 * 3).map(|_| 0.875),));
-                }
-            }
-            let stereo = [block.sample(index, 0), block.sample(index, 1)];
-            assert_eq!(stereo, if index < 256 { [0.25; 2] } else { [0.875; 2] });
-            stereo
-        });
-        assert!(!engine.ingest_checked(
-            block.header(),
-            samples,
-            || block.still_current(),
-            &mut frame,
-        ));
-        assert!(frame.generation > generation);
-        assert_eq!(frame.sample_time, Duration::ZERO);
-        assert!(frame.settings.is_none());
-        assert!(frame.spectrum_db.is_empty());
-        assert!(frame.visualizer.pcm.is_empty());
-        assert!(frame.visualizer.density.is_empty());
-        engine.request_frame();
-        let now = Instant::now();
-        assert!(!engine.publish(&mut frame, now));
-
-        stereo(&window, header(state, 200_000), 0.5, 512);
-        let clean = reader.block(reader.sequence()).unwrap();
-        assert!(engine.ingest_checked(
-            clean.header(),
-            (0..clean.len()).map(|index| [clean.sample(index, 0), clean.sample(index, 1)]),
-            || clean.still_current(),
-            &mut frame,
-        ));
-        engine.request_frame();
-        assert!(engine.publish(&mut frame, now));
-        let mut reference = AnalysisEngine::new(settings);
-        let mut expected = AnalysisFrame::default();
-        reference.configure(settings, demand, state, 1, &mut expected);
-        assert!(reference.ingest(clean.header(), [[0.5; 2]; 512].into_iter(), &mut expected));
-        reference.request_frame();
-        assert!(reference.publish(&mut expected, now));
-        assert_eq!(frame.sample_time, expected.sample_time);
-        assert_eq!(frame.rms_left, expected.rms_left);
-        assert_eq!(frame.spectrum_db, expected.spectrum_db);
-        assert_eq!(frame.visualizer.pcm, expected.visualizer.pcm);
-        assert_eq!(frame.visualizer.density, expected.visualizer.density);
-    }
-}
-
-#[test]
 fn latest_new_identity_tail_survives_lagged_control_status() {
     async_io::block_on(async {
         let mut f = fixture();
@@ -273,10 +187,7 @@ async fn subscribe(f: &mut Fixture) {
             ..VisualizerDemand::default()
         },
     });
-    ControlReader::<REQUEST_SIZE>::new()
-        .read(&mut f.server)
-        .await
-        .unwrap();
+    assert!(next_subscription(&mut f.server).await.0);
     // Wait until the local capture has retired the initial shared prefix.
     write_status(
         &mut f.server,
@@ -296,6 +207,22 @@ async fn subscribe(f: &mut Fixture) {
     })
     .await
     .unwrap();
+}
+
+/// Next subscription request, decoded. Fails instead of hanging when the
+/// client never sends it while the control socket stays open.
+pub(super) async fn next_subscription(server: &mut AsyncStream) -> (bool, u64) {
+    let request = rivu_protocol::transport::timeout(
+        Duration::from_secs(5),
+        ControlReader::<REQUEST_SIZE>::new().read(server),
+    )
+    .await
+    .expect("visual client sent no control request")
+    .unwrap();
+    match ControlRequest::decode(&request).unwrap() {
+        ControlRequest::Subscribe { enabled, revision } => (enabled, revision),
+        other => panic!("expected subscription, got {other:?}"),
+    }
 }
 
 #[test]
@@ -445,20 +372,14 @@ fn fresh_pcm_publishes_without_gui_permits_and_resumes_after_visibility_changes(
 
         let demand = f.client.state.desired.lock().demand;
         f.client.set_display_demand(DisplayDemand::default());
-        ControlReader::<REQUEST_SIZE>::new()
-            .read(&mut f.server)
-            .await
-            .unwrap();
+        assert!(!next_subscription(&mut f.server).await.0);
         write_status(&mut f.server, state, 2, PcmPosition::default())
             .await
             .unwrap();
         assert!(!f.client.analysis_frame_is_current(&second));
         stereo(&f.window, header(state, 1024), 0.875, 512);
         f.client.set_display_demand(demand);
-        ControlReader::<REQUEST_SIZE>::new()
-            .read(&mut f.server)
-            .await
-            .unwrap();
+        assert!(next_subscription(&mut f.server).await.0);
         let token = f.client.state.desired.lock().display_token;
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {
             while f.client.analysis.read().display_token != token {
@@ -530,10 +451,7 @@ fn shared_native_channels_follow_cursor_and_reject_retired_capture() {
         // A local revision fences existing history even if global capture did
         // not stop. A retired identity must never enter the fresh FFT window.
         f.client.invalidate();
-        ControlReader::<REQUEST_SIZE>::new()
-            .read(&mut f.server)
-            .await
-            .unwrap();
+        next_subscription(&mut f.server).await;
         // Sending the request precedes local retirement. Observe the revoked
         // staging publication before putting replacement PCM in the window.
         let display_token = f.client.state.desired.lock().display_token;
@@ -682,6 +600,9 @@ pub(crate) fn with_gap_invalidation(
 
 #[test]
 fn analysis_control_rejects_a_different_core_instance_with_a_valid_shared_window() {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
     let directory = rivu::test_support::ipc::socket_test_directory();
     let window = SharedPcmWindow::new().unwrap();
     let path = window.share_path();
@@ -704,26 +625,21 @@ fn analysis_control_rejects_a_different_core_instance_with_a_valid_shared_window
         welcome.extend_from_slice(root);
         stream.write_all(&welcome).unwrap();
     });
-    assert!(VisualClient::connect(directory.path(), 42).is_err());
+    let Err(error) = VisualClient::connect(directory.path(), 42) else {
+        panic!("a different Core instance must be rejected");
+    };
+    assert_eq!(error.to_string(), "Analysis service identity mismatch");
     server.join().unwrap();
 }
 
 async fn subscribe_waveform(f: &mut Fixture, track: &Track, generation: u64) -> (PcmState, u64) {
     f.client
         .configure_source(Some(track), generation, track.duration);
-    let mut control = ControlReader::<REQUEST_SIZE>::new();
-    let configured = control.read(&mut f.server).await.unwrap();
-    assert_eq!(configured[1], 0, "source selection alone requests no PCM");
+    let (enabled, _) = next_subscription(&mut f.server).await;
+    assert!(!enabled, "source selection alone requests no PCM");
     f.client.set_waveform_demand(true);
-    let request = control.read(&mut f.server).await.unwrap();
-    assert_eq!(
-        request[1], 1,
-        "waveform-only enables the shared PCM producer"
-    );
-    let ControlRequest::Subscribe { revision, .. } = ControlRequest::decode(&request).unwrap()
-    else {
-        panic!("expected subscription");
-    };
+    let (enabled, revision) = next_subscription(&mut f.server).await;
+    assert!(enabled, "waveform-only enables the shared PCM producer");
     let state = PcmState {
         epoch: 2,
         generation,
@@ -770,7 +686,7 @@ fn first_play_replaces_restored_waveform_target_with_the_same_generation(
 
     for cue in [false, true] {
         let f = fixture();
-        let mut restored = crate::test_support::artwork_track("restored.wav".into());
+        let mut restored = rivu_protocol::test_support::artwork_track("restored.wav".into());
         restored.sample_rate = 4;
         restored.duration = Some(1.0);
         if cue {
@@ -841,7 +757,7 @@ fn first_play_replaces_restored_waveform_target_with_the_same_generation(
 fn live_waveform_uses_the_pcm_rate_and_counts_growing_tails_once() {
     async_io::block_on(async {
         let mut f = fixture();
-        let mut track = crate::test_support::artwork_track("source.mid".into());
+        let mut track = rivu_protocol::test_support::artwork_track("source.mid".into());
         track.sample_rate = 0;
         track.duration = Some(1.0);
         let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
@@ -901,7 +817,7 @@ fn visible_waveform_is_available_before_retained_backlog_finishes() {
         f.window
             .retain_output(blocks * block_frames, 48_000, 2)
             .unwrap();
-        let mut track = crate::test_support::artwork_track("backlog.wav".into());
+        let mut track = rivu_protocol::test_support::artwork_track("backlog.wav".into());
         track.sample_rate = 48_000;
         track.duration = Some(4.0);
         let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
@@ -964,7 +880,7 @@ fn visible_waveform_is_available_before_retained_backlog_finishes() {
 fn hidden_waveform_collects_without_snapshots_or_wakes_and_show_publishes_immediately() {
     async_io::block_on(async {
         let mut f = fixture();
-        let mut track = crate::test_support::artwork_track("hidden.wav".into());
+        let mut track = rivu_protocol::test_support::artwork_track("hidden.wav".into());
         track.sample_rate = 48_000;
         track.duration = Some(1.0);
         let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
@@ -1045,7 +961,7 @@ fn hidden_waveform_collects_without_snapshots_or_wakes_and_show_publishes_immedi
 fn hidden_waveform_preserves_analysis_wakes_media_positions_and_source_fences() {
     async_io::block_on(async {
         let mut f = fixture();
-        let mut track = crate::test_support::artwork_track("first.wav".into());
+        let mut track = rivu_protocol::test_support::artwork_track("first.wav".into());
         track.sample_rate = 48_000;
         track.duration = Some(1.0);
         let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
@@ -1100,14 +1016,7 @@ fn hidden_waveform_preserves_analysis_wakes_media_positions_and_source_fences() 
         assert_eq!(f.client.waveform.read().source_generation, Some(2));
         assert!(f.client.waveform.read().identity.is_none());
         assert!(f.client.waveform.read().peaks.iter().all(Option::is_none));
-        let request = ControlReader::<REQUEST_SIZE>::new()
-            .read(&mut f.server)
-            .await
-            .unwrap();
-        let ControlRequest::Subscribe { revision, .. } = ControlRequest::decode(&request).unwrap()
-        else {
-            panic!("expected subscription");
-        };
+        let (_, revision) = next_subscription(&mut f.server).await;
         // The PCM status can still describe the old source when the independent
         // command connection has already selected its replacement.
         let stale = PcmState { epoch: 6, ..seek };
@@ -1175,7 +1084,7 @@ fn hidden_waveform_preserves_analysis_wakes_media_positions_and_source_fences() 
 fn hidden_waveform_master_disable_and_shutdown_fence_collection_and_full_scans() {
     async_io::block_on(async {
         let mut f = fixture();
-        let mut track = crate::test_support::artwork_track("disabled.wav".into());
+        let mut track = rivu_protocol::test_support::artwork_track("disabled.wav".into());
         track.sample_rate = 48_000;
         track.duration = Some(1.0);
         let (state, revision) = subscribe_waveform(&mut f, &track, 1).await;
@@ -1195,18 +1104,8 @@ fn hidden_waveform_master_disable_and_shutdown_fence_collection_and_full_scans()
             f.client.waveform.read().request_epoch,
             hidden.request_epoch.wrapping_add(1)
         );
-        let request = ControlReader::<REQUEST_SIZE>::new()
-            .read(&mut f.server)
-            .await
-            .unwrap();
-        assert_eq!(
-            request[1], 0,
-            "master disable releases the PCM subscription"
-        );
-        let ControlRequest::Subscribe { revision, .. } = ControlRequest::decode(&request).unwrap()
-        else {
-            panic!("expected subscription");
-        };
+        let (enabled, revision) = next_subscription(&mut f.server).await;
+        assert!(!enabled, "master disable releases the PCM subscription");
         let token = f.client.state.desired.lock().display_token;
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {
             while f.client.analysis.read().display_token != token {

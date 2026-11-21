@@ -27,19 +27,7 @@ mod test_support {
         .save_fixture(&config_path)
         .unwrap();
         let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
-        let i18n = Arc::new(rivu_presentation::i18n::Localizer::new("en-US"));
-        let context = FeatureContext {
-            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
-                runtime.handle.clone(),
-            )),
-            labels: Rc::new(
-                i18n.fixed_texts()
-                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                    .collect(),
-            ),
-            i18n,
-            scroll: Default::default(),
-        };
+        let context = FeatureContext::for_test(runtime.handle.clone());
         let owner = cx.new(|cx| Library::new(context, cx));
         owner.update(cx, run);
     }
@@ -716,10 +704,9 @@ mod library_root_tests {
     use crate::test_support::CoreRuntime;
     use gpui::{Entity, IntoElement, VisualTestContext, point, px, size};
     use rivu_format::config::Config;
-    use rivu_presentation::i18n::Localizer;
     use rivu_protocol::model::ConfigMutation;
     use rivu_protocol::model::{Command, DirectoryRow};
-    use std::{path::PathBuf, sync::Arc};
+    use std::path::PathBuf;
 
     fn apply_config(handle: &FrontendHandle, change: ConfigMutation) {
         // Command and query IPC workers are independent. The command reply,
@@ -802,20 +789,7 @@ mod library_root_tests {
         .unwrap();
         cx.executor().allow_parking();
         let runtime = CoreRuntime::start(directory.path(), &config_path).unwrap();
-        let i18n = Arc::new(Localizer::new("en-US"));
-        let labels = std::rc::Rc::new(
-            i18n.fixed_texts()
-                .map(|(id, text)| (id.to_owned(), gpui::SharedString::from(text.to_owned())))
-                .collect(),
-        );
-        let context = FeatureContext {
-            snapshots: std::rc::Rc::new(crate::gui::feature::SnapshotSource::new(
-                runtime.handle.clone(),
-            )),
-            i18n,
-            labels,
-            scroll: Default::default(),
-        };
+        let context = FeatureContext::for_test(runtime.handle.clone());
         let (app, window) = cx.add_window_view(|_, cx| Library::new(context, cx));
         // Config ACKs publish authoritative snapshots before explicit refresh;
         // native query completion is awaited through the GPUI condition.

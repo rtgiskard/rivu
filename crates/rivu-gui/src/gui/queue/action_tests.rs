@@ -51,15 +51,7 @@ fn fixture(cx: &mut TestAppContext) -> Fixture {
     cx.executor().allow_parking();
     cx.update(rivu_ui::input::Input::init);
     let directory = tempfile::tempdir().unwrap();
-    let config = directory.path().join("config.toml");
-    rivu_format::config::Config {
-        volume: 0.0,
-        ffmpeg_enabled: false,
-        mpris_enabled: false,
-        ..Default::default()
-    }
-    .save_fixture(&config)
-    .unwrap();
+    let config = crate::test_support::save_quiet_config(directory.path());
     rivu::test_support::catalog::seed_playlist_targets(directory.path(), 1).unwrap();
     let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
     assert!(

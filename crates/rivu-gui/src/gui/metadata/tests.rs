@@ -1,9 +1,6 @@
 use super::*;
-use crate::test_support::ConfigFixture;
 use crate::test_support::CoreRuntime;
 use gpui::{EntityInputHandler, TestAppContext};
-use rivu_format::config::Config;
-use rivu_presentation::i18n::Localizer;
 use rivu_protocol::response::Ack;
 
 pub(super) fn track(id: i64, title: &str) -> Track {
@@ -80,24 +77,6 @@ fn source_peak_rejects_changed_selection_file_and_explicit_reload(cx: &mut TestA
     });
 }
 
-#[test]
-fn source_support_accepts_decoder_names_and_profiles() {
-    for (extension, codec, supported) in [
-        ("wav", "ADPCM_MS", true),
-        ("wav", "ADPCM_IMA_WAV", true),
-        ("aiff", "ADPCM_IMA_QT", true),
-        ("aac", "aac (LC)", true),
-        ("m4a", "aac (HE-AAC)", true),
-        ("flac", "dts (DTS-HD MA)", false),
-        ("m4a", "opus", false),
-    ] {
-        let mut target = track(1, "track");
-        target.path = format!("/track.{extension}").into();
-        target.codec = codec.into();
-        assert_eq!(source::source_support(Some(&target)).is_ok(), supported);
-    }
-}
-
 #[gpui::test]
 fn decoder_choice_does_not_close_or_submit_while_source_is_busy(cx: &mut TestAppContext) {
     use rivu_format::tags::TagEncoding;
@@ -132,30 +111,9 @@ fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<M
         crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
     });
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    Config {
-        volume: 0.0,
-        ffmpeg_enabled: false,
-        mpris_enabled: false,
-        ..Config::default()
-    }
-    .save_fixture(&path)
-    .unwrap();
-    let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
-    let i18n = Arc::new(Localizer::new("en-US"));
-    let context = FeatureContext {
-        snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
-            runtime.handle.clone(),
-        )),
-        labels: Rc::new(
-            i18n.fixed_texts()
-                .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                .collect(),
-        ),
-        i18n: i18n.clone(),
-        scroll: Default::default(),
-    };
-    let default_artwork = cx.new(|cx| DefaultArtwork::new(&i18n, cx));
+    let runtime = CoreRuntime::start_quiet(directory.path());
+    let context = FeatureContext::for_test(runtime.handle.clone());
+    let default_artwork = cx.new(|cx| DefaultArtwork::new(&context.i18n, cx));
     let metadata = cx.new(|cx| {
         Metadata::new(
             context,
@@ -199,10 +157,6 @@ fn bitrate_revision_retains_inline_text_and_queues_hidden_reload(cx: &mut TestAp
             this.reconcile(Rc::new(state), cx);
             assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
             assert!(!this.metadata.editable());
-            assert!(Arc::ptr_eq(
-                &this.metadata.track_snapshot().unwrap(),
-                &original
-            ));
             assert_eq!(
                 this.edit.as_ref().unwrap().input.read(cx).text(),
                 "local edit"
@@ -316,22 +270,15 @@ fn edit_text(
 
 fn ack(ok: bool) -> crate::frontend::CommandDelivery {
     crate::frontend::CommandDelivery {
-        ack: Ack {
-            status: if ok {
+        ack: Ack::new(
+            if ok {
                 rivu_protocol::response::AckStatus::Succeeded
             } else {
                 rivu_protocol::response::AckStatus::Failed
             },
-            error: (!ok).then(|| "save failed".into()),
-            revision: 0,
-            scan_id: None,
-            relocation_id: None,
-            processing_id: None,
-            database_optimization: None,
-            source_tags: None,
-            source_file_saved: false,
-            source_refresh_error: None,
-        },
+            (!ok).then(|| "save failed".into()),
+            0,
+        ),
         observation: crate::frontend::CommandObservation::Refreshed,
     }
 }
@@ -422,14 +369,30 @@ fn staged_replaygain_value_displays_and_clears_independently() {
 #[test]
 fn source_capability_uses_container_and_codec_hints_without_file_access() {
     let mut target = track(1, "supported");
+    for (extension, codec, supported) in [
+        ("flac", "FLAC", true),
+        ("wav", "ADPCM_MS", true),
+        ("wav", "ADPCM_IMA_WAV", true),
+        ("aiff", "ADPCM_IMA_QT", true),
+        ("aac", "aac (LC)", true),
+        ("m4a", "aac (HE-AAC)", true),
+        ("flac", "dts", false),
+        ("flac", "dts (DTS-HD MA)", false),
+        ("m4a", "opus", false),
+    ] {
+        target.path = format!("/does/not/exist/test.{extension}").into();
+        target.codec = codec.into();
+        assert_eq!(
+            source::source_support(Some(&target)),
+            if supported {
+                Ok(())
+            } else {
+                Err(source::SupportReason::Unsupported)
+            },
+            "{extension} / {codec}"
+        );
+    }
     target.path = "/does/not/exist/test.flac".into();
-    target.codec = "FLAC".into();
-    assert_eq!(source::source_support(Some(&target)), Ok(()));
-    target.codec = "dts".into();
-    assert_eq!(
-        source::source_support(Some(&target)),
-        Err(source::SupportReason::Unsupported)
-    );
     target.codec = "flac".into();
     target.missing = true;
     assert_eq!(
@@ -454,7 +417,7 @@ fn source_capability_uses_container_and_codec_hints_without_file_access() {
 }
 
 #[gpui::test]
-fn file_load_stages_six_values_even_when_observation_is_unavailable(cx: &mut TestAppContext) {
+fn file_load_stages_all_tags_even_when_observation_is_unavailable(cx: &mut TestAppContext) {
     use rivu_format::tags::TagEncoding;
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
@@ -1125,16 +1088,16 @@ fn hiding_details_releases_cached_artwork_until_revealed(cx: &mut TestAppContext
         artwork_selection(this, selected, cx);
         this.visible = true;
         this.prepare_artwork(cx);
-        assert!(this.artwork_view.image(cx).is_some());
+        assert!(this.artwork_view.sizing(0).is_some());
 
         this.set_visible(false, cx);
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
         this.prepare_artwork(cx);
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
 
         this.set_visible(true, cx);
         this.prepare_artwork(cx);
-        assert!(this.artwork_view.image(cx).is_some());
+        assert!(this.artwork_view.sizing(0).is_some());
         assert_eq!(this.metadata.identity(), Some(7));
     });
 }
@@ -1158,7 +1121,7 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
         artwork_selection(this, selected.clone(), cx);
         this.visible = true;
         this.prepare_artwork(cx);
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
         assert!(
             this.artwork_loader
                 .prepare(crate::artwork_source(&selected))
@@ -1171,7 +1134,7 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
     metadata.update(cx, |this, cx| {
         this.set_visible(true, cx);
         this.prepare_artwork(cx);
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
     });
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
@@ -1180,14 +1143,14 @@ fn completed_negative_artwork_keeps_fallback_when_details_reopen(cx: &mut TestAp
                 .cached_result(crate::artwork_source(&selected)),
             Some(None)
         );
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
         this.prepare_artwork(cx);
         assert!(
             this.artwork_loader
                 .prepare(crate::artwork_source(&selected))
                 .is_none()
         );
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
     });
 }
 
@@ -1229,15 +1192,15 @@ fn visible_details_keep_negative_artwork_after_shared_cache_eviction(cx: &mut Te
                 .cached_result(crate::artwork_source(&selected))
                 .is_none()
         );
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
         // Hiding releases the negative identity. Revealing cold demand may probe again.
         this.set_visible(false, cx);
         this.set_visible(true, cx);
         this.prepare_artwork(cx);
     });
     cx.run_until_parked();
-    metadata.update(cx, |this, cx| {
-        assert!(this.artwork_view.image(cx).is_some());
+    metadata.update(cx, |this, _| {
+        assert!(this.artwork_view.sizing(0).is_some());
     });
 }
 
@@ -1301,7 +1264,7 @@ fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAp
         );
         this.set_visible(true, cx);
         this.prepare_artwork(cx);
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
     });
     cx.run_until_parked();
     metadata.update(cx, |this, cx| {
@@ -1343,19 +1306,19 @@ fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAp
                 .cached_result(crate::artwork_source(&replacement))
                 .is_none()
         );
-        assert!(this.artwork_view.image(cx).is_none());
+        assert!(this.artwork_view.sizing(0).is_none());
         assert_eq!(this.metadata.identity(), Some(8));
         this.set_visible(true, cx);
         this.prepare_artwork(cx);
     });
     cx.run_until_parked();
-    metadata.update(cx, |this, cx| {
+    metadata.update(cx, |this, _| {
         assert!(
             this.artwork_manager
                 .cached_result(crate::artwork_source(&replacement))
                 .is_some()
         );
-        assert!(this.artwork_view.image(cx).is_some());
+        assert!(this.artwork_view.sizing(0).is_some());
         assert_eq!(this.metadata.identity(), Some(8));
     });
 }

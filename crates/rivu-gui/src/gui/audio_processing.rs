@@ -35,10 +35,8 @@ use export::ExportState;
 #[cfg(test)]
 mod test_support {
     use super::*;
-    use crate::gui::feature::SnapshotSource;
     use crate::test_support::{ConfigFixture, CoreRuntime};
     use rivu_format::config::Config;
-    use rivu_presentation::i18n::Localizer;
 
     pub(super) fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
         cx.run_until_parked();
@@ -46,31 +44,40 @@ mod test_support {
             .unwrap();
     }
 
-    pub(super) fn click(cx: &mut TestAppContext, handle: AnyWindowHandle, selector: &'static str) {
+    pub(super) fn press_left(window: &mut Window, cx: &mut App, position: Point<Pixels>) {
         use gpui::InputEvent as _;
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+    }
+
+    pub(super) fn release_left(window: &mut Window, cx: &mut App, position: Point<Pixels>) {
+        use gpui::InputEvent as _;
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+    }
+
+    pub(super) fn click(cx: &mut TestAppContext, handle: AnyWindowHandle, selector: &'static str) {
         let position = VisualTestContext::from_window(handle, cx)
             .debug_bounds(selector)
             .unwrap_or_else(|| panic!("missing painted control {selector}"))
             .center();
         cx.update_window(handle, |_, window, cx| {
-            window.dispatch_event(
-                MouseDownEvent {
-                    button: MouseButton::Left,
-                    position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-            window.dispatch_event(
-                MouseUpEvent {
-                    button: MouseButton::Left,
-                    position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
+            press_left(window, cx, position);
+            release_left(window, cx, position);
         })
         .unwrap();
         draw(cx, handle);
@@ -106,17 +113,7 @@ mod test_support {
         let path = directory.path().join("config.toml");
         config.save_fixture(&path).unwrap();
         let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
-        let i18n = Arc::new(Localizer::new("en-US"));
-        let context = FeatureContext {
-            snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
-            labels: Rc::new(
-                i18n.fixed_texts()
-                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                    .collect(),
-            ),
-            i18n,
-            scroll: Default::default(),
-        };
+        let context = FeatureContext::for_test(runtime.handle.clone());
         let owner = cx.new(|cx| AudioProcessing::new(context, cx));
         (directory, runtime, owner)
     }

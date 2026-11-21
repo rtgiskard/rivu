@@ -450,6 +450,10 @@ mod tests {
 
     #[test]
     fn nonregular_layout_is_rejected_and_preserved_on_flush() {
+        // Opening a writerless FIFO blocks forever if nonblocking admission regresses.
+        if rivu_utils::test_support::run_in_subprocess(WAIT) {
+            return;
+        }
         use std::{ffi::CString, os::unix::fs::symlink};
 
         let directory = tempfile::tempdir().unwrap();
@@ -672,17 +676,10 @@ mod tests {
 
     #[test]
     fn failed_atomic_replacement_keeps_disk_and_latest_named_state_can_retry() {
-        use std::{
-            fs,
-            sync::atomic::{AtomicU64, Ordering},
-        };
-        static ID: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "rivu-layout-owner-{}-{}",
-            std::process::id(),
-            ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&directory).unwrap();
+        use std::fs;
+        // Declared before the owner so that the worker is dropped first.
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path();
         let path = directory.join("layout.json");
         let original = named("original");
         original.save(&path).unwrap();
@@ -715,7 +712,7 @@ mod tests {
         assert_eq!(fs::read(path.join("keep")).unwrap(), b"unchanged");
         assert_eq!(fs::read(&backup).unwrap(), previous);
         assert_eq!(handle.snapshot().0.active_name(), "latest");
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
         fs::remove_dir_all(&path).unwrap();
         fs::rename(&backup, &path).unwrap();
         owner.flush().unwrap();
@@ -724,7 +721,5 @@ mod tests {
             LayoutSet::load(&path).unwrap().names().collect::<Vec<_>>(),
             ["latest"]
         );
-        drop(owner);
-        fs::remove_dir_all(directory).unwrap();
     }
 }

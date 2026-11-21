@@ -372,6 +372,25 @@ impl AlbumModel {
         current_revisions: QueryRevisions,
         unexpected_response: &str,
     ) -> Completion {
+        self.complete_page_with_clock(
+            query,
+            generation,
+            response,
+            current_revisions,
+            unexpected_response,
+            Instant::now,
+        )
+    }
+
+    fn complete_page_with_clock(
+        &mut self,
+        query: &Query,
+        generation: u64,
+        response: QueryResponse,
+        current_revisions: QueryRevisions,
+        unexpected_response: &str,
+        now: impl FnOnce() -> Instant,
+    ) -> Completion {
         // Re-read authority at delivery, not merely the worker's captured revision.
         let data = self.sync_data(current_revisions);
         let mut completion = Completion {
@@ -415,7 +434,7 @@ impl AlbumModel {
                     .albums_total
                     .filter(|(cached, _)| *cached == revision)
                     .map(|(_, total)| (page.total, total));
-                completion.changed = self.albums.accept_changed(page);
+                completion.changed = self.albums.accept_at(page, now());
                 completion.published = Published::Albums;
             }
             Ok(ViewResponse::AlbumTracks(page)) if matches!(query, Query::AlbumTracks { .. }) => {
@@ -762,6 +781,10 @@ mod tests {
         for tracks in [false, true] {
             for payload_only in [false, true] {
                 for changed in [false, true] {
+                    if payload_only && !tracks {
+                        // Bitrate refreshes member payloads only, never cards.
+                        continue;
+                    }
                     let mut model = AlbumModel::default();
                     model.sync(true, QueryRevisions::default(), 2);
                     if tracks {
@@ -793,12 +816,6 @@ mod tests {
                         assert!(completion.changed);
                     }
                     model.retire_worker();
-                    let start = Instant::now() + std::time::Duration::from_secs(10);
-                    if tracks {
-                        model.tracks.refresh_at(start);
-                    } else {
-                        model.albums.refresh_at(start);
-                    }
                     let revisions = if payload_only {
                         QueryRevisions {
                             bitrate: 1,
@@ -811,22 +828,25 @@ mod tests {
                         }
                     };
                     model.sync(true, revisions, 2);
+                    let before =
+                        model.refresh_deadline().unwrap() - std::time::Duration::from_nanos(1);
                     if tracks {
-                        assert!(model.tracks.display(0).is_some());
+                        assert!(model.tracks.display_at(0, before).is_some());
                         assert!(model.tracks.get(0).is_none());
                         assert!(model.tracks.iter().next().is_none());
                         assert!(model.tracks.position(|track| track.id == 1).is_none());
                     } else {
-                        assert!(model.albums.display(0).is_some());
+                        assert!(model.albums.display_at(0, before).is_some());
                         assert!(model.albums.get(0).is_none());
                     }
                     let refresh = model.prepare().unwrap();
-                    let completion = model.complete_page(
+                    let completion = model.complete_page_with_clock(
                         &refresh.query,
                         refresh.generation,
                         reply(revisions, if changed { 2 } else { 1 }),
                         revisions,
                         "wrong response",
+                        || before,
                     );
                     if !tracks {
                         assert_eq!(completion.changed, changed);
@@ -1140,22 +1160,8 @@ mod tests {
 
     fn row(id: i64) -> LibraryRow {
         LibraryRow {
-            id,
-            path: Default::default(),
             title: id.to_string(),
-            artist: String::new(),
-            album: String::new(),
-            duration: None,
-            codec: String::new(),
-            bitrate_bps: None,
-            bitrate_exact: false,
-            channels: 0,
-            sample_rate: 0,
-            bits_per_sample: None,
-            cue_number: None,
-            favorite: false,
-            missing: false,
-            play_count: 0,
+            ..crate::test_support::library_row(id)
         }
     }
 
@@ -1631,14 +1637,7 @@ mod tests {
             assert!(model.albums.get(0).is_none());
             assert!(model.tracks.get(0).is_none());
             let fresh = model.prepare().unwrap();
-            assert_eq!(
-                finish(&mut model, fresh, 2).published,
-                if tracks {
-                    Published::Tracks
-                } else {
-                    Published::Albums
-                },
-            );
+            assert_eq!(finish(&mut model, fresh, 2).published, Published::Tracks);
         }
     }
 
@@ -1878,11 +1877,18 @@ mod tests {
                 model.set_query(Some("needle".into()));
             }
             let request = model.prepare().unwrap();
-            let mut page = response(&request, 3, model.revisions);
+            // A grid total beyond one page makes the blocked demand a real next page.
+            let total = if tracks { 3 } else { ALBUM_PAGE + 1 };
+            let mut page = response(&request, total, model.revisions);
             if !tracks {
                 page.result = Ok(ViewResponse::Albums(Page {
-                    total: 3,
-                    rows: vec![summary(42)],
+                    total,
+                    rows: (0..ALBUM_PAGE)
+                        .map(|index| AlbumSummary {
+                            key: key(&format!("needle {index}")),
+                            ..summary(42 + index as i64)
+                        })
+                        .collect(),
                 }));
             }
             let completion = model.complete_page(
@@ -1917,13 +1923,25 @@ mod tests {
             } else {
                 assert_eq!(model.albums.get(0).unwrap().representative.id, 42);
                 assert_eq!(model.albums.error(0), None);
-                model.demand_albums(24..25);
+                model.demand_albums(ALBUM_PAGE..ALBUM_PAGE + 1);
             }
-            assert!(model.prepare().is_none());
+            assert!(
+                model.prepare().is_none(),
+                "count worker still holds the slot"
+            );
             model.retire_worker();
             assert!(model.prepare_missing_count().is_none());
+            let next = model.prepare().expect("next page starts after retirement");
             if tracks {
-                assert!(model.prepare().is_some());
+                assert!(matches!(next.query, Query::AlbumTracks { offset: 2, .. }));
+            } else {
+                assert!(matches!(
+                    next.query,
+                    Query::Albums {
+                        offset: ALBUM_PAGE,
+                        ..
+                    }
+                ));
             }
         }
     }

@@ -2675,20 +2675,7 @@ mod tests {
         .unwrap();
         let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
         let config = runtime.handle.config_snapshot();
-        let i18n = Arc::new(Localizer::new("en-US"));
-        let text = Rc::new(
-            i18n.fixed_texts()
-                .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                .collect(),
-        );
-        let context = super::super::feature::FeatureContext {
-            snapshots: Rc::new(super::super::feature::SnapshotSource::new(
-                runtime.handle.clone(),
-            )),
-            i18n,
-            labels: text,
-            scroll: Default::default(),
-        };
+        let context = super::super::feature::FeatureContext::for_test(runtime.handle.clone());
         let settings = cx.new(|cx| {
             Settings::new(
                 context,
@@ -2726,7 +2713,15 @@ mod tests {
         (runtime.handle.config_snapshot(), result)
     }
 
-    pub(super) struct SettingsWindow(pub(super) Entity<Settings>);
+    pub(super) struct SettingsWindow(Entity<Settings>);
+
+    pub(super) fn open_window(
+        cx: &mut TestAppContext,
+        settings: &Entity<Settings>,
+    ) -> WindowHandle<SettingsWindow> {
+        let settings = settings.clone();
+        cx.add_window(move |_, _| SettingsWindow(settings))
+    }
 
     impl Render for SettingsWindow {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -2738,10 +2733,7 @@ mod tests {
     fn expanded_sidebar_scrolls_and_clamps_after_collapsing(cx: &mut TestAppContext) {
         let (_directory, _runtime, settings) = fixture(cx);
         settings.update(cx, |this, _| this.page = SettingsPage::Visualizations);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         cx.update_window(window.into(), |_, window, cx| {
             window.set_rem_size(px(40.));
             window.draw(cx).clear(cx);
@@ -2772,10 +2764,7 @@ mod tests {
         use gpui::InputEvent as _;
 
         let (_directory, _runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         let handle = window.into();
         cx.update_window(handle, |_, window, cx| {
             settings.update(cx, |this, cx| {
@@ -2828,13 +2817,13 @@ mod tests {
                 window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
             })
             .unwrap();
+            settings.update(cx, |this, _| {
+                assert!(this.dropdown.is_open());
+                assert_eq!(this.dropdown.selected_index(), Some(0));
+                assert_eq!(this.model.draft.ui_language, "auto");
+                assert!(this.active);
+            });
         }
-        settings.update(cx, |this, _| {
-            assert!(this.dropdown.is_open());
-            assert_eq!(this.dropdown.selected_index(), Some(0));
-            assert_eq!(this.model.draft.ui_language, "auto");
-            assert!(this.active);
-        });
         cx.update_window(handle, |_, window, cx| {
             window.dispatch_event(
                 KeyDownEvent {
@@ -2858,10 +2847,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (_directory, _runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         cx.update_window(window.into(), |_, window, cx| {
             settings.update(cx, |this, cx| {
                 this.set_value(Field::ArtworkPeriodSeconds, "1e", None, cx);
@@ -2923,143 +2909,76 @@ mod tests {
         });
     }
 
-    fn precise_config(base: &Config) -> Config {
-        Config {
-            spectrum_style: SpectrumStyle::Bars,
-            volume: 0.1234567,
-            play_count_threshold_percent: 23.456789123456,
-            ui_scale: 1.234567,
-            visualization_db_range: 81.23456,
-            reactive_sensitivity: 1.234567,
-            radial_rotation_speed: 0.456789,
-            radial_bar_width: 0.678912,
-            radial_ring_opacity: 0.789123,
-            reactive_bloom_intensity: 0.456789,
-            radial_inner_diameter: 0.789123,
-            reactive_db_range: Some(82.34567),
-            spectrum_db_range: Some(83.45678),
-            spectrum_gap: 2.345678,
-            spectrum_peak_gravity: 81.23456,
-            spectrum_bar_gravity: 41.23456,
-            spectrum_bar_layout: SpectrumBarLayout::Automatic { width: 4.567891 },
-            spectrogram_db_range: Some(84.56789),
-            waveform_glow: 0.456789,
-            waveform_rms_gain: 1.234567,
-            waveform_peak_gain: 1.234567,
-            waveform_peak_gamma: 1.234567,
-            artwork_period_seconds: 23.45678,
-            ..base.clone()
-        }
+    // Independent of the production fill and parse mappings. Each ordinary f32
+    // has a distinct value, so a swapped binding cannot round-trip unnoticed.
+    macro_rules! precision_fields {
+        ($($field:ident => $member:ident: $value:literal),+ $(,)?) => {
+            fn precise_config(base: &Config) -> Config {
+                Config {
+                    $($member: $value,)+
+                    spectrum_style: SpectrumStyle::Bars,
+                    volume: 0.1234567,
+                    play_count_threshold_percent: 23.456789123456,
+                    reactive_db_range: Some(82.34567),
+                    spectrum_db_range: Some(83.45678),
+                    spectrogram_db_range: Some(84.56789),
+                    spectrum_bar_layout: SpectrumBarLayout::Automatic { width: 4.567891 },
+                    ..base.clone()
+                }
+            }
+            fn assert_numeric_eq(actual: &Config, expected: &Config) {
+                $(assert_eq!(actual.$member.to_bits(), expected.$member.to_bits(), stringify!($field));)+
+                assert_eq!(actual.volume.to_bits(), expected.volume.to_bits(), "volume");
+                assert_eq!(actual.play_count_threshold_percent.to_bits(), expected.play_count_threshold_percent.to_bits(), "threshold");
+                for (field, a, b) in [
+                    (Field::ReactiveDbRange, actual.reactive_db_range, expected.reactive_db_range),
+                    (Field::SpectrumDbRange, actual.spectrum_db_range, expected.spectrum_db_range),
+                    (Field::SpectrogramDbRange, actual.spectrogram_db_range, expected.spectrogram_db_range),
+                ] {
+                    assert_eq!(a.map(f32::to_bits), b.map(f32::to_bits), "{field:?}");
+                }
+                assert_eq!(auto_width(actual).to_bits(), auto_width(expected).to_bits(), "automatic width");
+            }
+            fn numeric_texts(config: &Config) -> Vec<(Field, String)> {
+                vec![
+                    $((Field::$field, config.$member.to_string()),)+
+                    (Field::Volume, (config.volume * 100.).to_string()),
+                    (Field::PlayCountThreshold, config.play_count_threshold_percent.to_string()),
+                    (Field::ReactiveDbRange, config.reactive_db_range.unwrap().to_string()),
+                    (Field::SpectrumDbRange, config.spectrum_db_range.unwrap().to_string()),
+                    (Field::SpectrogramDbRange, config.spectrogram_db_range.unwrap().to_string()),
+                    (Field::SpectrumAutoWidth, auto_width(config).to_string()),
+                ]
+            }
+        };
     }
 
-    fn numeric_bits(config: &Config) -> Vec<u64> {
-        vec![
-            u64::from(config.volume.to_bits()),
-            config.play_count_threshold_percent.to_bits(),
-            u64::from(config.ui_scale.to_bits()),
-            u64::from(config.visualization_db_range.to_bits()),
-            u64::from(config.reactive_sensitivity.to_bits()),
-            u64::from(config.radial_rotation_speed.to_bits()),
-            u64::from(config.radial_bar_width.to_bits()),
-            u64::from(config.radial_ring_opacity.to_bits()),
-            u64::from(config.reactive_bloom_intensity.to_bits()),
-            u64::from(config.radial_inner_diameter.to_bits()),
-            u64::from(config.reactive_db_range.map_or(0, f32::to_bits)),
-            u64::from(config.spectrum_db_range.map_or(0, f32::to_bits)),
-            u64::from(config.spectrum_gap.to_bits()),
-            u64::from(config.spectrum_peak_gravity.to_bits()),
-            u64::from(config.spectrum_bar_gravity.to_bits()),
-            u64::from(match config.spectrum_bar_layout {
-                SpectrumBarLayout::Automatic { width } => width.to_bits(),
-                SpectrumBarLayout::Fixed { .. } => panic!("precision fixture uses automatic width"),
-            }),
-            u64::from(config.spectrogram_db_range.map_or(0, f32::to_bits)),
-            u64::from(config.waveform_glow.to_bits()),
-            u64::from(config.waveform_rms_gain.to_bits()),
-            u64::from(config.waveform_peak_gain.to_bits()),
-            u64::from(config.waveform_peak_gamma.to_bits()),
-            u64::from(config.artwork_period_seconds.to_bits()),
-        ]
+    fn auto_width(config: &Config) -> f32 {
+        let SpectrumBarLayout::Automatic { width } = config.spectrum_bar_layout else {
+            panic!("precision fixture uses automatic width");
+        };
+        width
     }
 
-    fn numeric_texts(config: &Config) -> Vec<(Field, String)> {
-        vec![
-            (Field::Volume, (config.volume * 100.).to_string()),
-            (
-                Field::PlayCountThreshold,
-                config.play_count_threshold_percent.to_string(),
-            ),
-            (Field::Scale, config.ui_scale.to_string()),
-            (
-                Field::VisualizationDbRange,
-                config.visualization_db_range.to_string(),
-            ),
-            (
-                Field::ReactiveSensitivity,
-                config.reactive_sensitivity.to_string(),
-            ),
-            (
-                Field::RadialRotationSpeed,
-                config.radial_rotation_speed.to_string(),
-            ),
-            (Field::RadialBarWidth, config.radial_bar_width.to_string()),
-            (
-                Field::RadialRingOpacity,
-                config.radial_ring_opacity.to_string(),
-            ),
-            (
-                Field::ReactiveBloomIntensity,
-                config.reactive_bloom_intensity.to_string(),
-            ),
-            (
-                Field::RadialInnerDiameter,
-                config.radial_inner_diameter.to_string(),
-            ),
-            (
-                Field::ReactiveDbRange,
-                config.reactive_db_range.unwrap().to_string(),
-            ),
-            (
-                Field::SpectrumDbRange,
-                config.spectrum_db_range.unwrap().to_string(),
-            ),
-            (Field::SpectrumGap, config.spectrum_gap.to_string()),
-            (
-                Field::SpectrumGravity,
-                config.spectrum_peak_gravity.to_string(),
-            ),
-            (
-                Field::SpectrumBarGravity,
-                config.spectrum_bar_gravity.to_string(),
-            ),
-            (
-                Field::SpectrumAutoWidth,
-                match config.spectrum_bar_layout {
-                    SpectrumBarLayout::Automatic { width } => width.to_string(),
-                    SpectrumBarLayout::Fixed { .. } => {
-                        panic!("precision fixture uses automatic width")
-                    }
-                },
-            ),
-            (
-                Field::SpectrogramDbRange,
-                config.spectrogram_db_range.unwrap().to_string(),
-            ),
-            (Field::WaveformGlow, config.waveform_glow.to_string()),
-            (Field::WaveformRmsGain, config.waveform_rms_gain.to_string()),
-            (
-                Field::WaveformPeakGain,
-                config.waveform_peak_gain.to_string(),
-            ),
-            (
-                Field::WaveformPeakGamma,
-                config.waveform_peak_gamma.to_string(),
-            ),
-            (
-                Field::ArtworkPeriodSeconds,
-                config.artwork_period_seconds.to_string(),
-            ),
-        ]
+    precision_fields! {
+        Scale => ui_scale: 1.234567,
+        VisualizationDbRange => visualization_db_range: 81.23456,
+        ReactiveSensitivity => reactive_sensitivity: 1.345678,
+        RadialRotationSpeed => radial_rotation_speed: 0.456789,
+        RadialBarWidth => radial_bar_width: 0.678912,
+        RadialRingOpacity => radial_ring_opacity: 0.789123,
+        ReactiveBloomIntensity => reactive_bloom_intensity: 0.487654,
+        RadialInnerDiameter => radial_inner_diameter: 0.765432,
+        SpectrumGap => spectrum_gap: 2.345678,
+        SpectrumGravity => spectrum_peak_gravity: 82.45678,
+        SpectrumBarGravity => spectrum_bar_gravity: 41.23456,
+        WaveformGlow => waveform_glow: 0.412345,
+        WaveformRmsGain => waveform_rms_gain: 1.456789,
+        WaveformPeakGain => waveform_peak_gain: 1.567891,
+        WaveformPeakGamma => waveform_peak_gamma: 1.678912,
+        OscilloscopeTimeSpanMs => oscilloscope_time_span_ms: 21.67891,
+        OscilloscopeGain => oscilloscope_gain: 1.789123,
+        ArtworkPeriodSeconds => artwork_period_seconds: 23.45678,
     }
 
     fn edit_input(
@@ -3084,20 +3003,14 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         let original = runtime.handle.config_snapshot();
         let precise = precise_config(&original);
         let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
         assert!(result.is_ok());
         settings.update(cx, |this, cx| {
             this.reset(&committed, cx);
-            assert_eq!(
-                numeric_bits(&this.parse(cx).unwrap()),
-                numeric_bits(&precise)
-            );
+            assert_numeric_eq(&this.parse(cx).unwrap(), &precise);
         });
         for unrelated_edit in [false, true] {
             if unrelated_edit {
@@ -3106,13 +3019,10 @@ mod tests {
             let (patch, submission) = submit(&settings, cx);
             let (committed, result) = execute(&runtime, patch);
             assert!(result.is_ok());
-            assert_eq!(numeric_bits(&committed), numeric_bits(&precise));
+            assert_numeric_eq(&committed, &precise);
             settings.update(cx, |this, cx| {
                 this.complete_settings_apply(submission, committed, result, cx);
-                assert_eq!(
-                    numeric_bits(&this.parse(cx).unwrap()),
-                    numeric_bits(&precise)
-                );
+                assert_numeric_eq(&this.parse(cx).unwrap(), &precise);
             });
         }
     }
@@ -3122,10 +3032,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         let mut expected = precise_config(&runtime.handle.config_snapshot());
         settings.update(cx, |this, cx| {
             this.model.draft.spectrum_style = SpectrumStyle::Bars;
@@ -3141,21 +3048,15 @@ mod tests {
         // substituted with the original fractional config value.
         expected.volume = (expected.volume * 100.) / 100.;
         settings.update(cx, |this, cx| {
-            assert_eq!(
-                numeric_bits(&this.parse(cx).unwrap()),
-                numeric_bits(&expected)
-            );
+            assert_numeric_eq(&this.parse(cx).unwrap(), &expected);
         });
         let (patch, submission) = submit(&settings, cx);
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
-        assert_eq!(numeric_bits(&committed), numeric_bits(&expected));
+        assert_numeric_eq(&committed, &expected);
         settings.update(cx, |this, cx| {
             this.complete_settings_apply(submission, committed, result, cx);
-            assert_eq!(
-                numeric_bits(&this.parse(cx).unwrap()),
-                numeric_bits(&expected)
-            );
+            assert_numeric_eq(&this.parse(cx).unwrap(), &expected);
         });
     }
 
@@ -3164,10 +3065,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         let original = runtime.handle.config_snapshot();
         let precise = Arc::new(precise_config(&original));
         let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
@@ -3204,10 +3102,7 @@ mod tests {
             this.reset(&precise, cx);
         });
         settings.update(cx, |this, cx| {
-            assert_eq!(
-                numeric_bits(&this.parse(cx).unwrap()),
-                numeric_bits(&precise)
-            );
+            assert_numeric_eq(&this.parse(cx).unwrap(), &precise);
         });
     }
 
@@ -3216,10 +3111,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         let original = runtime.handle.config_snapshot();
         let precise = precise_config(&original);
         let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
@@ -3272,10 +3164,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         let periods = Rc::new(RefCell::new(Vec::new()));
         let _subscription = cx.update(|cx| {
             let periods = periods.clone();
@@ -3307,10 +3196,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         settings.update(cx, |this, cx| {
             this.model.draft.ui_theme = Theme::TokyoNightDay;
             this.set_value(Field::ScanMaxDepth, "7", None, cx);
@@ -3443,10 +3329,7 @@ mod tests {
     #[gpui::test]
     fn failed_settings_apply_retains_edits_and_baseline_for_retry(cx: &mut TestAppContext) {
         let (directory, runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         let baseline_theme = runtime.handle.config_snapshot().ui_theme;
         let path = directory.path().join("config.toml");
         std::fs::remove_file(&path).unwrap();
@@ -3480,11 +3363,6 @@ mod tests {
             );
         });
         std::fs::remove_dir(&path).unwrap();
-        assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.2 }))
-                .ack
-                .is_success()
-        );
         let (patch, submission) = submit(&settings, cx);
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
@@ -3495,7 +3373,6 @@ mod tests {
                 this.model.baseline().ui_scale.to_bits(),
                 1.456789_f32.to_bits()
             );
-            assert_eq!(this.model.baseline().volume, 0.2);
             assert!(!this.model.baseline().visualization_enabled);
             assert_eq!(this.model.baseline().ui_theme, Theme::TokyoNightDay);
             assert_eq!(this.parse(cx).unwrap(), *this.model.baseline());
@@ -3638,29 +3515,25 @@ mod tests {
                 this.set_value(Field::AnimationFps, value, None, cx);
                 assert!(this.parse(cx).is_err(), "accepted {value}");
             }
-        });
-        for fps in [240, 1, 0] {
-            settings.update(cx, |this, cx| {
+            for fps in [240, 1, 0] {
                 this.set_value(Field::AnimationFps, fps.to_string(), None, cx);
-            });
-            let (patch, submission) = submit(&settings, cx);
-            let (committed, result) = execute(&runtime, patch);
-            assert!(result.is_ok());
-            assert_eq!(committed.animation_fps, fps);
-            settings.update(cx, |this, cx| {
-                this.complete_settings_apply(submission, committed, result, cx);
                 assert_eq!(this.parse(cx).unwrap().animation_fps, fps);
-            });
-        }
+            }
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        assert_eq!(committed.animation_fps, 0);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.value(Field::AnimationFps, cx), "0");
+        });
     }
 
     #[gpui::test]
     fn successful_feedback_clears_on_text_edits_and_later_apply_edits(cx: &mut TestAppContext) {
         let (_directory, runtime, settings) = fixture(cx);
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         let (patch, submission) = submit(&settings, cx);
         let (committed, result) = execute(&runtime, patch);
         settings.update(cx, |this, cx| {
@@ -3771,10 +3644,7 @@ mod tests {
             this.model.draft.spectrum_style = SpectrumStyle::Bars;
             this.sync_field_enabled(cx);
         });
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         edit_input(&settings, window, Field::SpectrumAutoWidth, "1e", cx);
         settings.update(cx, |this, cx| {
             this.open_setting_dropdown(
@@ -3821,10 +3691,7 @@ mod tests {
             this.model.draft.spectrum_style = SpectrumStyle::Bars;
             this.sync_field_enabled(cx);
         });
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         edit_input(&settings, window, Field::SpectrumAutoWidth, "4.567891", cx);
         let (patch, submission) = submit(&settings, cx);
         let (committed, result) = execute(&runtime, patch);

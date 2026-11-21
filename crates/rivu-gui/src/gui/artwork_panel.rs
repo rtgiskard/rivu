@@ -730,9 +730,8 @@ mod tests {
             crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
         });
 
-        std::fs::create_dir_all(".cache").unwrap();
-        let directory = tempfile::tempdir_in(".cache").unwrap();
-        let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
+        let directory = tempfile::tempdir().unwrap();
+        let track = rivu_protocol::test_support::artwork_track(directory.path().join("track.wav"));
         let manager = Arc::new(ArtworkManager::new(directory.path()));
         assert!(manager.load(crate::artwork_source(&track)).is_none());
         let config = Config::default();
@@ -792,10 +791,100 @@ mod tests {
     }
 
     #[gpui::test]
+    fn panel_composes_a_default_cover_after_terminal_decode_failure(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::gui::appearance::theme::set_theme(
+                rivu_presentation::theme::Theme::default(),
+                cx,
+            );
+            crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broken-animation.wav");
+        let bytes = crate::gui::artwork::gif_with_corrupt_second_frame();
+        rivu_metadata::artwork::test_support::pictures_wav(&path, 3, &[(&bytes, bytes.len(), 3)]);
+        let track = rivu_protocol::test_support::artwork_track(path);
+        let manager = Arc::new(ArtworkManager::new(directory.path()));
+        manager.load(crate::artwork_source(&track)).unwrap();
+        let owner = runtime(manager, cx);
+        let config = Config::default();
+        let panels = panel_demand(
+            1,
+            2,
+            false,
+            ArtworkOptions {
+                style: ArtworkStyle::Plain,
+                ..(&config).into()
+            },
+        );
+        owner.update(cx, |owner, cx| {
+            owner.sync(
+                Some(&track),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                true,
+                cx,
+            )
+        });
+        let handle = cx
+            .open_window(size(px(320.), px(320.)), {
+                let owner = owner.clone();
+                move |_, cx| ArtworkPanel::new(2, owner, cx)
+            })
+            .into();
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            owner.update(cx, |owner, cx| {
+                assert!(owner.view.decode_failed(cx));
+                // Pending artwork also has a placeholder. A fresh cache isolates
+                // fallback selection on this terminal frame.
+                owner.default_artwork = cx.new(|cx| DefaultArtwork::new(&Localizer::new("en"), cx));
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            owner
+                .read(cx)
+                .default_artwork
+                .read(cx)
+                .clone()
+                .assert_composed_cover(cx, true);
+        })
+        .unwrap();
+    }
+
+    /// Evict `evicted`'s cached lookup by filling the manager with misses.
+    fn evict_by_pressure(
+        manager: &ArtworkManager,
+        evicted: &Track,
+        ids: std::ops::Range<i64>,
+        root: &std::path::Path,
+    ) {
+        for id in ids {
+            let mut pressure = evicted.clone();
+            pressure.id = id;
+            pressure.path = root.join("pressure").join(format!("{id}.wav"));
+            assert!(manager.load(crate::artwork_source(&pressure)).is_none());
+        }
+        assert!(
+            manager
+                .cached_result(crate::artwork_source(evicted))
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
     fn relocation_replaces_display_without_resetting_rotation(cx: &mut gpui::TestAppContext) {
-        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let [before, after] = crate::test_support::relocation_artwork_paths(directory.path());
-        let original = crate::test_support::artwork_track(before);
+        let original = rivu_protocol::test_support::artwork_track(before);
         let mut relocated = original.clone();
         relocated.path = after;
         let manager = Arc::new(ArtworkManager::new(directory.path()));
@@ -812,26 +901,25 @@ mod tests {
                 ..(&config).into()
             },
         );
+        let sync = |owner: &mut ArtworkRuntime,
+                    track: &Track,
+                    visible: bool,
+                    cx: &mut Context<ArtworkRuntime>| {
+            owner.sync(
+                Some(track),
+                PlaybackStatus::Paused,
+                &config,
+                &panels,
+                visible,
+                cx,
+            );
+        };
         let owner = runtime(manager, cx);
         owner.update(cx, |owner, cx| {
-            owner.sync(
-                Some(&original),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                true,
-                cx,
-            );
+            sync(owner, &original, true, cx);
             assert!(!owner.view.replace(Some(old.clone()), cx));
             owner.instances.get_mut(&2).unwrap().rotation.angle = 0.75;
-            owner.sync(
-                Some(&relocated),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                true,
-                cx,
-            );
+            sync(owner, &relocated, true, cx);
             assert!(!owner.view.replace(Some(new), cx));
             assert_eq!(owner.instances[&2].rotation.angle, 0.75);
             assert!(
@@ -840,44 +928,14 @@ mod tests {
             );
         });
         owner.update(cx, |owner, cx| {
-            owner.sync(
-                Some(&relocated),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                false,
-                cx,
-            );
-            assert!(owner.view.image(cx).is_none());
+            sync(owner, &relocated, false, cx);
+            assert!(!owner.view.has_artwork());
         });
         cx.run_until_parked();
         owner.update(cx, |owner, cx| {
-            for id in 100..170 {
-                let mut pressure = relocated.clone();
-                pressure.id = id;
-                pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
-                assert!(
-                    owner
-                        .manager
-                        .load(crate::artwork_source(&pressure))
-                        .is_none()
-                );
-            }
-            assert!(
-                owner
-                    .manager
-                    .cached_result(crate::artwork_source(&relocated))
-                    .is_none()
-            );
-            owner.sync(
-                Some(&relocated),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                true,
-                cx,
-            );
-            assert!(owner.view.image(cx).is_none());
+            evict_by_pressure(&owner.manager, &relocated, 100..170, directory.path());
+            sync(owner, &relocated, true, cx);
+            assert!(!owner.view.has_artwork());
             assert!(
                 owner
                     .loader
@@ -885,27 +943,11 @@ mod tests {
                     .is_none()
             );
             // Hide while the physical worker remains active, then change demand.
-            owner.sync(
-                Some(&relocated),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                false,
-                cx,
-            );
+            sync(owner, &relocated, false, cx);
         });
         let mut missing = relocated.clone();
         missing.path = directory.path().join("missing/track.wav");
-        owner.update(cx, |owner, cx| {
-            owner.sync(
-                Some(&missing),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                false,
-                cx,
-            );
-        });
+        owner.update(cx, |owner, cx| sync(owner, &missing, false, cx));
         cx.run_until_parked();
         owner.update(cx, |owner, cx| {
             assert!(
@@ -920,15 +962,8 @@ mod tests {
                     .cached_result(crate::artwork_source(&missing))
                     .is_none()
             );
-            assert!(owner.view.image(cx).is_none());
-            owner.sync(
-                Some(&missing),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                true,
-                cx,
-            );
+            assert!(!owner.view.has_artwork());
+            sync(owner, &missing, true, cx);
         });
         cx.run_until_parked();
         owner.update(cx, |owner, cx| {
@@ -936,56 +971,19 @@ mod tests {
                 owner.manager.cached_result(crate::artwork_source(&missing)),
                 Some(None)
             );
-            owner.sync(
-                Some(&missing),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                false,
-                cx,
-            );
-            owner.sync(
-                Some(&missing),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                true,
-                cx,
-            );
-            assert!(owner.view.image(cx).is_none());
+            sync(owner, &missing, false, cx);
+            sync(owner, &missing, true, cx);
+            assert!(!owner.view.has_artwork());
             assert!(
                 owner
                     .loader
                     .prepare(crate::artwork_source(&missing))
                     .is_none()
             );
-            for id in 200..270 {
-                let mut pressure = missing.clone();
-                pressure.id = id;
-                pressure.path = directory.path().join("pressure").join(format!("{id}.wav"));
-                assert!(
-                    owner
-                        .manager
-                        .load(crate::artwork_source(&pressure))
-                        .is_none()
-                );
-            }
-            assert!(
-                owner
-                    .manager
-                    .cached_result(crate::artwork_source(&missing))
-                    .is_none()
-            );
+            evict_by_pressure(&owner.manager, &missing, 200..270, directory.path());
             std::fs::create_dir_all(missing.path.parent().unwrap()).unwrap();
             rivu_metadata::artwork::test_support::tagged_wav(&missing.path);
-            owner.sync(
-                Some(&missing),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                true,
-                cx,
-            );
+            sync(owner, &missing, true, cx);
         });
         cx.run_until_parked();
         owner.update(cx, |owner, cx| {
@@ -996,27 +994,13 @@ mod tests {
                     .cached_result(crate::artwork_source(&missing))
                     .is_none()
             );
-            assert!(owner.view.image(cx).is_none());
-            owner.sync(
-                Some(&missing),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                false,
-                cx,
-            );
-            owner.sync(
-                Some(&missing),
-                PlaybackStatus::Paused,
-                &config,
-                &panels,
-                true,
-                cx,
-            );
+            assert!(!owner.view.has_artwork());
+            sync(owner, &missing, false, cx);
+            sync(owner, &missing, true, cx);
         });
         cx.run_until_parked();
-        owner.update(cx, |owner, cx| {
-            assert!(owner.view.image(cx).is_some());
+        owner.update(cx, |owner, _| {
+            assert!(owner.view.has_artwork());
         });
     }
 
@@ -1024,10 +1008,10 @@ mod tests {
     fn repaired_path_retries_lookup_without_resetting_the_panel_rotation(
         cx: &mut gpui::TestAppContext,
     ) {
-        std::fs::create_dir_all(".cache").unwrap();
-        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let manager = Arc::new(ArtworkManager::new(directory.path()));
-        let original = crate::test_support::artwork_track(directory.path().join("missing.wav"));
+        let original =
+            rivu_protocol::test_support::artwork_track(directory.path().join("missing.wav"));
         assert!(manager.load(crate::artwork_source(&original)).is_none());
         let mut repaired = original.clone();
         repaired.path = directory.path().join("repaired.wav");

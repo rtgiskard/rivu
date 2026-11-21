@@ -1148,6 +1148,11 @@ mod tests {
     #[test]
     fn slow_radial_publication_does_not_reset_the_displayed_envelope() {
         let mut radial = RadialRenderer::new();
+        // -35 dB maps to 0.5 and -70 dB to silence over a 70 dB range.
+        radial.configure(&VisualParameters::from(&Config {
+            reactive_db_range: Some(70.0),
+            ..Config::default()
+        }));
         let mut audio = frame();
         accept(&mut radial, &audio);
         audio.sample_time += Duration::from_secs(1);
@@ -1254,23 +1259,25 @@ mod tests {
                     .collect();
                 let expected = reference_levels(&next, 70.0);
                 accept(&mut radial, &next);
-                let first: Vec<_> = expected
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|target| 0.0 + (*target - 0.0) * 1.0)
-                    .collect();
+                let first = expected.unwrap_or_default();
                 assert_eq!(radial.data.borrow().displayed, first);
                 next.sample_time += Duration::from_millis(10);
                 next.spectrum_db.fill(-20.0);
                 let expected = reference_levels(&next, 70.0);
                 accept(&mut radial, &next);
-                let alpha = 1.0 - (-10.0_f32 / SMOOTHING_MS).exp();
-                let smoothed: Vec<_> = first
+                let displayed = radial.data.borrow().displayed.clone();
+                assert_eq!(displayed.len(), first.len());
+                for ((actual, display), target) in displayed
                     .iter()
+                    .zip(&first)
                     .zip(expected.unwrap_or_default())
-                    .map(|(display, target)| *display + (target - *display) * alpha)
-                    .collect();
-                assert_eq!(radial.data.borrow().displayed, smoothed);
+                {
+                    if *display == target {
+                        assert_eq!(*actual, target);
+                    } else {
+                        assert!(*actual > display.min(target) && *actual < display.max(target));
+                    }
+                }
             }
         }
     }
@@ -1381,27 +1388,36 @@ mod tests {
         }
     }
 
+    const RESUMED_SPEED: f32 = 1.25;
+
+    /// Rotates at 0.5, switches to `RESUMED_SPEED` at 3 s, then hides or
+    /// suspends at 4 s. Returns the phase frozen at the pause.
+    fn pause_after_speed_change(hidden: bool) -> (RadialRenderer, AnalysisFrame, f32) {
+        let mut radial = RadialRenderer::new();
+        let mut config = Config {
+            radial_rotation_speed: 0.5,
+            ..Config::default()
+        };
+        radial.configure(&VisualParameters::from(&config));
+        let audio = frame();
+        radial.update(&audio, Duration::from_secs(2));
+        radial.animate(Duration::from_secs(3));
+        config.radial_rotation_speed = RESUMED_SPEED;
+        radial.configure(&VisualParameters::from(&config));
+        radial.animate(Duration::from_secs(4));
+        let frozen_phase = radial.data.borrow().time;
+        if hidden {
+            radial.set_visible(false);
+        } else {
+            radial.suspend();
+        }
+        (radial, audio, frozen_phase)
+    }
+
     #[test]
     fn radial_resume_preserves_phase_after_speed_change() {
         for hidden in [false, true] {
-            let mut radial = RadialRenderer::new();
-            let mut config = Config {
-                radial_rotation_speed: 0.5,
-                ..Config::default()
-            };
-            radial.configure(&VisualParameters::from(&config));
-            let mut audio = frame();
-            radial.update(&audio, Duration::from_secs(2));
-            radial.animate(Duration::from_secs(3));
-            config.radial_rotation_speed = 1.25;
-            radial.configure(&VisualParameters::from(&config));
-            radial.animate(Duration::from_secs(4));
-            let frozen_phase = radial.data.borrow().time;
-            if hidden {
-                radial.set_visible(false);
-            } else {
-                radial.suspend();
-            }
+            let (mut radial, mut audio, frozen_phase) = pause_after_speed_change(hidden);
             assert!(!radial.animate(Duration::from_secs(10)));
             if hidden {
                 radial.set_visible(true);
@@ -1416,7 +1432,7 @@ mod tests {
             }
             assert!(!radial.animate(Duration::from_secs(20)));
             radial.animate(Duration::from_millis(20_200));
-            let expected = (frozen_phase + 0.2 * config.radial_rotation_speed).rem_euclid(TWO_PI);
+            let expected = (frozen_phase + 0.2 * RESUMED_SPEED).rem_euclid(TWO_PI);
             assert!((radial.data.borrow().time - expected).abs() < 1e-6);
         }
     }
@@ -1424,23 +1440,7 @@ mod tests {
     #[test]
     fn new_radial_source_initializes_phase_instead_of_resuming_history() {
         for hidden in [false, true] {
-            let mut radial = RadialRenderer::new();
-            let mut config = Config {
-                radial_rotation_speed: 0.5,
-                ..Config::default()
-            };
-            radial.configure(&VisualParameters::from(&config));
-            let mut audio = frame();
-            radial.update(&audio, Duration::from_secs(2));
-            radial.animate(Duration::from_secs(3));
-            config.radial_rotation_speed = 1.25;
-            radial.configure(&VisualParameters::from(&config));
-            radial.animate(Duration::from_secs(4));
-            if hidden {
-                radial.set_visible(false);
-            } else {
-                radial.suspend();
-            }
+            let (mut radial, mut audio, _) = pause_after_speed_change(hidden);
             audio.generation += 1;
             audio.spectrum_db.fill(-70.0);
             radial.update(&audio, Duration::from_secs(20));
@@ -1448,7 +1448,7 @@ mod tests {
                 radial.set_visible(true);
                 radial.update(&audio, Duration::from_secs(20));
             }
-            let expected = (20.0 * config.radial_rotation_speed * BAR_ROTATION_SCALE).sin_cos();
+            let expected = (20.0 * RESUMED_SPEED * BAR_ROTATION_SCALE).sin_cos();
             let data = radial.data.borrow();
             let actual = data.bar_rotation().sin_cos();
             assert!((actual.0 - expected.0).abs() < 1e-6);

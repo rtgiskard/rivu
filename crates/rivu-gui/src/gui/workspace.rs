@@ -608,11 +608,14 @@ mod tests {
         let expected = workspace.layouts.clone();
         workspace.request_save();
         drop(workspace);
-        save.flush().unwrap();
         let (reopened, error) = Workspace::new(save.handle(), visualizer, artwork);
         assert!(error.is_none());
         assert_eq!(reopened.layouts, expected);
+        // Dropping the owner drains requested writes but never saves the dirty
+        // snapshot itself, unlike `flush`.
+        drop(reopened);
+        drop(save);
         let loaded = LayoutSet::load(&directory.path().join("layout.json")).unwrap();
-        assert_eq!(loaded.active_name(), "Work");
+        assert_eq!(loaded, expected);
     }
 }

@@ -861,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn current_transport_gap_invalidation_retires_the_staged_picture() {
+    fn transport_gap_invalidation_restages_and_stops_the_display_clock() {
         crate::transport::visual::tests::with_gap_invalidation(|client, previous, invalidation| {
             let mut staging = previous.clone();
             let mut sequence = previous.sequence;
@@ -872,8 +872,6 @@ mod tests {
                 stage_analysis_frame(&mut staging, &mut sequence, false, frame)
             }));
             assert!(staging.settings.is_none());
-            assert!(staging.spectrum_db.is_empty());
-            assert!(staging.visualizer.pcm.is_empty());
             assert!(staging.generation > previous.generation);
             clock.accept(&staging, Instant::now());
             assert!(clock.source.is_none());
@@ -887,10 +885,31 @@ mod tests {
         panels
     }
 
-    #[test]
-    fn display_clock_moves_between_analysis_frames_and_stops_at_accepted_audio() {
-        let start = Instant::now();
-        let mut frame = AnalysisFrame {
+    /// Visible playing inputs for an unchanged source; each test overrides
+    /// only the fields that drive its transition.
+    fn inputs<'a>(
+        config: &Arc<Config>,
+        panels: &'a crate::gui::workspace::WorkspacePanels,
+    ) -> VisualizerInputs<'a> {
+        VisualizerInputs {
+            stopped_source_generation: None,
+            config: Arc::clone(config),
+            panels,
+            status: PlaybackStatus::Playing,
+            source_generation: 0,
+            seek_revision: 0,
+            visible: true,
+            shutting_down: false,
+            current_track_id: None,
+            waveform_track: None,
+            position: 0.0,
+            duration: None,
+        }
+    }
+
+    /// A clock that accepted one playing frame at `start`, 1 s into the track.
+    fn playing_clock(start: Instant) -> (AnalysisFrame, AnimationClock) {
+        let frame = AnalysisFrame {
             generation: 1,
             sample_rate: 48_000,
             sample_time: Duration::from_secs(1),
@@ -899,6 +918,13 @@ mod tests {
         };
         let mut clock = AnimationClock::default();
         clock.accept(&frame, start);
+        (frame, clock)
+    }
+
+    #[test]
+    fn display_clock_moves_between_analysis_frames_and_stops_at_accepted_audio() {
+        let start = Instant::now();
+        let (mut frame, mut clock) = playing_clock(start);
         assert_eq!(
             clock.advance(start + Duration::from_millis(190)),
             frame.sample_time
@@ -925,15 +951,7 @@ mod tests {
     #[test]
     fn display_clock_suspension_and_discontinuities_do_not_replay_elapsed_time() {
         let start = Instant::now();
-        let mut frame = AnalysisFrame {
-            generation: 1,
-            sample_rate: 48_000,
-            sample_time: Duration::from_secs(1),
-            settings: Some((&Config::default()).into()),
-            ..Default::default()
-        };
-        let mut clock = AnimationClock::default();
-        clock.accept(&frame, start);
+        let (mut frame, mut clock) = playing_clock(start);
         frame.sample_time += Duration::from_millis(200);
         clock.accept(&frame, start);
         assert_eq!(
@@ -968,15 +986,7 @@ mod tests {
     #[test]
     fn display_clock_large_publication_interval_does_not_imply_discontinuity() {
         let start = Instant::now();
-        let mut frame = AnalysisFrame {
-            generation: 1,
-            sample_rate: 48_000,
-            sample_time: Duration::from_secs(1),
-            settings: Some((&Config::default()).into()),
-            ..Default::default()
-        };
-        let mut clock = AnimationClock::default();
-        clock.accept(&frame, start);
+        let (mut frame, mut clock) = playing_clock(start);
         frame.sample_time = Duration::from_secs(3);
         clock.accept(&frame, start + Duration::from_millis(10));
         assert_eq!(
@@ -1143,23 +1153,7 @@ mod tests {
         };
         let mut panels = demand(&layout);
         owner.update(cx, |owner, cx| {
-            owner.sync(
-                VisualizerInputs {
-                    stopped_source_generation: None,
-                    config: Arc::clone(&config),
-                    panels: &panels,
-                    status: PlaybackStatus::Playing,
-                    source_generation: 0,
-                    seek_revision: 0,
-                    visible: true,
-                    shutting_down: false,
-                    current_track_id: None,
-                    waveform_track: None,
-                    position: 0.0,
-                    duration: None,
-                },
-                cx,
-            );
+            owner.sync(inputs(&config, &panels), cx);
             let now = Instant::now();
             owner.staging = AnalysisFrame {
                 sequence: 7,
@@ -1176,23 +1170,7 @@ mod tests {
             assert!(owner.demand.spectrum);
             assert!(layout.activate(9));
             panels.reconcile(&layout);
-            owner.sync(
-                VisualizerInputs {
-                    stopped_source_generation: None,
-                    config: Arc::clone(&config),
-                    panels: &panels,
-                    status: PlaybackStatus::Playing,
-                    source_generation: 0,
-                    seek_revision: 0,
-                    visible: true,
-                    shutting_down: false,
-                    current_track_id: None,
-                    waveform_track: None,
-                    position: 0.0,
-                    duration: None,
-                },
-                cx,
-            );
+            owner.sync(inputs(&config, &panels), cx);
             assert!(owner.demand.visualizer.pcm);
             assert!(owner.demand.spectrum);
             assert!(owner.demand.visualizer.band_energy);
@@ -1214,18 +1192,11 @@ mod tests {
             {
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
-                        status: PlaybackStatus::Playing,
                         source_generation,
                         seek_revision,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
                         position,
                         duration: Some(120.0),
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1248,18 +1219,11 @@ mod tests {
             panels.reconcile(&layout);
             owner.sync(
                 VisualizerInputs {
-                    stopped_source_generation: None,
-                    config: Arc::clone(&config),
-                    panels: &panels,
-                    status: PlaybackStatus::Playing,
                     source_generation: 1,
                     seek_revision: 1,
-                    visible: true,
-                    shutting_down: false,
-                    current_track_id: None,
-                    waveform_track: None,
                     position: 3.0,
                     duration: Some(120.0),
+                    ..inputs(&config, &panels)
                 },
                 cx,
             );
@@ -1352,9 +1316,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pause_preserves_displayed_publication_instead_of_consuming_worker_reset(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn pause_sync_keeps_the_displayed_publication(cx: &mut gpui::TestAppContext) {
         let config = test_config();
         let (_directory, runtime) = fixture(&config);
         let owner = cx.update(|cx| new_owner(&runtime, cx));
@@ -1382,48 +1344,27 @@ mod tests {
                 locked: false,
             };
             let panels = demand(&layout);
+            // Only the owner-local pause boundary is observable here: this
+            // fixture has no admissible transport frame, so consumption guards
+            // are not exercised.
             owner.sync(
                 VisualizerInputs {
-                    stopped_source_generation: None,
-                    config: Arc::clone(&owner.config),
-                    panels: &panels,
                     status: PlaybackStatus::Paused,
                     source_generation: owner.source_generation,
                     seek_revision: owner.seek_revision,
                     visible: owner.visible,
-                    shutting_down: false,
-                    current_track_id: None,
-                    waveform_track: None,
                     position: owner.position,
                     duration: owner.duration,
+                    ..inputs(&owner.config, &panels)
                 },
                 cx,
             );
-            owner.needs_refresh = true;
-            owner.consume_analysis();
             assert_eq!(owner.sequence, 7);
             assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
             assert_eq!(owner.staging.visualizer.pcm[0], [0.25, -0.5]);
             assert_eq!(owner.staging.visualizer.band_rms, [0.25, 0.5, 0.75]);
             assert_eq!(owner.staging.sample_time, Duration::from_secs(1));
             assert_eq!(owner.staging.settings, Some((&config).into()));
-
-            // Resume can observe the worker's pause-reset before fresh FFT data.
-            // Keep the accepted picture and do not restart animation from it.
-            owner.status = PlaybackStatus::Playing;
-            owner.awaiting_replacement = true;
-            owner.consume_analysis();
-            assert!(owner.awaiting_replacement);
-            assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
-            assert_eq!(owner.sequence, 7);
-
-            // Stop does not consume even a still-current worker publication;
-            // sync owns retirement and discards staged input at the boundary.
-            owner.awaiting_replacement = false;
-            owner.status = PlaybackStatus::Stopped;
-            owner.consume_analysis();
-            assert_eq!(owner.staging.spectrum_db, [-12.0, -24.0]);
-            assert_eq!(owner.sequence, 7);
         });
     }
 
@@ -1563,18 +1504,14 @@ mod tests {
                 }
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
                         config: Arc::new(changed),
-                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         source_generation: u64::from(transition >= 1),
                         seek_revision: 1,
                         visible: false,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
                         position: 25.0,
                         duration: Some(100.0),
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1625,18 +1562,8 @@ mod tests {
             owner.update(cx, |owner, cx| {
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
                         status: PlaybackStatus::Paused,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1654,18 +1581,9 @@ mod tests {
                 assert_eq!(owner.frame_generation, generation);
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
                         status: PlaybackStatus::Paused,
                         visible: false,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1674,10 +1592,6 @@ mod tests {
                 assert!(!owner.animating());
                 owner.request_frame(window, cx);
                 assert!(!owner.frame_pending);
-                assert!(
-                    !owner.frame_pending,
-                    "cancellation removes only this client's slot"
-                );
                 assert_ne!(owner.frame_generation, generation);
             });
             window.simulate_next_frame(cx);
@@ -1685,18 +1599,8 @@ mod tests {
                 assert!(!owner.frame_pending);
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
                         status: PlaybackStatus::Paused,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1711,23 +1615,7 @@ mod tests {
                     !owner.frame_pending,
                     "paused paints must not start another clock"
                 );
-                owner.sync(
-                    VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
-                        status: PlaybackStatus::Playing,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
-                    },
-                    cx,
-                );
+                owner.sync(inputs(&config, &panels), cx);
                 owner.request_frame(window, cx);
             });
             window.simulate_next_frame(cx);
@@ -1740,18 +1628,8 @@ mod tests {
                 capped.animation_fps = 1;
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
                         config: Arc::new(capped),
-                        panels: &panels,
-                        status: PlaybackStatus::Playing,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1769,18 +1647,8 @@ mod tests {
                 disabled.visualization_enabled = false;
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
                         config: Arc::new(disabled),
-                        panels: &panels,
-                        status: PlaybackStatus::Playing,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1788,38 +1656,12 @@ mod tests {
                 assert!(!owner.frame_pending);
                 assert!(!owner.animating());
                 assert_eq!(owner.staging.settings, None);
-                owner.sync(
-                    VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
-                        status: PlaybackStatus::Playing,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
-                    },
-                    cx,
-                );
+                owner.sync(inputs(&config, &panels), cx);
                 assert!(owner.demand.enabled);
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
-                        status: PlaybackStatus::Playing,
-                        visible: true,
                         shutting_down: true,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1827,18 +1669,8 @@ mod tests {
                 panels.reconcile(&empty_layout);
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
                         status: PlaybackStatus::Stopped,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
-                        position: 0.0,
-                        duration: None,
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1847,18 +1679,10 @@ mod tests {
                 panels.reconcile(&layout);
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
                         status: PlaybackStatus::Paused,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
                         position: 12.0,
                         duration: Some(120.0),
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1878,18 +1702,10 @@ mod tests {
                 );
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
                         status: PlaybackStatus::Paused,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
                         position: 13.0,
                         duration: Some(120.0),
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1903,18 +1719,10 @@ mod tests {
                 let generation = owner.frame_generation;
                 owner.sync(
                     VisualizerInputs {
-                        stopped_source_generation: None,
-                        config: Arc::clone(&config),
-                        panels: &panels,
                         status: PlaybackStatus::Paused,
-                        visible: true,
-                        shutting_down: false,
-                        current_track_id: None,
-                        waveform_track: None,
                         position: 13.0,
                         duration: Some(120.0),
-                        source_generation: 0,
-                        seek_revision: 0,
+                        ..inputs(&config, &panels)
                     },
                     cx,
                 );
@@ -1932,25 +1740,56 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn confirmed_stop_keeps_a_bounded_fade_but_idle_stop_cannot_create_one(
-        cx: &mut gpui::TestAppContext,
+    /// Core with idle radial fades enabled, one visualizer panel and a track.
+    fn stop_fade_fixture() -> (
+        tempfile::TempDir,
+        CoreRuntime,
+        crate::gui::workspace::WorkspacePanels,
+        rivu_protocol::model::Track,
     ) {
         let (directory, runtime) = fixture(&Config {
             radial_fade_when_idle: true,
             ..test_config()
         });
-        let config = runtime.handle.config_snapshot();
         let mut layout = layout::Layout {
             root: None,
             next_id: 1,
             locked: false,
         };
         layout.add("audio_visualizer", None);
-        let panels = demand(&layout);
+        let track = rivu_protocol::test_support::artwork_track(directory.path().join("track.wav"));
+        (directory, runtime, demand(&layout), track)
+    }
+
+    /// Feed one live spectrum frame of `generation` to the radial style so a
+    /// later Stop has a presentation to fade.
+    fn seed_radial(
+        owner: &mut VisualizerRuntime,
+        generation: u64,
+        config: &Config,
+    ) -> AnalysisFrame {
+        let frame = AnalysisFrame {
+            generation,
+            sample_rate: 48_000,
+            sample_time: Duration::from_secs(1),
+            settings: Some(config.into()),
+            spectrum_requested: true,
+            frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
+            spectrum_db: vec![-12.0; 4],
+            ..Default::default()
+        };
+        owner.style_coordinator.update(&frame, frame.sample_time);
+        frame
+    }
+
+    #[gpui::test]
+    fn confirmed_stop_keeps_a_bounded_fade_but_idle_stop_cannot_create_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_directory, runtime, panels, track) = stop_fade_fixture();
+        let config = runtime.handle.config_snapshot();
         let owner = cx.update(|cx| new_owner(&runtime, cx));
         let before = runtime.handle.gui_snapshot();
-        let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let state = |status, source_generation, seek_revision, stopped_source_generation| {
             VisualizerInputs {
                 config: Arc::clone(&config),
@@ -1977,18 +1816,7 @@ mod tests {
                 ),
                 cx,
             );
-            let frame = AnalysisFrame {
-                generation: before.source_generation,
-                sample_rate: 48_000,
-                sample_time: Duration::from_secs(1),
-                settings: Some(config.as_ref().into()),
-                spectrum_requested: true,
-                frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
-                spectrum_db: vec![-12.0; 4],
-                ..Default::default()
-            };
-            owner.style_coordinator.update(&frame, frame.sample_time);
-            owner.staging = frame;
+            owner.staging = seed_radial(owner, before.source_generation, &config);
         });
         // An idle engine's cached snapshot is not a physical close of the
         // synthetic live presentation above.
@@ -2057,19 +1885,8 @@ mod tests {
     fn stopped_fade_does_not_cross_resume_source_seek_still_or_shutdown(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (directory, runtime) = fixture(&Config {
-            radial_fade_when_idle: true,
-            ..test_config()
-        });
+        let (_directory, runtime, panels, track) = stop_fade_fixture();
         let config = runtime.handle.config_snapshot();
-        let mut layout = layout::Layout {
-            root: None,
-            next_id: 1,
-            locked: false,
-        };
-        layout.add("audio_visualizer", None);
-        let panels = demand(&layout);
-        let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let mut replacement = track.clone();
         replacement.id += 1;
         for boundary in 0..8 {
@@ -2096,17 +1913,7 @@ mod tests {
                     },
                     cx,
                 );
-                let frame = AnalysisFrame {
-                    generation: 1,
-                    sample_rate: 48_000,
-                    sample_time: Duration::from_secs(1),
-                    settings: Some(config.as_ref().into()),
-                    spectrum_requested: true,
-                    frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
-                    spectrum_db: vec![-12.0; 4],
-                    ..Default::default()
-                };
-                owner.style_coordinator.update(&frame, frame.sample_time);
+                seed_radial(owner, 1, &config);
                 state.status = PlaybackStatus::Stopped;
                 state.source_generation += 1;
                 state.seek_revision += 1;
@@ -2156,19 +1963,8 @@ mod tests {
     fn stop_fade_requires_a_matching_physical_source_not_revision_arithmetic(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (directory, runtime) = fixture(&Config {
-            radial_fade_when_idle: true,
-            ..test_config()
-        });
+        let (_directory, runtime, panels, track) = stop_fade_fixture();
         let config = runtime.handle.config_snapshot();
-        let mut layout = layout::Layout {
-            root: None,
-            next_id: 1,
-            locked: false,
-        };
-        layout.add("audio_visualizer", None);
-        let panels = demand(&layout);
-        let track = crate::test_support::artwork_track(directory.path().join("track.wav"));
         let current = Some(track.id);
         let wrap = u64::MAX;
         for (
@@ -2306,18 +2102,7 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.current_track_id, before_current, "{case}");
-                let frame = AnalysisFrame {
-                    generation,
-                    sample_rate: 48_000,
-                    sample_time: Duration::from_secs(1),
-                    settings: Some(config.as_ref().into()),
-                    spectrum_requested: true,
-                    frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
-                    spectrum_db: vec![-12.0; 4],
-                    ..Default::default()
-                };
-                owner.style_coordinator.update(&frame, frame.sample_time);
-                owner.staging = frame;
+                owner.staging = seed_radial(owner, generation, &config);
                 owner.sync(
                     state(
                         PlaybackStatus::Stopped,

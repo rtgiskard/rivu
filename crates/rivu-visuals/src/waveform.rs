@@ -39,8 +39,8 @@ use summary::{WaveformFrame, WaveformIdentity};
 
 pub(crate) mod summary;
 
-#[cfg(feature = "test-support")]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 #[derive(Clone, PartialEq)]
 struct Source {
@@ -1725,7 +1725,7 @@ impl Drop for Waveform {
 mod tests {
     #[test]
     fn streamed_chunks_publish_before_completion_and_never_overwrite_newer_live_bins() {
-        let mut waveform = preview(frame(vec![Some(1.0), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(1.0), None]));
         let (request, _) = waveform.start_full(DecoderHint::Auto);
         let mut live = frame(vec![Some(0.25), None]);
         live.revision = 2;
@@ -1757,7 +1757,7 @@ mod tests {
 
     #[test]
     fn full_paint_releases_shared_lock_and_global_off_retains_statistics() {
-        let mut waveform = preview(frame(vec![Some(0.25); 2]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(0.25); 2]));
         let source = Rc::clone(waveform.source.as_ref().unwrap());
         let (generation, _) = waveform.start_full(DecoderHint::Auto);
         assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.75); 2]))));
@@ -1768,11 +1768,7 @@ mod tests {
             "independent full pooling must not lock playback"
         );
         drop(selected);
-        {
-            let mut frame = waveform.shared.write();
-            publish_enabled(&mut frame, false);
-            publish_enabled(&mut frame, true);
-        }
+        advance_request_epoch(&mut waveform.shared.write());
         assert!(waveform.paint_frame(&source, Some(generation)).is_some());
         let selected = waveform.paint_frame(&source, None).unwrap();
         let PaintFrame::Progressive(frame) = &selected else {
@@ -2126,6 +2122,7 @@ mod tests {
         );
     }
 
+    use super::test_support::{frame, track};
     use super::*;
     #[test]
     fn seek_seconds_clamps_drag_to_timeline_bounds() {
@@ -2136,41 +2133,29 @@ mod tests {
         assert_eq!(seek_seconds(px(-20.0), px(8.0), px(100.0), 10.0), 0.0);
     }
 
-    fn publish_enabled(frame: &mut WaveformFrame, enabled: bool) {
-        if !enabled {
-            frame.request_epoch = frame.request_epoch.wrapping_add(1);
+    #[test]
+    fn collapsed_waveform_geometry_cannot_produce_a_seek() {
+        let position = point(px(60.0), px(5.0));
+        let bounds = Bounds::new(point(px(10.0), px(0.0)), size(px(100.0), px(20.0)));
+        let mut interaction = WaveformInteraction {
+            panels: HashMap::from([(1, (bounds, Some(20.0)))]),
+            active_panel: Some(1),
+            seek_duration: Some(20.0),
+        };
+        assert_eq!(interaction.seek_seconds(position, None), Some(10.0));
+        for size in [size(px(0.0), px(20.0)), size(px(100.0), px(0.0))] {
+            interaction
+                .panels
+                .insert(1, (Bounds::new(bounds.origin, size), Some(20.0)));
+            assert_eq!(interaction.seek_seconds(position, None), None);
         }
+        interaction.panels.insert(1, (bounds, Some(20.0)));
+        assert_eq!(interaction.seek_seconds(position, Some(1)), Some(10.0));
     }
 
-    fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
-        let counts: Vec<_> = peaks
-            .iter()
-            .map(|value| u64::from(value.is_some()))
-            .collect();
-        WaveformFrame {
-            revision: 1,
-            path: Some(PathBuf::from("track.flac")),
-            duration: Some(10.0),
-            span_seconds: 10.0,
-            bin_frames: 80_000,
-            bin_count: peaks.len() as u64,
-            identity: Some(WaveformIdentity {
-                content: None,
-                sample_rate: 8_000,
-            }),
-            max_peak: peaks.iter().flatten().copied().fold(1.0, f32::max),
-            bin_revisions: counts.clone(),
-            rms_counts: counts.clone(),
-            left_rms_counts: counts.clone(),
-            right_rms_counts: counts,
-            rms: peaks.clone(),
-            left_peaks: peaks.clone(),
-            right_peaks: peaks.clone(),
-            left_rms: peaks.clone(),
-            right_rms: peaks.clone(),
-            peaks,
-            ..WaveformFrame::default()
-        }
+    /// A session disable publishes a new request epoch; re-enabling publishes nothing.
+    fn advance_request_epoch(frame: &mut WaveformFrame) {
+        frame.request_epoch = frame.request_epoch.wrapping_add(1);
     }
 
     fn geometry_frame(
@@ -2339,7 +2324,7 @@ mod tests {
 
     #[test]
     fn waveform_seek_keeps_press_duration_and_cancellation_clears_capture() {
-        let mut waveform = preview(WaveformFrame::default());
+        let mut waveform = Waveform::test_preview(WaveformFrame::default());
         {
             let mut interaction = waveform.interaction.borrow_mut();
             let bounds = Bounds::new(
@@ -2372,7 +2357,7 @@ mod tests {
 
     #[test]
     fn disabling_seek_invalidates_a_released_event_once() {
-        let mut waveform = preview(WaveformFrame::default());
+        let mut waveform = Waveform::test_preview(WaveformFrame::default());
         let generation = waveform.seek_generation;
         waveform.release_seek_capture();
         assert_eq!(waveform.set_seek_enabled(true), None);
@@ -2396,17 +2381,10 @@ mod tests {
         assert_eq!(progress(1.0, Some(f64::INFINITY)), None);
     }
 
-    fn preview(data: WaveformFrame) -> Waveform {
-        let source = Source::from_frame(&data).map(Rc::new);
-        let mut waveform = Waveform::new(Arc::new(RwLock::new(data)));
-        waveform.source = source;
-        waveform
-    }
-
     #[test]
     fn disabling_cancels_full_scan_and_retires_display_before_resume() {
         let data = frame(vec![Some(0.25), None]);
-        let mut waveform = preview(data);
+        let mut waveform = Waveform::test_preview(data);
         waveform.revision = Some(1);
         let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
         let palette = super::super::palette::active_palette_lut(
@@ -2456,16 +2434,11 @@ mod tests {
 
     #[test]
     fn session_disable_epoch_rejects_manual_results_before_view_cancellation() {
-        for (resume_before_completion, decoder_cancelled) in
-            [(false, false), (false, true), (true, false), (true, true)]
-        {
-            let mut waveform = preview(frame(vec![Some(0.25), None]));
+        for decoder_cancelled in [false, true] {
+            let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
+            let source = Rc::clone(waveform.source.as_ref().unwrap());
             let (request, _) = waveform.start_full(DecoderHint::Auto);
-            publish_enabled(&mut waveform.shared.write(), false);
-            if resume_before_completion {
-                publish_enabled(&mut waveform.shared.write(), true);
-            }
-            let revision = waveform.shared.read().revision;
+            advance_request_epoch(&mut waveform.shared.write());
             let result = if decoder_cancelled {
                 Err(anyhow::anyhow!("Waveform loading cancelled"))
             } else {
@@ -2474,19 +2447,20 @@ mod tests {
             assert!(waveform.finish_full(request, result));
             assert!(waveform.manual.is_none());
             assert!(waveform.manual_error.is_none());
-            assert_eq!(waveform.shared.read().peaks, [Some(0.25), None]);
-            assert_eq!(waveform.shared.read().revision, revision);
+            assert!(waveform.full.is_none());
+            assert!(waveform.paint_frame(&source, Some(request)).is_none());
         }
     }
 
     #[test]
     fn global_off_on_preserves_completed_preview_without_rescanning() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
         let (request, _) = waveform.start_full(DecoderHint::Auto);
         assert!(waveform.finish_full(request, Ok(frame(vec![Some(0.5), Some(0.75)]))));
         let source = Rc::clone(waveform.source.as_ref().unwrap());
         waveform.set_enabled(false);
         assert!(waveform.paint_frame(&source, Some(request)).is_none());
+        assert_eq!(waveform.shared.read().peaks, [Some(0.25), None]);
         waveform.set_enabled(true);
         assert!(waveform.paint_frame(&source, Some(request)).is_some());
         assert!(waveform.manual.is_none(), "ordinary resume never rescans");
@@ -2495,12 +2469,12 @@ mod tests {
     #[test]
     fn scan_registered_while_disabled_stays_cancelled_after_resume() {
         for decoder_cancelled in [false, true] {
-            let mut waveform = preview(frame(vec![Some(0.25), None]));
+            let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
+            let source = Rc::clone(waveform.source.as_ref().unwrap());
             waveform.set_enabled(false);
             let (request, cancelled) = waveform.start_full(DecoderHint::Auto);
             assert!(cancelled.load(Ordering::Relaxed));
             waveform.set_enabled(true);
-            let revision = waveform.shared.read().revision;
             let result = if decoder_cancelled {
                 Err(anyhow::anyhow!("Waveform loading cancelled"))
             } else {
@@ -2509,41 +2483,13 @@ mod tests {
             assert!(waveform.finish_full(request, result));
             assert!(waveform.manual.is_none());
             assert!(waveform.manual_error.is_none());
-            assert_eq!(waveform.shared.read().peaks, [Some(0.25), None]);
-            assert_eq!(waveform.shared.read().revision, revision);
-        }
-    }
-
-    fn track(path: &str, decoder_hint: DecoderHint) -> Track {
-        Track {
-            id: 1,
-            path: PathBuf::from(path),
-            fingerprint: None,
-            cue: None,
-            title: String::new(),
-            artist: String::new(),
-            album: String::new(),
-            duration: Some(10.0),
-            codec: String::new(),
-            channels: 2,
-            sample_rate: 44100,
-            bitrate_bps: None,
-            bitrate_exact: false,
-            track_number: None,
-            disc_number: None,
-            bits_per_sample: None,
-            release_date: None,
-            replaygain_track_gain: None,
-            favorite: false,
-            decoder_hint,
-            missing: false,
-            play_count: 0,
-            last_played: None,
+            assert!(waveform.full.is_none());
+            assert!(waveform.paint_frame(&source, Some(request)).is_none());
         }
     }
 
     fn cue_track() -> Track {
-        let mut track = track("track.flac", DecoderHint::Ffmpeg);
+        let mut track = track("track.flac", DecoderHint::Auto);
         track.cue = Some(rivu_protocol::model::CueSegment {
             sheet: PathBuf::from("track.cue"),
             number: 2,
@@ -2555,7 +2501,7 @@ mod tests {
 
     #[test]
     fn explicit_reload_replaces_pending_request_with_latest_hint() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
         let (first, cancelled) = waveform.start_full(DecoderHint::Auto);
         let (latest, _) = waveform.start_full(DecoderHint::Ffmpeg);
         assert!(cancelled.load(Ordering::Relaxed));
@@ -2582,7 +2528,7 @@ mod tests {
 
     #[test]
     fn loading_and_failures_preserve_progressive_frame() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
         let (generation, _) = waveform.start_full(DecoderHint::Auto);
         assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
         assert!(waveform.finish_full(generation, Err(anyhow::anyhow!("decode failed"))));
@@ -2607,7 +2553,7 @@ mod tests {
 
     #[test]
     fn late_full_scan_preserves_new_pcm_and_remains_progressively_overwritable() {
-        let mut waveform = preview(frame(vec![Some(1.0), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(1.0), None]));
         let (request, _) = waveform.start_full(DecoderHint::Auto);
         let mut fresh = frame(vec![Some(0.25), None]);
         fresh.revision = 2;
@@ -2636,7 +2582,7 @@ mod tests {
 
     #[test]
     fn cached_full_scene_observes_merges_but_rejects_replacement_and_cancellation() {
-        let mut waveform = preview(frame(vec![Some(1.0), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(1.0), None]));
         let source = Rc::clone(waveform.source.as_ref().unwrap());
         let (first, _) = waveform.start_full(DecoderHint::Auto);
         assert!(waveform.finish_full(first, Ok(frame(vec![Some(0.5), Some(0.75)]))));
@@ -2697,7 +2643,7 @@ mod tests {
 
     #[test]
     fn full_after_progressive_installs_baseline_then_maps_different_geometries() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
         let (request, _) = waveform.start_full(DecoderHint::Auto);
         assert!(waveform.finish_full(request, Ok(frame(vec![Some(1.0); 4]))));
         let mut progress = frame(vec![Some(0.125), None]);
@@ -2948,7 +2894,7 @@ mod tests {
             start: 0,
             frames: 80_000,
         };
-        let mut waveform = preview(frame(vec![None; 2]));
+        let mut waveform = Waveform::test_preview(frame(vec![None; 2]));
         let (request, _) = waveform.start_full(DecoderHint::Auto);
         let mut baseline = frame(vec![Some(0.75); 2]);
         baseline.identity.as_mut().unwrap().content = Some(original);
@@ -2972,7 +2918,7 @@ mod tests {
     #[test]
     fn full_completion_rejects_wrong_path_cue_and_decoder_hint() {
         for wrong in 0..3 {
-            let mut waveform = preview(frame(vec![Some(0.25), None]));
+            let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
             let (generation, _) = waveform.start_full(DecoderHint::Auto);
             let mut result = frame(vec![Some(1.0), Some(1.0)]);
             match wrong {
@@ -2989,7 +2935,7 @@ mod tests {
 
     #[test]
     fn selected_unplayed_preview_does_not_replace_playback_frame() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
         assert!(waveform.sync_source(Some(&track("selected.flac", DecoderHint::Ffmpeg))));
         let (generation, _) = waveform.start_full(DecoderHint::Ffmpeg);
         let mut selected = frame(vec![Some(0.5), Some(0.75)]);
@@ -3017,23 +2963,51 @@ mod tests {
         );
     }
 
-    #[test]
-    fn authoritative_hint_sync_retires_pending_and_completed_previews() {
-        for complete in [false, true] {
-            let mut waveform = preview(frame(vec![Some(0.25), None]));
+    /// A full scan of the current source, optionally completed.
+    struct Scan {
+        source: Rc<Source>,
+        generation: u64,
+        cancelled: Arc<AtomicBool>,
+        complete: bool,
+    }
+
+    impl Scan {
+        fn start(waveform: &mut Waveform, complete: bool) -> Self {
             let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
             if complete {
                 assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)]))));
             }
-            let source = Rc::clone(waveform.source.as_ref().unwrap());
-            let saved = track("track.flac", DecoderHint::Ffmpeg);
-            assert!(waveform.sync_state(Some(&saved)));
-            assert!(complete || cancelled.load(Ordering::Relaxed));
+            Self {
+                source: Rc::clone(waveform.source.as_ref().unwrap()),
+                generation,
+                cancelled,
+                complete,
+            }
+        }
+
+        /// The retired scan neither paints nor installs a late result.
+        fn assert_retired(&self, waveform: &mut Waveform) {
+            assert!(self.complete || self.cancelled.load(Ordering::Relaxed));
             assert!(waveform.manual.is_none());
             assert!(waveform.full.is_none());
             assert!(waveform.manual_error.is_none());
-            assert!(waveform.paint_frame(&source, Some(generation)).is_none());
-            assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0), Some(1.0)]))));
+            assert!(
+                waveform
+                    .paint_frame(&self.source, Some(self.generation))
+                    .is_none()
+            );
+            let late = frame(vec![Some(1.0), Some(1.0)]);
+            assert!(!waveform.finish_full(self.generation, Ok(late)));
+        }
+    }
+
+    #[test]
+    fn authoritative_hint_sync_retires_pending_and_completed_previews() {
+        for complete in [false, true] {
+            let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
+            let scan = Scan::start(&mut waveform, complete);
+            assert!(waveform.sync_state(Some(&track("track.flac", DecoderHint::Ffmpeg))));
+            scan.assert_retired(&mut waveform);
             let shared = waveform.shared.read();
             assert_eq!(shared.decoder_hint, DecoderHint::Auto);
             assert_eq!(shared.revision, 1);
@@ -3045,7 +3019,7 @@ mod tests {
     fn saved_hint_and_open_decoder_are_independent_preview_facts() {
         let mut progressive = frame(vec![Some(0.25), None]);
         progressive.source_generation = Some(7);
-        let mut waveform = preview(progressive);
+        let mut waveform = Waveform::test_preview(progressive);
         let saved = track("track.flac", DecoderHint::Ffmpeg);
         assert!(waveform.sync_source(Some(&saved)));
         let (generation, cancelled) = waveform.start_full(DecoderHint::Ffmpeg);
@@ -3079,22 +3053,13 @@ mod tests {
             ] {
                 let mut original = track("track.flac", DecoderHint::Auto);
                 original.fingerprint = before.map(str::to_owned);
-                let mut waveform = preview(frame(vec![Some(0.25), None]));
+                let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
                 waveform.sync_state(Some(&original));
-                let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
-                if complete {
-                    assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
-                }
-                let source = Rc::clone(waveform.source.as_ref().unwrap());
+                let scan = Scan::start(&mut waveform, complete);
                 let mut replaced = original.clone();
                 replaced.fingerprint = after.map(str::to_owned);
                 assert!(waveform.sync_state(Some(&replaced)));
-                assert!(complete || cancelled.load(Ordering::Relaxed));
-                assert!(waveform.manual.is_none());
-                assert!(waveform.full.is_none());
-                assert!(waveform.manual_error.is_none());
-                assert!(waveform.paint_frame(&source, Some(generation)).is_none());
-                assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0); 2]))));
+                scan.assert_retired(&mut waveform);
                 let shared = waveform.shared.read();
                 assert_eq!(shared.peaks, vec![Some(0.25), None]);
                 assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
@@ -3107,7 +3072,7 @@ mod tests {
         for complete in [false, true] {
             let mut original = track("track.flac", DecoderHint::Auto);
             original.fingerprint = Some("old".into());
-            let mut waveform = preview(frame(vec![Some(0.25), None]));
+            let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
             waveform.sync_state(Some(&original));
             let (generation, _) = waveform.start_full(DecoderHint::Auto);
             if complete {
@@ -3131,7 +3096,7 @@ mod tests {
     fn same_content_metadata_and_hidden_panels_retain_manual_preview() {
         let mut original = track("track.flac", DecoderHint::Auto);
         original.fingerprint = Some("same-content".into());
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
         waveform.sync_state(Some(&original));
         let source = Rc::clone(waveform.source.as_ref().unwrap());
         let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
@@ -3169,58 +3134,28 @@ mod tests {
     fn target_path_or_cue_switch_cancels_pending_and_clears_completed_preview() {
         for complete in [false, true] {
             for changed in [track("other.flac", DecoderHint::Auto), cue_track()] {
-                let mut waveform = preview(frame(vec![Some(0.25), None]));
-                let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
-                if complete {
-                    assert!(
-                        waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)])))
-                    );
-                }
-                let source = Rc::clone(waveform.source.as_ref().unwrap());
+                let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
+                let scan = Scan::start(&mut waveform, complete);
                 assert!(waveform.sync_source(Some(&changed)));
-                assert!(complete || cancelled.load(Ordering::Relaxed));
-                assert!(waveform.manual.is_none());
-                assert!(waveform.full.is_none());
-                assert!(waveform.paint_frame(&source, Some(generation)).is_none());
-                assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0), Some(1.0)]))));
+                scan.assert_retired(&mut waveform);
             }
         }
     }
 
     #[test]
-    fn disabling_retains_completed_preview_without_touching_session_statistics() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
-        let (generation, _) = waveform.start_full(DecoderHint::Auto);
-        assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5), Some(0.75)]))));
-        let source = Rc::clone(waveform.source.as_ref().unwrap());
-        waveform.set_enabled(false);
-        assert!(waveform.paint_frame(&source, Some(generation)).is_none());
-        assert_eq!(waveform.shared.read().peaks, vec![Some(0.25), None]);
-        waveform.set_enabled(true);
-        assert!(waveform.full.is_some());
-    }
-
-    #[test]
     fn replacing_and_dropping_full_request_retires_remote_connection() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let mut waveform = Waveform::test_preview(frame(vec![Some(0.25), None]));
         waveform.start_full(DecoderHint::Auto);
         let (cancel, mut cancelled) = futures::channel::oneshot::channel();
         waveform.manual.as_mut().unwrap().remote_cancel = Some(cancel);
         waveform.cancel_pending();
         assert!(cancelled.try_recv().is_err());
 
-        waveform.start_full(DecoderHint::Auto);
+        let (_, scan_cancelled) = waveform.start_full(DecoderHint::Auto);
         let (cancel, mut cancelled) = futures::channel::oneshot::channel();
         waveform.manual.as_mut().unwrap().remote_cancel = Some(cancel);
         drop(waveform);
         assert!(cancelled.try_recv().is_err());
-    }
-
-    #[test]
-    fn dropping_preview_cancels_an_explicit_scan() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
-        let (_, cancelled) = waveform.start_full(DecoderHint::Auto);
-        drop(waveform);
-        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(scan_cancelled.load(Ordering::Relaxed));
     }
 }

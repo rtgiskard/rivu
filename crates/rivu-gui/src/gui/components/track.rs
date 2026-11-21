@@ -277,22 +277,10 @@ mod tests {
     #[test]
     fn title_fallback_uses_stem_only_for_missing_or_blank_titles() {
         let mut track = rivu_protocol::model::LibraryRow {
-            id: 1,
             path: "/music/夜曲.live.flac".into(),
             title: " \t\n".into(),
-            artist: String::new(),
-            album: String::new(),
-            duration: None,
-            codec: String::new(),
-            channels: 2,
-            sample_rate: 0,
-            bits_per_sample: None,
             cue_number: Some(2),
-            bitrate_bps: None,
-            bitrate_exact: false,
-            favorite: false,
-            missing: false,
-            play_count: 0,
+            ..crate::test_support::library_row(1)
         };
         assert_eq!(TrackText::from(&track).title, "夜曲.live · #02");
         track.title = "  A complete title  ".into();

@@ -181,30 +181,26 @@ mod tests {
     use super::{ManualAction, ManualIntents};
 
     #[test]
-    fn late_completion_cannot_replace_newer_action() {
-        let mut owner = ManualIntents::default();
-        let old = owner.begin();
-        let current = owner.begin();
-        assert!(owner.offer(old, ManualAction::Clear).is_none());
-        assert!(owner.current(current));
-        assert!(matches!(
-            owner.offer(current, ManualAction::Quit),
-            Some(ManualAction::Quit)
-        ));
-        assert!(owner.offer(current, ManualAction::Clear).is_none());
-        assert!(!owner.current(current));
-    }
-
-    #[test]
-    fn settlement_releases_preparation_once_without_settling_newer_intent() {
-        let mut owner = ManualIntents::default();
-        let old = owner.begin();
-        let current = owner.begin();
-        assert!(!owner.settle(old));
-        assert!(owner.current(current));
-        assert!(owner.settle(current));
-        assert!(!owner.settle(current));
-        assert!(!owner.current(current));
-        assert!(owner.offer(current, ManualAction::Clear).is_none());
+    fn late_completion_cannot_replace_or_settle_newer_action() {
+        for settle in [false, true] {
+            let mut owner = ManualIntents::default();
+            let old = owner.begin();
+            let current = owner.begin();
+            assert!(owner.offer(old, ManualAction::Clear).is_none());
+            assert!(!owner.settle(old));
+            assert!(owner.current(current));
+            if settle {
+                assert!(owner.settle(current));
+            } else {
+                assert!(matches!(
+                    owner.offer(current, ManualAction::Quit),
+                    Some(ManualAction::Quit)
+                ));
+            }
+            // Either path consumes the intent exactly once.
+            assert!(!owner.current(current));
+            assert!(!owner.settle(current));
+            assert!(owner.offer(current, ManualAction::Clear).is_none());
+        }
     }
 }

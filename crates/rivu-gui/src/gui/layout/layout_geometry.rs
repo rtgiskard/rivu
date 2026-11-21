@@ -375,7 +375,7 @@ mod tests {
         }
     }
 
-    fn spans(layout: &super::super::Layout, width: f64) -> Vec<f64> {
+    fn spans(layout: &super::super::Layout, width: f64, gutter: f64, scale: f64) -> Vec<f64> {
         let Node::Split {
             boundaries,
             children,
@@ -384,29 +384,38 @@ mod tests {
         else {
             panic!("expected split")
         };
-        super::super::split_geometry(boundaries, children.len(), width, 4., 1.)
+        super::super::split_geometry(boundaries, children.len(), width, gutter, scale)
             .map(|(_, width)| width)
             .collect()
     }
 
     #[test]
     fn insertion_charges_only_target_for_new_gutter() {
-        let root = horizontal(vec![tabs(2, &[3, 4]), tabs(5, &[6]), tabs(7, &[8])]);
-        let measured = HashMap::from([
-            (1, (1008., 400.)),
-            (2, (600., 400.)),
-            (5, (200., 400.)),
-            (7, (200., 400.)),
-        ]);
-        let sizes = edit_sizes(&root, measured, 4, Some((5, Edge::Right, 100)), 4.);
-        let mut layout = super::super::Layout {
-            root: Some(root),
-            next_id: 100,
-            locked: false,
-        };
-        assert!(layout.move_panel(4, 5, Edge::Right, None));
-        layout.preserve_region_sizes(&sizes, 4.);
-        assert_eq!(spans(&layout, 1008.), vec![600., 98., 98., 200.]);
+        // An odd gutter at 2x splits the target into exact half-logical-pixel widths.
+        for (scale, gutter, half) in [(1., 4., 98.), (2., 5., 97.5)] {
+            let width = 1000. + 2. * gutter;
+            let root = horizontal(vec![tabs(2, &[3, 4]), tabs(5, &[6]), tabs(7, &[8])]);
+            let measured = HashMap::from([
+                (1, (width, 400.)),
+                (2, (600., 400.)),
+                (5, (200., 400.)),
+                (7, (200., 400.)),
+            ]);
+            let sizes = edit_sizes(&root, measured, 4, Some((5, Edge::Right, 100)), gutter);
+            let mut layout = super::super::Layout {
+                root: Some(root),
+                next_id: 100,
+                locked: false,
+            };
+            assert!(layout.move_panel(4, 5, Edge::Right, None));
+            layout.preserve_region_sizes(&sizes, gutter);
+            assert_eq!(
+                spans(&layout, width, gutter, scale),
+                vec![600., half, half, 200.],
+                "scale {scale}"
+            );
+            layout.validate().unwrap();
+        }
     }
 
     #[test]
@@ -431,7 +440,7 @@ mod tests {
             };
             assert!(layout.remove(panel));
             layout.preserve_region_sizes(&sizes, 4.);
-            assert_eq!(spans(&layout, 1008.), expected);
+            assert_eq!(spans(&layout, 1008., 4., 1.), expected);
         }
     }
 
@@ -461,7 +470,7 @@ mod tests {
         };
         assert!(layout.move_panel(4, 5, Edge::Right, None));
         layout.preserve_region_sizes(&sizes, 4.);
-        assert_eq!(spans(&layout, 1004.), vec![600., 198., 198.]);
+        assert_eq!(spans(&layout, 1004., 4., 1.), vec![600., 198., 198.]);
     }
 
     #[test]

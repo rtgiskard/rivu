@@ -176,35 +176,37 @@ mod tests {
         assert!(matches!(receive(stream), Request::Read { .. }));
     }
 
+    fn endpoint() -> (rivu::test_support::ipc::SocketTestDirectory, UnixListener) {
+        let directory = rivu::test_support::ipc::socket_test_directory();
+        let listener = UnixListener::bind_addr(&audio::address(directory.path()).unwrap()).unwrap();
+        (directory, listener)
+    }
+
+    fn start(source: Option<u64>, layout: Vec<u32>) -> Response {
+        Response::Start {
+            source,
+            identity: audio::SourceIdentity::Pcm {
+                storage: 1,
+                start: 0,
+                frames: 7,
+            },
+            sample_rate: 8,
+            layout,
+            duration: Some(0.875),
+        }
+    }
+
     #[test]
     fn borrowed_chunks_preserve_mapping_and_reject_interleaved_handshakes() {
-        if rivu::test_support::run_in_subprocess(
-            "transport::audio::tests::borrowed_chunks_preserve_mapping_and_reject_interleaved_handshakes",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         for interleaved_handshake in [false, true] {
-            let directory = rivu::test_support::ipc::socket_test_directory();
-            let listener =
-                UnixListener::bind_addr(&audio::address(directory.path()).unwrap()).unwrap();
+            let (directory, listener) = endpoint();
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 hello(&mut stream);
-                send(
-                    &mut stream,
-                    Response::Start {
-                        source: None,
-                        identity: audio::SourceIdentity::Pcm {
-                            storage: 1,
-                            start: 0,
-                            frames: 7,
-                        },
-                        sample_rate: 8,
-                        layout: vec![0, 1],
-                        duration: Some(0.875),
-                    },
-                );
+                send(&mut stream, start(None, vec![0, 1]));
                 let mut frames = 0;
                 for (index, count) in [4, 8, 2].into_iter().enumerate() {
                     send(
@@ -233,8 +235,9 @@ mod tests {
                     },
                 );
             });
-            let expected =
-                ExpectedSource::from(&crate::test_support::artwork_track("source.wav".into()));
+            let expected = ExpectedSource::from(&rivu_protocol::test_support::artwork_track(
+                "source.wav".into(),
+            ));
             let (_cancel, cancelled) = oneshot::channel();
             let mut callbacks = 0;
             let mut received_frames = 0;
@@ -291,14 +294,10 @@ mod tests {
 
     #[test]
     fn cancellation_closes_dedicated_finite_connection() {
-        if rivu::test_support::run_in_subprocess(
-            "transport::audio::tests::cancellation_closes_dedicated_finite_connection",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
-        let directory = rivu::test_support::ipc::socket_test_directory();
-        let listener = UnixListener::bind_addr(&audio::address(directory.path()).unwrap()).unwrap();
+        let (directory, listener) = endpoint();
         let (started, ready) = async_channel::bounded(1);
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -306,8 +305,9 @@ mod tests {
             started.send_blocking(()).unwrap();
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
-        let expected =
-            ExpectedSource::from(&crate::test_support::artwork_track("source.wav".into()));
+        let expected = ExpectedSource::from(&rivu_protocol::test_support::artwork_track(
+            "source.wav".into(),
+        ));
         let (cancel, cancelled) = oneshot::channel();
         let result = async_io::block_on(async {
             let cancel = async {
@@ -335,34 +335,18 @@ mod tests {
 
     #[test]
     fn source_echo_is_checked_before_start_callback() {
-        if rivu::test_support::run_in_subprocess(
-            "transport::audio::tests::source_echo_is_checked_before_start_callback",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
-        let directory = rivu::test_support::ipc::socket_test_directory();
-        let listener = UnixListener::bind_addr(&audio::address(directory.path()).unwrap()).unwrap();
+        let (directory, listener) = endpoint();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             hello(&mut stream);
-            send(
-                &mut stream,
-                Response::Start {
-                    source: Some(2),
-                    identity: audio::SourceIdentity::Pcm {
-                        storage: 1,
-                        start: 0,
-                        frames: 1,
-                    },
-                    sample_rate: 1,
-                    layout: vec![0, 1],
-                    duration: Some(1.0),
-                },
-            );
+            send(&mut stream, start(Some(2), vec![0, 1]));
         });
-        let expected =
-            ExpectedSource::from(&crate::test_support::artwork_track("source.wav".into()));
+        let expected = ExpectedSource::from(&rivu_protocol::test_support::artwork_track(
+            "source.wav".into(),
+        ));
         let (_cancel, cancelled) = oneshot::channel();
         let mut callbacks = 0;
         let result = async_io::block_on(read_stream(
@@ -378,43 +362,31 @@ mod tests {
                 Ok(())
             },
         ));
-        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("PCM source changed before capture")
+        );
         assert_eq!(callbacks, 0);
         server.join().unwrap();
     }
 
     #[test]
     fn invalid_native_layout_is_rejected_before_start_callback() {
-        if rivu::test_support::run_in_subprocess(
-            "transport::audio::tests::invalid_native_layout_is_rejected_before_start_callback",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         for layout in [vec![], vec![0, 0], vec![18], vec![0; 19]] {
-            let directory = rivu::test_support::ipc::socket_test_directory();
-            let listener =
-                UnixListener::bind_addr(&audio::address(directory.path()).unwrap()).unwrap();
+            let (directory, listener) = endpoint();
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 hello(&mut stream);
-                send(
-                    &mut stream,
-                    Response::Start {
-                        source: None,
-                        identity: audio::SourceIdentity::Pcm {
-                            storage: 1,
-                            start: 0,
-                            frames: 1,
-                        },
-                        sample_rate: 48_000,
-                        layout,
-                        duration: Some(1.0),
-                    },
-                );
+                send(&mut stream, start(None, layout));
             });
-            let expected =
-                ExpectedSource::from(&crate::test_support::artwork_track("source.wav".into()));
+            let expected = ExpectedSource::from(&rivu_protocol::test_support::artwork_track(
+                "source.wav".into(),
+            ));
             let (_cancel, cancelled) = oneshot::channel();
             let mut callbacks = 0;
             let result = async_io::block_on(read_stream(

@@ -303,7 +303,8 @@ impl Settings {
                                 this.sync_library_stats(cx);
                                 cx.notify();
                             },
-                        ),
+                        )
+                        .debug_selector(move || format!("settings-root-remove-{index}")),
                     )),
             );
         }
@@ -1609,17 +1610,19 @@ mod tests {
         count: usize,
         cx: &mut TestAppContext,
     ) -> Vec<gpui::Point<gpui::Pixels>> {
-        let bounds = VisualTestContext::from_window(handle, cx)
-            .debug_bounds("settings-library-roots-list")
-            .unwrap();
-        let gap = gpui::px(4.);
-        let height = (bounds.size.height - gap * (count - 1) as f32) / count as f32;
+        let mut window = VisualTestContext::from_window(handle, cx);
         (0..count)
             .map(|index| {
-                gpui::point(
-                    bounds.right() - gpui::px(8.),
-                    bounds.top() + (height + gap) * index as f32 + height * 0.5,
-                )
+                window
+                    .debug_bounds(
+                        [
+                            "settings-root-remove-0",
+                            "settings-root-remove-1",
+                            "settings-root-remove-2",
+                        ][index],
+                    )
+                    .unwrap()
+                    .center()
             })
             .collect()
     }

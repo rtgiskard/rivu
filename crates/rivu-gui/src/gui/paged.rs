@@ -46,9 +46,11 @@ impl<T> PagedRows<T> {
     }
     /// Display-only: retained geometry while stale rows remain visible; never authorizes.
     pub(super) fn display_total(&self) -> Option<usize> {
+        self.display_total_with_clock(Instant::now)
+    }
+    fn display_total_with_clock(&self, now: impl FnOnce() -> Instant) -> Option<usize> {
         self.total.or_else(|| {
-            (!self.retained.is_empty() && self.retention.visible(Instant::now()))
-                .then_some(self.layout_len)
+            (!self.retained.is_empty() && self.retention.visible(now())).then_some(self.layout_len)
         })
     }
     pub(super) fn len(&self) -> usize {
@@ -75,7 +77,7 @@ impl<T> PagedRows<T> {
         self.get(index).or_else(|| self.retained_at(index, now()))
     }
     #[cfg(test)]
-    fn display_at(&self, index: usize, now: Instant) -> Option<&T> {
+    pub(super) fn display_at(&self, index: usize, now: Instant) -> Option<&T> {
         self.display_with_clock(index, || now)
     }
     fn retained_at(&self, index: usize, now: Instant) -> Option<&T> {
@@ -182,13 +184,7 @@ impl<T> PagedRows<T> {
         }
     }
 
-    pub(super) fn accept_changed(&mut self, page: Page<T>) -> bool
-    where
-        T: PartialEq,
-    {
-        self.accept_at(page, Instant::now())
-    }
-    fn accept_at(&mut self, page: Page<T>, now: Instant) -> bool
+    pub(super) fn accept_at(&mut self, page: Page<T>, now: Instant) -> bool
     where
         T: PartialEq,
     {
@@ -359,10 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn failure_and_shrink_remove_retained_display_immediately() {
+    fn failure_shrink_reset_and_rejection_remove_retained_display_immediately() {
+        let now = Instant::now();
         let mut rows = PagedRows::default();
         fill(&mut rows, 0, 20);
-        let now = Instant::now();
         rows.refresh_at(now);
         rows.begin(0, 20);
         rows.fail("offline".into());
@@ -381,17 +377,30 @@ mod tests {
             },
             now,
         );
+        for total in [1, 0] {
+            rows.refresh_at(now);
+            rows.begin(0, 20);
+            assert!(rows.accept_at(
+                Page {
+                    total,
+                    rows: (0..total).collect()
+                },
+                now
+            ));
+            assert_eq!(rows.total(), Some(total));
+            assert_eq!(rows.display_at(0, now), (total > 0).then_some(&0));
+            assert_eq!(rows.display_at(1, now), None);
+        }
+
+        fill(&mut rows, 0, 100);
+        rows.refresh_at(now);
+        rows.clear();
+        assert_eq!(rows.display_at(3, now), None, "query reset");
+        fill(&mut rows, 0, 100);
         rows.refresh_at(now);
         rows.begin(0, 20);
-        assert!(rows.accept_at(
-            Page {
-                total: 1,
-                rows: vec![0]
-            },
-            now
-        ));
-        assert_eq!(rows.display_at(0, now), Some(&0));
-        assert_eq!(rows.display_at(1, now), None);
+        rows.retire_pending();
+        assert_eq!(rows.display_at(3, now), None, "rejected snapshot");
     }
 
     use super::*;
@@ -450,72 +459,45 @@ mod tests {
 
     #[test]
     fn refresh_retains_display_without_authorizing_rows_or_skipping_reload() {
+        let now = Instant::now();
         let mut rows = PagedRows::default();
         fill(&mut rows, 0, 100);
         fill(&mut rows, 20, 100);
         rows.demand(0..30, 20);
-        rows.invalidate();
-        assert_eq!(rows.display(3), Some(&3));
-        assert_eq!(rows.display(23), Some(&23));
+        rows.refresh_at(now);
+        assert_eq!(rows.display_at(3, now), Some(&3));
+        assert_eq!(rows.display_at(23, now), Some(&23));
         assert_eq!(rows.get(3), None);
         assert_eq!(rows.iter().next(), None);
         assert_eq!(rows.position(|row| *row == 3), None);
         assert_eq!(rows.total(), None);
         assert_eq!(
-            rows.display_total(),
+            rows.display_total_with_clock(|| now),
             Some(100),
             "count stays with retained rows"
         );
         assert_eq!(rows.demand(0..30, 20), Some(0));
         rows.begin(0, 20);
-        rows.accept(Page {
-            total: 100,
-            rows: (100..120).collect(),
-        });
-        assert_eq!(rows.display(3), Some(&103));
-        assert_eq!(rows.display(23), Some(&23));
-        rows.invalidate();
-        assert_eq!(rows.display(3), Some(&103));
-        assert_eq!(rows.display(23), Some(&23));
+        rows.accept_at(
+            Page {
+                total: 100,
+                rows: (100..120).collect(),
+            },
+            now,
+        );
+        assert_eq!(rows.display_at(3, now), Some(&103));
+        assert_eq!(rows.display_at(23, now), Some(&23));
+        rows.refresh_at(now);
+        assert_eq!(rows.display_at(3, now), Some(&103));
+        assert_eq!(rows.display_at(23, now), Some(&23));
         assert_eq!(rows.demand(60..70, 20), Some(60));
-        assert_eq!(rows.display(3), None);
-        assert_eq!(rows.display(23), None);
+        assert_eq!(rows.display_at(3, now), None);
+        assert_eq!(rows.display_at(23, now), None);
         assert_eq!(
-            rows.display_total(),
+            rows.display_total_with_clock(|| now),
             None,
             "count leaves with the last retained row"
         );
-    }
-
-    #[test]
-    fn refresh_does_not_mask_failure_removal_or_query_reset() {
-        for failure in [false, true] {
-            let mut rows = PagedRows::default();
-            fill(&mut rows, 0, 100);
-            rows.invalidate();
-            rows.begin(0, 20);
-            if failure {
-                rows.fail("unavailable".into());
-                assert_eq!(rows.error(3), Some("unavailable"));
-            } else {
-                rows.accept(Page {
-                    total: 0,
-                    rows: vec![],
-                });
-                assert_eq!(rows.total(), Some(0));
-            }
-            assert_eq!(rows.display(3), None);
-        }
-        let mut rows = PagedRows::default();
-        fill(&mut rows, 0, 100);
-        rows.invalidate();
-        rows.clear();
-        assert_eq!(rows.display(3), None);
-        fill(&mut rows, 0, 100);
-        rows.invalidate();
-        rows.begin(0, 20);
-        rows.retire_pending();
-        assert_eq!(rows.display(3), None);
     }
 
     #[test]
@@ -536,25 +518,6 @@ mod tests {
         rows.retire_pending();
         rows.invalidate();
         assert_eq!(rows.demand(20..40, 10), Some(20));
-    }
-
-    #[test]
-    fn distant_scroll_and_return_preserve_absolute_positions_with_bounded_payload() {
-        let mut rows = PagedRows::default();
-        fill(&mut rows, 0, 10_000);
-        for offset in (20..400).step_by(20) {
-            assert_eq!(rows.demand(offset..offset + 10, 20), Some(offset));
-            fill(&mut rows, offset, 10_000);
-            assert_eq!(rows.get(offset + 3), Some(&(offset + 3)));
-            assert!(rows.pages.len() <= MAX_PAGES);
-        }
-        assert_eq!(rows.len(), 10_000);
-        assert_eq!(rows.get(0), None);
-        assert_eq!(rows.demand(0..10, 20), Some(0));
-        assert!(rows.pages.len() <= MAX_PAGES);
-        assert!(rows.iter().count() <= 160);
-        fill(&mut rows, 0, 10_000);
-        assert_eq!(rows.position(|row| *row == 3), Some(3));
     }
 
     #[test]
@@ -623,14 +586,18 @@ mod tests {
         fill(&mut rows, 199_980, 200_000);
         assert_eq!(rows.get(199_999), Some(&199_999));
         for offset in (0..400).step_by(20) {
-            rows.demand(offset..offset + 10, 20);
+            assert_eq!(rows.demand(offset..offset + 10, 20), Some(offset));
             fill(&mut rows, offset, 200_000);
+            assert_eq!(rows.get(offset + 3), Some(&(offset + 3)));
             assert!(rows.pages.len() <= MAX_PAGES);
         }
+        assert_eq!(rows.len(), 200_000);
         assert_eq!(rows.get(199_999), None);
+        assert!(rows.iter().count() <= MAX_PAGES * 20);
         assert_eq!(rows.demand(199_990..200_000, 20), Some(199_980));
         fill(&mut rows, 199_980, 200_000);
         assert_eq!(rows.get(199_999), Some(&199_999));
+        assert_eq!(rows.position(|row| *row == 199_999), Some(199_999));
         rows.invalidate();
         rows.set_total(3);
         assert_eq!(rows.get(199_999), None);

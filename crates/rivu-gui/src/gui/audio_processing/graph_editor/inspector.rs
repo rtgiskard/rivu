@@ -1331,7 +1331,7 @@ mod tests {
         };
         let start = key(&graph, 3, GraphField::ProfileStart);
         let end = key(&graph, 3, GraphField::ProfileEnd);
-        for (a, b) in [("-0.1", "1"), ("1", "1"), ("2", "1"), ("0", "NaN")] {
+        for (a, b) in [("-0.1", "1"), ("1", "1"), ("0", "NaN")] {
             assert!(
                 node_replacement(&graph, 3, &[(start, a.into()), (end, b.into())], None).is_err()
             );

@@ -191,8 +191,7 @@ mod tests {
         point(px(x), px(y))
     }
 
-    #[test]
-    fn hidden_bar_ignores_stale_tab_hits_until_a_visible_tab_is_active() {
+    fn two_tab_row() -> (Node, Bounds<Pixels>) {
         let mut node = tabs(1);
         let Node::Tabs { panels, .. } = &mut node else {
             unreachable!()
@@ -200,47 +199,41 @@ mod tests {
         let mut second = panels[0].clone();
         second.id = 102;
         panels.push(second);
-        let bounds = |id| {
-            Some(match id {
-                101 => rect(10., 5., 90., 30.),
-                102 => rect(104., 5., 90., 30.),
-                _ => return None,
-            })
-        };
+        (node, rect(0., 0., 240., 300.))
+    }
+
+    fn tab_bounds(id: u64) -> Option<Bounds<Pixels>> {
+        match id {
+            101 => Some(rect(10., 5., 90., 30.)),
+            102 => Some(rect(104., 5., 90., 30.)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn hidden_bar_ignores_stale_tab_hits_until_a_visible_tab_is_active() {
+        let (mut node, owner) = two_tab_row();
         let position = pointer(140., 30.);
-        let owner = rect(0., 0., 240., 300.);
-        assert_eq!(tab_index(&node, position, owner, &bounds), Some(1));
+        assert_eq!(tab_index(&node, position, owner, &tab_bounds), Some(1));
         let Node::Tabs { panels, .. } = &mut node else {
             unreachable!()
         };
         panels[0].show_tab_bar = false;
-        assert_eq!(tab_index(&node, position, owner, &bounds), None);
+        assert_eq!(tab_index(&node, position, owner, &tab_bounds), None);
         let Node::Tabs { active, .. } = &mut node else {
             unreachable!()
         };
         *active = 102;
-        assert_eq!(tab_index(&node, position, owner, &bounds), Some(1));
+        assert_eq!(tab_index(&node, position, owner, &tab_bounds), Some(1));
         assert_eq!(
-            tab_index(&node, pointer(210., 30.), owner, &bounds),
+            tab_index(&node, pointer(210., 30.), owner, &tab_bounds),
             Some(2)
         );
     }
 
     #[test]
     fn tab_insertion_covers_row_gaps_tail_and_midpoint_boundaries() {
-        let mut node = tabs(1);
-        let Node::Tabs { panels, .. } = &mut node else {
-            unreachable!()
-        };
-        let mut second = panels[0].clone();
-        second.id = 102;
-        panels.push(second);
-        let owner = rect(0., 0., 240., 300.);
-        let bounds = |id| match id {
-            101 => Some(rect(10., 5., 90., 30.)),
-            102 => Some(rect(104., 5., 90., 30.)),
-            _ => None,
-        };
+        let (node, owner) = two_tab_row();
         for (x, index) in [
             (0., 0),
             (54., 0),
@@ -251,7 +244,7 @@ mod tests {
             (239., 2),
         ] {
             assert_eq!(
-                tab_index(&node, pointer(x, 5.), owner, &bounds),
+                tab_index(&node, pointer(x, 5.), owner, &tab_bounds),
                 Some(index)
             );
         }
@@ -261,7 +254,7 @@ mod tests {
             pointer(20., 4.),
             pointer(20., 35.),
         ] {
-            assert_eq!(tab_index(&node, position, owner, &bounds), None);
+            assert_eq!(tab_index(&node, position, owner, &tab_bounds), None);
         }
     }
 

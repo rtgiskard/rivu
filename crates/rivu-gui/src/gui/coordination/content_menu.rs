@@ -1113,7 +1113,7 @@ mod tests {
     use super::*;
     use crate::{
         gui::layout::persistence::{LayoutPersistence, LoadedLayouts},
-        test_support::{ConfigFixture, CoreRuntime},
+        test_support::{CoreRuntime, save_quiet_config},
     };
     use core::prelude::v1::test;
     use rivu_protocol::{model::AlbumKey, response::ViewResponse};
@@ -1127,22 +1127,14 @@ mod tests {
         _directory: tempfile::TempDir,
         album: AlbumKey,
         other: AlbumKey,
-        member: i64,
+        ids: [i64; 4],
     }
 
     fn fixture(cx: &mut TestAppContext) -> Fixture {
         cx.executor().allow_parking();
         cx.update(rivu_ui::input::Input::init);
         let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join("config.toml");
-        rivu_format::config::Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Default::default()
-        }
-        .save_fixture(&config)
-        .unwrap();
+        let config = save_quiet_config(directory.path());
         let album = AlbumKey {
             directory: directory.path().join("album"),
             title: "Album".into(),
@@ -1172,10 +1164,11 @@ mod tests {
         let ids = paths.map(|path| catalog.track_id(&path).unwrap().unwrap());
         drop(catalog);
         let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
-        for track_id in ids {
+        // Album order must differ from insertion order for the staged playlist check.
+        for (track_id, title) in ids.into_iter().zip(["B", "C", "A", "Outside"]) {
             let ack = futures::executor::block_on(runtime.handle.request_ack(Command::EditTrack {
                 track_id,
-                title: None,
+                title: Some(title.into()),
                 artist: None,
                 album: Some(album.title.clone()),
                 decoder_hint: None,
@@ -1223,7 +1216,7 @@ mod tests {
             window: window.into(),
             album,
             other,
-            member: ids[0],
+            ids,
         }
     }
 
@@ -1246,13 +1239,17 @@ mod tests {
         assert_eq!(app.content_favorite_actions(cx), (true, true));
     }
 
-    fn favorites(runtime: &CoreRuntime, album: &AlbumKey) -> Vec<bool> {
+    fn command_fence(runtime: &CoreRuntime) {
         // Commands and queries have independent queues. Observe a harmless
         // command after the action before asserting its real catalog effects.
         let ack =
             futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
                 .ack;
         assert!(ack.is_success(), "{:?}", ack.error);
+    }
+
+    fn favorites(runtime: &CoreRuntime, album: &AlbumKey) -> Vec<bool> {
+        command_fence(runtime);
         let ViewResponse::AlbumTracks(page) = runtime
             .handle
             .query(Query::AlbumTracks {
@@ -1268,6 +1265,24 @@ mod tests {
         };
         assert_eq!(page.total, page.rows.len());
         page.rows.into_iter().map(|row| row.favorite).collect()
+    }
+
+    fn queued_tracks(runtime: &CoreRuntime) -> Vec<i64> {
+        command_fence(runtime);
+        let ViewResponse::QueuePage(page) = runtime
+            .handle
+            .query(Query::QueuePage {
+                query: None,
+                offset: 0,
+                limit: rivu_protocol::model::MAX_QUERY_ROWS,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected queue page");
+        };
+        assert_eq!(page.total, page.rows.len());
+        page.rows.into_iter().map(|row| row.track.id).collect()
     }
 
     struct MenuWindow(Entity<WindowView>);
@@ -1363,13 +1378,13 @@ mod tests {
         fixture.app.update(cx, |app, cx| {
             app.open_object_menu(
                 ContentMenuRequest {
-                    source: TrackSource::Tracks(vec![fixture.member]),
+                    source: TrackSource::Tracks(vec![fixture.ids[0]]),
                     position: point(px(10.), px(10.)),
                     play: None,
                 },
                 ContentGuard::None,
                 Some(Command::RemoveTracks {
-                    track_ids: vec![fixture.member],
+                    track_ids: vec![fixture.ids[0]],
                 }),
                 None,
                 None,
@@ -1419,28 +1434,7 @@ mod tests {
                 .app
                 .read_with(cx, |app, _| app.content_menu.is_none())
         );
-        let ack = futures::executor::block_on(
-            fixture
-                .runtime
-                .handle
-                .request_ack(Command::Volume { value: 0.0 }),
-        )
-        .ack;
-        assert!(ack.is_success());
-        let ViewResponse::QueuePage(page) = fixture
-            .runtime
-            .handle
-            .query(Query::QueuePage {
-                query: None,
-                offset: 0,
-                limit: 10,
-            })
-            .result
-            .unwrap()
-        else {
-            panic!("queue page")
-        };
-        assert_eq!(page.total, 1, "only the fresh menu's album is queued");
+        assert_eq!(queued_tracks(&fixture.runtime), [fixture.ids[3]]);
     }
 
     #[gpui::test]
@@ -1475,13 +1469,13 @@ mod tests {
             |app, cx| {
                 app.open_object_menu(
                     ContentMenuRequest {
-                        source: TrackSource::Tracks(vec![fixture.member]),
+                        source: TrackSource::Tracks(vec![fixture.ids[0]]),
                         position: point(px(10.), px(10.)),
                         play: None,
                     },
                     ContentGuard::None,
                     Some(Command::RemoveTracks {
-                        track_ids: vec![fixture.member],
+                        track_ids: vec![fixture.ids[0]],
                     }),
                     None,
                     None,
@@ -1520,37 +1514,14 @@ mod tests {
     #[gpui::test]
     fn album_drop_rejects_stale_origin_and_transfers_current_full_album(cx: &mut TestAppContext) {
         let fixture = fixture(cx);
-        let queue_len = || {
-            let ack = futures::executor::block_on(
-                fixture
-                    .runtime
-                    .handle
-                    .request_ack(Command::Volume { value: 0.0 }),
-            )
-            .ack;
-            assert!(ack.is_success(), "{:?}", ack.error);
-            let ViewResponse::QueuePage(page) = fixture
-                .runtime
-                .handle
-                .query(Query::QueuePage {
-                    query: None,
-                    offset: 0,
-                    limit: rivu_protocol::model::MAX_QUERY_ROWS,
-                })
-                .result
-                .unwrap()
-            else {
-                panic!("expected queue page");
-            };
-            page.total
-        };
+        let queue_len = || queued_tracks(&fixture.runtime).len();
         let revision = fixture.app.update(cx, |app, cx| {
             app.refresh(cx);
             app.state.library.album_revision
         });
         let ack =
             futures::executor::block_on(fixture.runtime.handle.request_ack(Command::EditTrack {
-                track_id: fixture.member,
+                track_id: fixture.ids[0],
                 title: Some("Changed during drag".into()),
                 artist: None,
                 album: None,
@@ -1659,6 +1630,13 @@ mod tests {
                 && app.playlists.read(cx).editor_open()
         })
         .await;
+        fixture.app.read_with(cx, |app, cx| {
+            let [b, c, a, _outside] = fixture.ids;
+            assert_eq!(
+                app.playlists.read(cx).staged_create_tracks(),
+                Some([a, b, c].as_slice())
+            );
+        });
         assert_eq!(favorites(&fixture.runtime, &fixture.album), [false; 3]);
     }
 
@@ -1764,7 +1742,7 @@ mod tests {
         });
         let ack =
             futures::executor::block_on(fixture.runtime.handle.request_ack(Command::EditTrack {
-                track_id: fixture.member,
+                track_id: fixture.ids[0],
                 title: None,
                 artist: None,
                 album: Some("Changed".into()),

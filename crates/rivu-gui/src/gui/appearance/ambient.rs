@@ -250,6 +250,16 @@ impl Atmosphere {
 }
 
 #[cfg(test)]
+pub(super) fn color_cover(path: &std::path::Path, red: u8) {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([red, 0, 0, 255]))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    let bytes = bytes.into_inner();
+    rivu_metadata::artwork::test_support::pictures_wav(path, 3, &[(&bytes, bytes.len(), 3)]);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::ConfigFixture;
@@ -261,12 +271,12 @@ mod tests {
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let manager = Arc::new(ArtworkManager::new(directory.path()));
         let tracks = std::array::from_fn(|index| {
-            let mut track = crate::test_support::artwork_track(
+            let mut track = rivu_protocol::test_support::artwork_track(
                 directory.path().join(format!("track-{index}.wav")),
             );
             track.id = index as i64 + 1;
             if index < 2 {
-                rivu_metadata::artwork::test_support::tagged_wav(&track.path);
+                color_cover(&track.path, [71, 181][index]);
                 manager.load(crate::artwork_source(&track)).unwrap();
             }
             track
@@ -612,6 +622,8 @@ mod tests {
                 )
             });
         });
+        draw_sources(window, &atmosphere, Duration::from_secs(1), true);
+        window.run_until_parked();
         assert_eq!(
             draw_sources(window, &atmosphere, Duration::from_secs(1), true),
             (true, true, 0.)
@@ -662,12 +674,7 @@ mod tests {
     fn target_decode_readiness_not_lookup_or_switch_time_starts_the_fade(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (directory, manager, tracks) = sources();
-        // A second cache gives the same cover a distinct immutable source path.
-        let other_manager = ArtworkManager::new(&directory.path().join("other-cache"));
-        let target = other_manager
-            .load(crate::artwork_source(&tracks[1]))
-            .unwrap();
+        let (_directory, manager, tracks) = sources();
         let atmosphere = cx.new(|_| Atmosphere::new(manager, ArtworkImageRegistry::default()));
         let window = cx.add_empty_window();
         window.update(|_, cx| {
@@ -694,7 +701,6 @@ mod tests {
                     true,
                     cx,
                 );
-                this.apply_target(Some(target), true, cx);
             });
         });
         assert_eq!(
@@ -770,6 +776,8 @@ mod tests {
                 )
             });
         });
+        draw_sources(window, &atmosphere, Duration::from_secs(1), true);
+        window.run_until_parked();
         assert_eq!(
             draw_sources(window, &atmosphere, Duration::from_secs(1), true),
             (true, true, 0.)
@@ -797,6 +805,8 @@ mod tests {
                     )
                 });
             });
+            draw_sources(window, &atmosphere, duration, motion);
+            window.run_until_parked();
             assert_eq!(
                 draw_sources(window, &atmosphere, duration, motion),
                 (false, true, 1.)
@@ -894,6 +904,11 @@ mod tests {
             });
             cx.set_reduce_motion(true);
         });
+        assert_eq!(
+            draw_sources(window, &atmosphere, Duration::from_secs(1), true),
+            (false, false, 1.)
+        );
+        window.run_until_parked();
         assert_eq!(
             draw_sources(window, &atmosphere, Duration::from_secs(1), true),
             (false, true, 1.)
@@ -1118,41 +1133,25 @@ mod tests {
             );
             assert!(app.atmosphere.read(cx).source().is_some());
             app.workspace.layouts.current_mut().root = None;
-            for material in MaterialPreset::ALL
-                .into_iter()
-                .filter(|material| material.is_texture())
-            {
-                app.material_intent_fenced(MaterialIntent::Select(material), cx);
-                let baseline = MaterialSession::current(cx).settings;
-                app.material_intent_fenced(
-                    MaterialIntent::Set {
-                        material,
-                        parameter: MaterialParameter::Alpha,
-                        value: 0.2,
-                    },
-                    cx,
-                );
-                let edited = MaterialSession::current(cx).settings;
-                assert_ne!(edited, baseline);
-                app.toggle_material_controls(cx);
-                app.close_material_controls(cx);
-                app.toggle_material_controls(cx);
-                assert_eq!(MaterialSession::current(cx).settings, edited);
-                app.material_intent_fenced(MaterialIntent::Reset(material), cx);
-                assert_eq!(MaterialSession::current(cx).settings, baseline);
-                app.material_intent_fenced(
-                    MaterialIntent::Set {
-                        material,
-                        parameter: MaterialParameter::Alpha,
-                        value: 0.2,
-                    },
-                    cx,
-                );
-                app.material_intent_fenced(MaterialIntent::Select(material), cx);
-                assert_eq!(MaterialSession::current(cx).settings, edited);
-                app.material_intent_fenced(MaterialIntent::Reset(material), cx);
-                assert_eq!(MaterialSession::current(cx).settings, baseline);
-            }
+            let material = MaterialPreset::Storybook;
+            app.material_intent_fenced(MaterialIntent::Select(material), cx);
+            let baseline = MaterialSession::current(cx).settings;
+            app.material_intent_fenced(
+                MaterialIntent::Set {
+                    material,
+                    parameter: MaterialParameter::Alpha,
+                    value: 0.2,
+                },
+                cx,
+            );
+            let edited = MaterialSession::current(cx).settings;
+            assert_ne!(edited, baseline);
+            app.toggle_material_controls(cx);
+            app.close_material_controls(cx);
+            app.toggle_material_controls(cx);
+            assert_eq!(MaterialSession::current(cx).settings, edited);
+            app.material_intent_fenced(MaterialIntent::Reset(material), cx);
+            assert_eq!(MaterialSession::current(cx).settings, baseline);
             app.material_intent_fenced(MaterialIntent::Select(MaterialPreset::StillWater), cx);
             let fresh = MaterialSession::current(cx).settings;
             app.material_intent_fenced(

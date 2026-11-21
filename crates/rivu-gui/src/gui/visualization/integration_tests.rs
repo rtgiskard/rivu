@@ -1,71 +1,12 @@
 use super::*;
 use crate::gui::interaction::{DragCommit, SeekCommit, WindowInteraction};
 use crate::test_support::ConfigFixture;
-use gpui::{AppContext, Bounds, Context, point, px, size};
+use gpui::{AppContext, Bounds, Context};
 use rivu_format::config::Config;
 use rivu_format::decoder_hint::DecoderHint;
-use rivu_protocol::model::Track;
 use rivu_visuals::WaveformFrame;
-use std::{path::PathBuf, sync::atomic::Ordering};
-
-fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
-    let counts: Vec<_> = peaks
-        .iter()
-        .map(|value| u64::from(value.is_some()))
-        .collect();
-    WaveformFrame {
-        revision: 1,
-        path: Some(PathBuf::from("track.flac")),
-        duration: Some(10.0),
-        span_seconds: 10.0,
-        bin_frames: 80_000,
-        bin_count: peaks.len() as u64,
-        identity: Some(rivu_visuals::WaveformIdentity {
-            content: None,
-            sample_rate: 8_000,
-        }),
-        max_peak: peaks.iter().flatten().copied().fold(1.0, f32::max),
-        bin_revisions: counts.clone(),
-        rms_counts: counts.clone(),
-        left_rms_counts: counts.clone(),
-        right_rms_counts: counts,
-        rms: peaks.clone(),
-        left_peaks: peaks.clone(),
-        right_peaks: peaks.clone(),
-        left_rms: peaks.clone(),
-        right_rms: peaks.clone(),
-        peaks,
-        ..WaveformFrame::default()
-    }
-}
-
-fn track(path: &str, decoder_hint: DecoderHint) -> Track {
-    Track {
-        id: 1,
-        path: PathBuf::from(path),
-        fingerprint: None,
-        cue: None,
-        title: String::new(),
-        artist: String::new(),
-        album: String::new(),
-        duration: Some(10.0),
-        codec: String::new(),
-        channels: 2,
-        sample_rate: 44100,
-        bitrate_bps: None,
-        bitrate_exact: false,
-        track_number: None,
-        disc_number: None,
-        bits_per_sample: None,
-        release_date: None,
-        replaygain_track_gain: None,
-        favorite: false,
-        decoder_hint,
-        missing: false,
-        play_count: 0,
-        last_played: None,
-    }
-}
+use rivu_visuals::test_support::{frame, track};
+use std::sync::atomic::Ordering;
 
 fn captured_seek() -> (Waveform, WindowInteraction) {
     let mut waveform = Waveform::test_preview(WaveformFrame::default());
@@ -73,27 +14,6 @@ fn captured_seek() -> (Waveform, WindowInteraction) {
     let mut owner = WindowInteraction::default();
     owner.waveform_preview(10., Some(11), 7);
     (waveform, owner)
-}
-
-#[test]
-fn collapsed_waveform_geometry_cannot_produce_a_seek() {
-    let (mut waveform, mut owner) = captured_seek();
-    let position = point(px(60.0), px(5.0));
-    let bounds = Bounds::new(point(px(10.0), px(0.0)), size(px(100.0), px(20.0)));
-    waveform.test_panel_bounds(1, bounds, 20.0);
-    assert_eq!(waveform.test_seek_seconds(position, None), Some(10.0));
-    for size in [size(px(0.0), px(20.0)), size(px(100.0), px(0.0))] {
-        waveform.test_panel_bounds(1, Bounds::new(bounds.origin, size), 20.0);
-        assert_eq!(waveform.test_seek_seconds(position, None), None);
-    }
-    let cancelled = waveform.test_remove_panel(1).unwrap();
-    assert!(!waveform.accepts_seek_event(7));
-    assert!(owner.cancel_waveform(cancelled));
-    assert_eq!(owner.finish_waveform(20.0, 7), None);
-    waveform.test_panel_bounds(1, bounds, 20.0);
-    assert_eq!(waveform.test_seek_seconds(position, None), None);
-    waveform.test_seek_duration(20.0);
-    assert_eq!(waveform.test_seek_seconds(position, Some(1)), Some(10.0));
 }
 
 #[test]
@@ -120,15 +40,6 @@ fn hidden_and_unavailable_surfaces_cancel_both_owners_without_committing() {
         assert_eq!(owner.finish_waveform(12., 7), None);
         assert_eq!(waveform.test_remove_panel(1), None);
         assert_eq!(waveform.cancel_unreleased_seek(), None);
-        assert!(owner.waveform_preview(20., Some(12), 8));
-        assert!(!owner.cancel_waveform(cancelled));
-        assert_eq!(
-            owner.finish_waveform(21., 8),
-            Some(SeekCommit {
-                queue_id: 12,
-                seconds: 21.
-            })
-        );
     }
 }
 

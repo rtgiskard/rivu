@@ -19,6 +19,14 @@ pub(in crate::gui) struct PlaylistEditor {
 }
 
 impl Playlists {
+    #[cfg(test)]
+    pub(in crate::gui) fn staged_create_tracks(&self) -> Option<&[i64]> {
+        match &self.playlist_editor.as_ref()?.action {
+            PlaylistNameAction::Create { track_ids } => Some(track_ids),
+            _ => None,
+        }
+    }
+
     pub(in crate::gui) fn begin_playlist_name(
         &mut self,
         action: PlaylistNameAction,

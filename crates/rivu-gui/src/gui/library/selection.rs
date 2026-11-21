@@ -917,22 +917,8 @@ mod tests {
 
     fn row(id: i64) -> LibraryRow {
         LibraryRow {
-            id,
-            path: Default::default(),
-            title: String::new(),
-            artist: String::new(),
-            album: String::new(),
-            duration: None,
-            codec: String::new(),
-            bitrate_bps: None,
-            bitrate_exact: false,
-            channels: 0,
-            sample_rate: 0,
-            bits_per_sample: None,
-            cue_number: None,
             favorite: true,
-            missing: false,
-            play_count: 0,
+            ..crate::test_support::library_row(id)
         }
     }
 
@@ -986,6 +972,9 @@ mod tests {
             assert_ne!(library.tree.projection_revision(), projection);
             assert_eq!(library.selected_nodes(), &HashSet::from([original]));
             assert_eq!(library.tree.selected_index(), Some(0));
+            if cancellation.is_some() {
+                assert_eq!(library.tree.ready_selection(), None);
+            }
             assert_eq!(
                 library.take_ready_manual_navigation(),
                 cancellation.is_none().then_some((id, 1)),

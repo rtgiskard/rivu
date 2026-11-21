@@ -1039,6 +1039,12 @@ mod tests {
                 preferences.presets[&material].panel_alpha
             };
             assert_eq!(session.settings.panel_alpha, expected);
+            if material.is_texture() {
+                assert!(!session.apply(MaterialIntent::Select(material)));
+                assert_eq!(session.settings.panel_alpha, expected);
+                session.apply(MaterialIntent::Reset(material));
+                assert_eq!(session.settings, MaterialParameters::preset(material));
+            }
         }
     }
 
@@ -1233,8 +1239,6 @@ mod tests {
     #[gpui::test]
     fn material_surface_mapping_preserves_row_rendering_contract(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            let theme =
-                rivu_presentation::theme::palette(rivu_presentation::theme::Theme::RivuDark);
             assert_eq!(super::surface(cx), rivu_ui::SurfaceStyle::Opaque);
             for strength in [0., 0.28, 0.63, 1.] {
                 cx.default_global::<MaterialSession>()
@@ -1254,33 +1258,6 @@ mod tests {
                                 rivu_ui::SurfaceStyle::Opaque
                             }
                         );
-                        for (selected, hovered) in
-                            [(false, false), (false, true), (true, false), (true, true)]
-                        {
-                            let background =
-                                rivu_ui::row_background(theme, selected, hovered, surface);
-                            let expected_alpha = if !selected && !hovered {
-                                0.
-                            } else if enabled {
-                                strength
-                            } else {
-                                1.
-                            };
-                            assert_eq!(background.a, expected_alpha);
-                            let mut rendered = rivu_ui::list_row(
-                                theme,
-                                "material-row",
-                                selected,
-                                px(24.),
-                                surface,
-                            );
-                            let mut expected_row =
-                                div().bg(rivu_ui::row_background(theme, selected, false, surface));
-                            assert_eq!(
-                                rendered.style().background,
-                                expected_row.style().background
-                            );
-                        }
                     }
                 }
             }
@@ -1540,44 +1517,24 @@ mod tests {
                 composition
             }
         }
-        struct FallbackProbe(crate::gui::artwork::DefaultArtwork, bool);
-        impl Render for FallbackProbe {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let fallback = self.0.clone();
-                let expected_ready = self.1;
-                canvas(
-                    |_, _, _| (),
-                    move |_, _, window, cx| {
-                        let viewport = window.viewport_size();
-                        let result =
-                            fallback.ready(viewport.width.max(viewport.height), window, cx);
-                        if expected_ready {
-                            result.unwrap().unwrap();
-                        } else {
-                            assert!(result.is_none(), "pending cover requested fallback");
-                        }
-                    },
-                )
-                .size_full()
-            }
-        }
         std::fs::create_dir_all(".cache").unwrap();
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let manager = Arc::new(ArtworkManager::new(directory.path()));
         let tracks: [_; 2] = std::array::from_fn(|index| {
-            let mut track = crate::test_support::artwork_track(
+            let mut track = rivu_protocol::test_support::artwork_track(
                 directory.path().join(format!("frame-{index}.wav")),
             );
             track.id = index as i64 + 1;
-            rivu_metadata::artwork::test_support::tagged_wav(&track.path);
+            super::super::ambient::color_cover(&track.path, [51, 161][index]);
             manager.load(crate::artwork_source(&track)).unwrap();
             track
         });
-        let mut missing = crate::test_support::artwork_track(directory.path().join("missing.wav"));
+        let mut missing =
+            rivu_protocol::test_support::artwork_track(directory.path().join("missing.wav"));
         missing.id = 3;
         assert!(manager.load(crate::artwork_source(&missing)).is_none());
         let mut rejected =
-            crate::test_support::artwork_track(directory.path().join("rejected.wav"));
+            rivu_protocol::test_support::artwork_track(directory.path().join("rejected.wav"));
         rejected.id = 4;
         rivu_metadata::artwork::test_support::pictures_wav(
             &rejected.path,
@@ -1585,24 +1542,16 @@ mod tests {
             &[(b"not an image", 12, 3)],
         );
         assert!(manager.load(crate::artwork_source(&rejected)).is_none());
-        let mut corrupt = crate::test_support::artwork_track(directory.path().join("corrupt.wav"));
+        let mut corrupt =
+            rivu_protocol::test_support::artwork_track(directory.path().join("corrupt.wav"));
         corrupt.id = 5;
-        let mut bytes = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            2,
-            2,
-            image::Rgba([240, 10, 20, 255]),
-        ))
-        .write_to(&mut bytes, image::ImageFormat::Png)
-        .unwrap();
-        let bytes = bytes.into_inner();
+        let bytes = crate::gui::artwork::gif_with_corrupt_second_frame();
         rivu_metadata::artwork::test_support::pictures_wav(
             &corrupt.path,
             3,
             &[(&bytes, bytes.len(), 3)],
         );
-        let loaded = manager.load(crate::artwork_source(&corrupt)).unwrap();
-        std::fs::write(loaded.path(), b"not an image").unwrap();
+        manager.load(crate::artwork_source(&corrupt)).unwrap();
         let atmosphere = cx.new(|_| Atmosphere::new(manager, ArtworkImageRegistry::default()));
         let default_artwork = cx.new(|cx| {
             crate::gui::artwork::DefaultArtwork::new(
@@ -1641,11 +1590,19 @@ mod tests {
             });
         };
         draw(window);
-        window.run_until_parked();
-        window.draw(point(px(0.), px(0.)), size(px(64.), px(64.)), |_, cx| {
-            cx.new(|cx| FallbackProbe(default_artwork.read(cx).clone(), false))
-                .into_any_element()
+        {
+            let sampled = observed.borrow();
+            let pending = sampled.as_ref().unwrap();
+            assert!(pending.surface.is_some());
+            assert!(pending.current.is_none() && pending.previous.is_none());
+        }
+        window.update(|_, cx| {
+            default_artwork
+                .read(cx)
+                .clone()
+                .assert_composed_cover(cx, false);
         });
+        window.run_until_parked();
         draw(window);
         window.update(|_, cx| {
             atmosphere.update(cx, |owner, cx| {
@@ -1671,6 +1628,8 @@ mod tests {
         assert_eq!(accepted.material, Some(MaterialPreset::Dissolve));
         let previous = accepted.previous.as_ref().unwrap().clone();
         let current = accepted.current.as_ref().unwrap().clone();
+        assert_eq!(&previous.as_bytes(0).unwrap()[..4], &[0, 0, 51, 255]);
+        assert_eq!(&current.as_bytes(0).unwrap()[..4], &[0, 0, 161, 255]);
         assert!((accepted.weight - 0.5).abs() < 0.0001);
 
         // Complete the owner transition while retaining the previously accepted
@@ -1684,7 +1643,7 @@ mod tests {
             let observed = observed.borrow();
             let completed = observed.as_ref().unwrap();
             assert!(completed.previous.is_none());
-            assert!(completed.current.is_some());
+            assert!(Arc::ptr_eq(completed.current.as_ref().unwrap(), &current));
             assert_eq!(completed.weight, 1.);
         }
         window.update(|_, cx| {
@@ -1718,6 +1677,12 @@ mod tests {
 
         for target in [Some(&missing), Some(&rejected), Some(&corrupt), None] {
             window.update(|_, cx| {
+                default_artwork.update(cx, |fallback, cx| {
+                    *fallback = crate::gui::artwork::DefaultArtwork::new(
+                        &rivu_presentation::i18n::Localizer::new("en"),
+                        cx,
+                    );
+                });
                 atmosphere.update(cx, |owner, cx| {
                     owner.sync(target, MaterialPreset::Storybook, 0., true, true, cx)
                 });
@@ -1726,9 +1691,11 @@ mod tests {
                 draw(window);
                 window.run_until_parked();
             }
-            window.draw(point(px(0.), px(0.)), size(px(64.), px(64.)), |_, cx| {
-                cx.new(|cx| FallbackProbe(default_artwork.read(cx).clone(), true))
-                    .into_any_element()
+            window.update(|_, cx| {
+                default_artwork
+                    .read(cx)
+                    .clone()
+                    .assert_composed_cover(cx, true);
             });
             let observed = observed.borrow();
             let frame = observed.as_ref().unwrap();

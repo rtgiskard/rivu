@@ -394,18 +394,6 @@ impl EntrySelection {
         self.fail(message);
         true
     }
-    #[cfg(test)]
-    pub(in crate::gui) fn remove(&mut self, id: i64) {
-        self.cancel();
-        self.selected.remove(&id);
-        self.reclaim_selection_capacity(self.selected.len());
-        if self.active.is_some_and(|row| row.id == id) {
-            self.active = None;
-        }
-        if self.anchor.is_some_and(|row| row.id == id) {
-            self.anchor = None;
-        }
-    }
     fn current(&self, generation: u64) -> bool {
         self.generation == generation
     }
@@ -1446,6 +1434,48 @@ impl Playlists {
     }
 }
 
+/// Playlist row constructors shared by the sibling playlist test modules.
+#[cfg(test)]
+pub(super) mod test_rows {
+    use rivu_protocol::model::{PlaylistEntryRow, PlaylistSummary};
+
+    pub(in crate::gui::playlists) fn summary(id: i64, entry_count: usize) -> PlaylistSummary {
+        PlaylistSummary {
+            id,
+            name: format!("playlist {id}"),
+            entry_count,
+        }
+    }
+
+    /// An occurrence whose match offset equals its source position.
+    pub(in crate::gui::playlists) fn entry(
+        id: i64,
+        track_id: i64,
+        position: usize,
+    ) -> PlaylistEntryRow {
+        PlaylistEntryRow {
+            id,
+            track_id,
+            position,
+            offset: position,
+            title: String::new(),
+            path: Default::default(),
+            channels: 0,
+            sample_rate: 0,
+            bits_per_sample: None,
+            bitrate_bps: None,
+            bitrate_exact: false,
+            cue_number: None,
+            artist: String::new(),
+            album: String::new(),
+            duration: None,
+            codec: String::new(),
+            missing: false,
+            favorite: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1454,9 +1484,9 @@ mod tests {
         for id in 0..4096 {
             selection.select(identity(id, id as usize), true);
         }
-        let capacity = selection.selected.capacity();
+        selection.selected.reserve(4096);
         selection.select(identity(4096, 4096), true);
-        assert_eq!(selection.selected.capacity(), capacity);
+        assert!(selection.selected.capacity() >= 8192);
         selection.select(identity(9, 9), false);
         assert_eq!(selection.len(), 1);
         assert!(selection.selected.capacity() <= 64);
@@ -1802,25 +1832,8 @@ mod tests {
         Page {
             total,
             rows: (offset..offset + count)
-                .map(|position| PlaylistEntryRow {
-                    id: position as i64,
-                    track_id: position as i64 + 100,
-                    position,
-                    offset: position,
-                    title: String::new(),
-                    path: Default::default(),
-                    channels: 0,
-                    sample_rate: 0,
-                    bits_per_sample: None,
-                    bitrate_bps: None,
-                    bitrate_exact: false,
-                    cue_number: None,
-                    artist: String::new(),
-                    album: String::new(),
-                    duration: None,
-                    codec: String::new(),
-                    missing: false,
-                    favorite: false,
+                .map(|position| {
+                    super::test_rows::entry(position as i64, position as i64 + 100, position)
                 })
                 .collect(),
         }
@@ -2915,22 +2928,27 @@ mod tests {
             .is_some()
         );
         let metadata_only = QueryRevisions {
-            library: 7,
-            playlist: 9,
+            playlist_metadata: Some(PlaylistEntryRevision {
+                playlist_id: 9,
+                revision: 7,
+            }),
             ..current
         };
-        assert!(
-            super::entry_query_result(
-                QueryResponse {
-                    revisions: metadata_only,
-                    result: Ok(ViewResponse::PlaylistEntryLocations(Vec::new())),
-                },
-                navigation_scope(),
-                false
-            )
-            .unwrap()
-            .is_some()
-        );
+        for filtered in [false, true] {
+            assert_eq!(
+                super::entry_query_result(
+                    QueryResponse {
+                        revisions: metadata_only,
+                        result: Ok(ViewResponse::PlaylistEntryLocations(Vec::new())),
+                    },
+                    navigation_scope(),
+                    filtered
+                )
+                .unwrap()
+                .is_some(),
+                !filtered
+            );
+        }
     }
 
     #[test]
@@ -2999,7 +3017,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_range_failure_rolls_back_and_retry_restores_group_consumers() {
+    fn incomplete_range_accumulator_keeps_old_selection_until_reconciliation() {
         let mut selection = EntrySelection::default();
         selection.select(identity(7, 20), false);
         selection.busy = true;

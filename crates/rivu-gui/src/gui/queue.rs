@@ -9,8 +9,6 @@
 //! coordinator receives typed cross-feature intents for confirmation and metadata.
 //! Physical page retirement precedes snapshot reconciliation, then publication.
 
-#[cfg(test)]
-use crate::test_support::ConfigFixture;
 mod model;
 mod queries;
 mod view;
@@ -307,10 +305,7 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        sync::Arc,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     fn test_queue(
         cx: &mut gpui::TestAppContext,
@@ -328,30 +323,8 @@ mod tests {
                 cx,
             );
         });
-        let path = directory.path().join("config.toml");
-        rivu_format::config::Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Default::default()
-        }
-        .save_fixture(&path)
-        .unwrap();
-        let runtime = crate::test_support::CoreRuntime::start(directory.path(), &path).unwrap();
-        let i18n = Arc::new(rivu_presentation::i18n::Localizer::new("en-US"));
-        let labels = Rc::new(
-            i18n.fixed_texts()
-                .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                .collect(),
-        );
-        let context = FeatureContext {
-            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
-                runtime.handle.clone(),
-            )),
-            i18n,
-            labels,
-            scroll: Default::default(),
-        };
+        let runtime = crate::test_support::CoreRuntime::start_quiet(directory.path());
+        let context = FeatureContext::for_test(runtime.handle.clone());
         let queue = cx.new(|cx| Queue::new(context, cx));
         (queue, runtime)
     }

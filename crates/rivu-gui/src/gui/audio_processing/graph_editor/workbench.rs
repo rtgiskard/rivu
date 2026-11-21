@@ -1626,24 +1626,8 @@ mod tests {
     }
 
     fn click(window: &mut Window, cx: &mut App, position: Point<Pixels>) {
-        window.dispatch_event(
-            MouseDownEvent {
-                button: MouseButton::Left,
-                position,
-                ..Default::default()
-            }
-            .to_platform_input(),
-            cx,
-        );
-        window.dispatch_event(
-            MouseUpEvent {
-                button: MouseButton::Left,
-                position,
-                ..Default::default()
-            }
-            .to_platform_input(),
-            cx,
-        );
+        test_support::press_left(window, cx, position);
+        test_support::release_left(window, cx, position);
     }
 
     #[gpui::test]
@@ -1838,7 +1822,16 @@ mod tests {
         let mut graph = ProcessingGraph::default();
         graph.nodes[0].position = [-f32::MAX, -f32::MAX];
         graph.nodes[1].position = [f32::MAX, f32::MAX];
-        let mut view = fitted_view(&graph, [640., 320.], None).unwrap();
+        graph.validate().unwrap();
+        let size = [640., 320.];
+        let mut view = fitted_view(&graph, size, None).unwrap();
+        assert!(view.zoom > 0. && view.zoom < 0.35);
+        for node in &graph.nodes {
+            let screen = view.screen(node.position.map(f64::from), [0.; 2]);
+            for axis in 0..2 {
+                assert!((0. ..=f64::from(size[axis])).contains(&screen[axis]));
+            }
+        }
         let position = graph.nodes[1].position.map(f64::from);
         let anchor = view.screen(position, [0.; 2]);
         let fit_zoom = view.zoom;
@@ -1909,23 +1902,6 @@ mod tests {
             for point in curve {
                 assert!((0. ..=640.).contains(&point[0]));
                 assert_eq!(point[1], 160.);
-            }
-        }
-    }
-
-    #[test]
-    fn fit_keeps_valid_extreme_coordinate_spans_finite_and_visible() {
-        let mut graph = ProcessingGraph::default();
-        graph.nodes[0].position = [-f32::MAX, -f32::MAX];
-        graph.nodes[1].position = [f32::MAX, f32::MAX];
-        graph.validate().unwrap();
-        let size = [640., 320.];
-        let view = fitted_view(&graph, size, None).unwrap();
-        assert!(view.zoom > 0. && view.zoom < 0.35);
-        for node in &graph.nodes {
-            let screen = view.screen(node.position.map(f64::from), [0.; 2]);
-            for axis in 0..2 {
-                assert!((0. ..=f64::from(size[axis])).contains(&screen[axis]));
             }
         }
     }

@@ -178,12 +178,11 @@ mod tests {
 
     #[gpui::test]
     fn application_quit_shuts_down_core(cx: &mut TestAppContext) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
-        let runtime = crate::test_support::CoreRuntime::start(
-            directory.path(),
-            &directory.path().join("config.toml"),
-        )
-        .unwrap();
+        let runtime = crate::test_support::CoreRuntime::start_at(directory.path());
         let (stopped, shutdown) = std::sync::mpsc::sync_channel(1);
         runtime.handle.set_disconnect_callback(move || {
             let _ = stopped.try_send(());

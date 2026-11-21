@@ -1571,7 +1571,7 @@ mod tests {
                         .0
                         .is_none()
                 );
-                assert_eq!(covers.views[&0].view.image(cx).is_some(), positive);
+                assert_eq!(covers.views[&0].view.has_artwork(), positive);
                 assert_eq!(covers.views[&0].negative.is_some(), !positive);
                 covers.clear(cx);
                 assert!(covers.views.is_empty());
@@ -1593,7 +1593,7 @@ mod tests {
         cx.update(|cx| {
             let images = ArtworkImageRegistry::default();
             covers.sync(0..1, |_| Some(&source), &manager, &images, cx);
-            assert!(covers.views[&0].view.image(cx).is_some());
+            assert!(covers.views[&0].view.has_artwork());
             // Failed/retired pages remove display rows without changing the viewport.
             covers.sync(0..1, |_| None, &manager, &images, cx);
             assert!(covers.views.is_empty());
@@ -1605,8 +1605,8 @@ mod tests {
 
     #[gpui::test]
     fn pending_album_tracks_expose_failure_copy_and_retry(cx: &mut gpui::TestAppContext) {
-        use crate::gui::feature::{FeatureContext, SnapshotSource};
-        use crate::test_support::{ConfigFixture, CoreRuntime};
+        use crate::gui::feature::FeatureContext;
+        use crate::test_support::CoreRuntime;
         use gpui::{prelude::*, *};
         use rivu_protocol::response::{QueryError, QueryResponse};
 
@@ -1630,28 +1630,9 @@ mod tests {
             rivu_ui::input::Input::init(cx);
         });
         let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join("config.toml");
-        rivu_format::config::Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Default::default()
-        }
-        .save_fixture(&config)
-        .unwrap();
-        let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
-        let i18n = std::sync::Arc::new(rivu_presentation::i18n::Localizer::new("en-US"));
-        let context = FeatureContext {
-            snapshots: std::rc::Rc::new(SnapshotSource::new(runtime.handle.clone())),
-            labels: std::rc::Rc::new(
-                i18n.fixed_texts()
-                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-                    .collect(),
-            ),
-            i18n: i18n.clone(),
-            scroll: Default::default(),
-        };
-        let default_artwork = cx.new(|cx| super::DefaultArtwork::new(&i18n, cx));
+        let runtime = CoreRuntime::start_quiet(directory.path());
+        let context = FeatureContext::for_test(runtime.handle.clone());
+        let default_artwork = cx.new(|cx| super::DefaultArtwork::new(&context.i18n, cx));
         let browser = cx.new(|cx| {
             super::AlbumBrowser::new(
                 1,
@@ -1750,7 +1731,7 @@ mod tests {
         let mut cover = AlbumCover::new(ArtworkImageRegistry::default());
         cx.update(|cx| {
             assert!(cover.complete(&source, Some(&source), Some(&completed), cx));
-            assert!(cover.view.image(cx).is_some());
+            assert!(cover.view.has_artwork());
             assert!(cover.negative.is_none());
         });
         drop(completed);
@@ -1766,7 +1747,7 @@ mod tests {
         );
         cx.update(|cx| {
             assert_eq!(cover.sync(&source, &manager, cx), (false, false));
-            assert!(cover.view.image(cx).is_some());
+            assert!(cover.view.has_artwork());
         });
     }
 
@@ -1811,9 +1792,9 @@ mod tests {
                 covers.prepare(|index| sources.get(index), &manager, &mut loader, cx);
             assert!(next.is_none());
             assert!(changed);
-            assert!(covers.views[&0].view.image(cx).is_some());
-            assert!(covers.views[&1].view.image(cx).is_some());
-            assert!(covers.views[&2].view.image(cx).is_none());
+            assert!(covers.views[&0].view.has_artwork());
+            assert!(covers.views[&1].view.has_artwork());
+            assert!(!covers.views[&2].view.has_artwork());
             assert!(
                 covers.views[&2]
                     .negative
@@ -1847,7 +1828,7 @@ mod tests {
                     .0
                     .is_none()
             );
-            assert!(covers.views[&1].view.image(cx).is_some());
+            assert!(covers.views[&1].view.has_artwork());
             assert!(
                 covers.views[&2]
                     .negative
@@ -1924,7 +1905,7 @@ mod tests {
             let cover = covers.views.get_mut(&index).unwrap();
             cx.update(|cx| {
                 assert_eq!(cover.sync(source, &manager, cx), (false, false));
-                assert!(cover.view.image(cx).is_none());
+                assert!(!cover.view.has_artwork());
             });
         }
     }
@@ -1961,7 +1942,7 @@ mod tests {
         let recovered = manager.load(owned_artwork_source(&current)).unwrap();
         cx.update(|cx| {
             assert!(cover.complete(&current, Some(&current), Some(&recovered), cx));
-            assert!(cover.view.image(cx).is_some());
+            assert!(cover.view.has_artwork());
             assert!(cover.negative.is_none());
         });
     }
@@ -2001,9 +1982,9 @@ mod tests {
         assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
         cx.update(|cx| {
             assert!(covers.complete(&next, Some(&completed), |index| sources.get(index), cx));
-            assert!(covers.views[&0].view.image(cx).is_some());
-            assert!(covers.views[&1].view.image(cx).is_none());
-            assert!(covers.views[&2].view.image(cx).is_some());
+            assert!(covers.views[&0].view.has_artwork());
+            assert!(!covers.views[&1].view.has_artwork());
+            assert!(covers.views[&2].view.has_artwork());
         });
         let next = cx
             .update(|cx| {
@@ -2089,7 +2070,7 @@ mod tests {
         cx.update(|cx| {
             assert!(!covers.complete(&active, negative.as_ref(), latest, cx));
             assert!(covers.views[&2].negative.is_none());
-            assert!(covers.views[&2].view.image(cx).is_none());
+            assert!(!covers.views[&2].view.has_artwork());
         });
         let next = cx
             .update(|cx| covers.prepare(latest, &manager, &mut loader, cx).0)
@@ -2102,7 +2083,7 @@ mod tests {
         assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
         cx.update(|cx| {
             assert!(covers.complete(&next, Some(&completed), latest, cx));
-            assert!(covers.views[&2].view.image(cx).is_some());
+            assert!(covers.views[&2].view.has_artwork());
         });
         assert!(
             cx.update(|cx| covers.prepare(latest, &manager, &mut loader, cx).0)

@@ -591,10 +591,7 @@ mod tests {
 
     #[test]
     fn retiring_desktop_releases_singleton_before_activation_waiters() {
-        if rivu::test_support::run_in_subprocess(
-            "desktop::tests::retiring_desktop_releases_singleton_before_activation_waiters",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         use std::io::{Read, Write};
@@ -634,6 +631,9 @@ mod tests {
 
     #[test]
     fn bound_but_unready_desktop_does_not_disable_startup_deadline() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+            return;
+        }
         let directory = socket_test_directory();
         let _listener = Activation::bind(directory.path()).unwrap();
         let error =
@@ -663,18 +663,11 @@ mod tests {
             .unwrap();
             return;
         }
-        if rivu::test_support::run_in_subprocess(
-            "desktop::tests::independent_gui_activation_uses_existing_service_and_kernel_singleton",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         let directory = socket_test_directory();
-        let runtime = crate::test_support::CoreRuntime::start(
-            directory.path(),
-            &directory.path().join("config.toml"),
-        )
-        .unwrap();
+        let runtime = crate::test_support::CoreRuntime::start_at(directory.path());
         let tasks = TaskRuntime::start().unwrap();
         let control = DesktopControl::default();
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);
@@ -692,8 +685,10 @@ mod tests {
         let mut registration = rivu_client::client_session(directory.path());
         assert!(registration.register_desktop().unwrap().is_success());
         let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--exact").arg("desktop::tests::independent_gui_activation_uses_existing_service_and_kernel_singleton")
-            .env(CHILD_DIRECTORY, directory.path()).status().unwrap();
+            .args(["--exact", std::thread::current().name().unwrap()])
+            .env(CHILD_DIRECTORY, directory.path())
+            .status()
+            .unwrap();
         assert!(status.success());
         wakes.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(control.take_raise_request());
@@ -717,27 +712,24 @@ mod tests {
         );
     }
 
+    fn start_desktop(directory: &Path, instance: u32) -> Desktop {
+        Desktop::start(
+            directory,
+            Activation::bind(directory).unwrap(),
+            instance,
+            crate::test_support::build_info(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn dropping_desktop_never_shuts_down_the_service() {
-        if rivu::test_support::run_in_subprocess(
-            "desktop::tests::dropping_desktop_never_shuts_down_the_service",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         let directory = socket_test_directory();
-        let runtime = crate::test_support::CoreRuntime::start(
-            directory.path(),
-            &directory.path().join("config.toml"),
-        )
-        .unwrap();
-        let desktop = Desktop::start(
-            directory.path(),
-            Activation::bind(directory.path()).unwrap(),
-            runtime.handle.instance_id(),
-            crate::test_support::build_info(),
-        )
-        .unwrap();
+        let runtime = crate::test_support::CoreRuntime::start_at(directory.path());
+        let desktop = start_desktop(directory.path(), runtime.handle.instance_id());
         desktop.handle.request_shutdown().unwrap();
         drop(desktop);
         assert!(
@@ -754,27 +746,15 @@ mod tests {
     fn final_window_close_defers_gui_quit_and_preserves_service_and_layout(
         cx: &mut gpui::TestAppContext,
     ) {
-        if rivu::test_support::run_in_subprocess(
-            "desktop::tests::final_window_close_defers_gui_quit_and_preserves_service_and_layout",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         let directory = socket_test_directory();
-        let runtime = crate::test_support::CoreRuntime::start(
+        let runtime = crate::test_support::CoreRuntime::start_at(directory.path());
+        let owner = Rc::new(RefCell::new(start_desktop(
             directory.path(),
-            &directory.path().join("config.toml"),
-        )
-        .unwrap();
-        let owner = Rc::new(RefCell::new(
-            Desktop::start(
-                directory.path(),
-                Activation::bind(directory.path()).unwrap(),
-                runtime.handle.instance_id(),
-                crate::test_support::build_info(),
-            )
-            .unwrap(),
-        ));
+            runtime.handle.instance_id(),
+        )));
         let control = owner.borrow().handle.clone();
         let window = cx.update(|cx| {
             rivu_ui::input::Input::init(cx);
@@ -818,19 +798,12 @@ mod tests {
 
     #[test]
     fn core_quit_forces_desktop_exit_even_with_pending_activation() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+            return;
+        }
         let directory = socket_test_directory();
-        let runtime = crate::test_support::CoreRuntime::start(
-            directory.path(),
-            &directory.path().join("config.toml"),
-        )
-        .unwrap();
-        let desktop = Desktop::start(
-            directory.path(),
-            Activation::bind(directory.path()).unwrap(),
-            runtime.handle.instance_id(),
-            crate::test_support::build_info(),
-        )
-        .unwrap();
+        let runtime = crate::test_support::CoreRuntime::start_at(directory.path());
+        let desktop = start_desktop(directory.path(), runtime.handle.instance_id());
         desktop.handle.raise().unwrap();
         assert!(!desktop.handle.is_shutting_down());
         let (wake, wakes) = std::sync::mpsc::sync_channel(1);

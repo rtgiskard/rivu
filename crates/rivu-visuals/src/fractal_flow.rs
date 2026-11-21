@@ -331,14 +331,17 @@ mod tests {
                 onset: if step % 137 == 0 { 1.0 } else { 0.0 },
             };
             scene.advance(STEP, drive);
-            scene.rebuild_segments();
-            assert!(scene.segments.len() <= MAX_SEGMENTS);
             for particle in scene.particles.iter() {
                 assert!((1..=HISTORY_POINTS).contains(&particle.count));
                 for coordinate in particle.position {
                     assert!(coordinate.is_finite() && (-1.0..=1.0).contains(&coordinate));
                 }
             }
+            if step % HISTORY_POINTS != 0 && step != 11_999 {
+                continue;
+            }
+            scene.rebuild_segments();
+            assert!(scene.segments.len() <= MAX_SEGMENTS);
             for segment in scene.segments() {
                 assert!(segment.strength.is_finite());
                 assert!((0.0..=1.0).contains(&segment.strength));
@@ -358,12 +361,8 @@ mod tests {
     #[test]
     fn boundary_respawn_discards_old_trail_before_rendering() {
         let mut scene = Scene::new();
-        // At this edge the fine-scale field has an outward x component.
-        // Evaluate that deterministic field rather than depending on a
-        // naturally occurring crossing at a particular playback timestamp.
-        let weights = [0.25, 0.10, 0.205];
+        // Start at the outward-facing edge so one driven step triggers a respawn.
         let position = [1.0, 0.0];
-        assert!(flow(position, 0, [0.001, 0.00175, 0.0085], weights, [0.1, 0.0])[0] > 0.0);
         let particle = &mut scene.particles[0];
         particle.position = position;
         particle.count = HISTORY_POINTS;

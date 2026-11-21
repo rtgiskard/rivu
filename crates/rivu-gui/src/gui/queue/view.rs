@@ -964,30 +964,6 @@ mod queue_drag_tests {
         }
     }
 
-    fn reordered(drag: &QueueDrag, target: Option<usize>) -> Vec<u64> {
-        reordered_at(drag, target, false)
-    }
-
-    fn reordered_at(drag: &QueueDrag, target: Option<usize>, after: bool) -> Vec<u64> {
-        let index = drag
-            .insertion_index(target.map(|position| (identity(position), after)), 5)
-            .unwrap();
-        let selected: Vec<_> = drag
-            .entries
-            .get()
-            .unwrap()
-            .iter()
-            .map(|row| row.id)
-            .collect();
-        let mut remaining: Vec<_> = (0..5)
-            .map(identity)
-            .map(|row| row.id)
-            .filter(|id| !selected.contains(id))
-            .collect();
-        remaining.splice(index..index, selected);
-        remaining
-    }
-
     #[test]
     fn queue_transfer_requires_current_initialized_occurrences_and_playlist_destination() {
         use crate::{gui::list_interaction::ListDrag, projection::GuiSnapshot};
@@ -1029,36 +1005,27 @@ mod queue_drag_tests {
     }
 
     #[test]
-    fn queue_drop_inserts_before_target_or_appends_in_source_order() {
-        assert_eq!(reordered(&drag(&[1]), Some(4)), [10, 12, 13, 11, 14]);
-        assert_eq!(reordered(&drag(&[3]), Some(1)), [10, 13, 11, 12, 14]);
-        assert_eq!(reordered(&drag(&[1]), None), [10, 12, 13, 14, 11]);
-        // All rows share a track ID; distinct queue occurrences must survive.
-        let group = drag(&[1, 3]);
-        assert_eq!(reordered(&group, Some(4)), [10, 12, 11, 13, 14]);
-        assert_eq!(reordered(&group, Some(0)), [11, 13, 10, 12, 14]);
-        assert_eq!(reordered(&group, None), [10, 12, 14, 11, 13]);
-        assert_eq!(group.insertion_index(Some((identity(1), false)), 5), None);
-        assert_eq!(group.insertion_index(Some((identity(3), true)), 5), None);
-    }
-
-    #[test]
-    fn queue_drop_after_accounts_for_removed_occurrences() {
-        assert_eq!(
-            reordered_at(&drag(&[1]), Some(3), true),
-            [10, 12, 13, 11, 14]
-        );
-        assert_eq!(
-            reordered_at(&drag(&[3]), Some(0), true),
-            [10, 13, 11, 12, 14]
-        );
-        assert_eq!(
-            reordered_at(&drag(&[1, 3]), Some(2), true),
-            [10, 12, 11, 13, 14]
-        );
-        assert_eq!(
-            reordered_at(&drag(&[0, 1]), Some(4), true),
-            [12, 13, 14, 10, 11]
-        );
+    fn queue_drop_returns_post_removal_insertion_index() {
+        // All occurrences have the same track ID; only their queue positions count.
+        for (positions, target, after, expected) in [
+            (&[1][..], Some(4), false, Some(3)),
+            (&[3], Some(1), false, Some(1)),
+            (&[1], None, false, Some(4)),
+            (&[1, 3], Some(4), false, Some(2)),
+            (&[1, 3], Some(0), false, Some(0)),
+            (&[1, 3], None, false, Some(3)),
+            (&[1, 3], Some(1), false, None),
+            (&[1, 3], Some(3), true, None),
+            (&[1], Some(3), true, Some(3)),
+            (&[3], Some(0), true, Some(1)),
+            (&[1, 3], Some(2), true, Some(2)),
+            (&[0, 1], Some(4), true, Some(3)),
+        ] {
+            assert_eq!(
+                drag(positions).insertion_index(target.map(|pos| (identity(pos), after)), 5),
+                expected,
+                "{positions:?} -> {target:?}, after={after}"
+            );
+        }
     }
 }

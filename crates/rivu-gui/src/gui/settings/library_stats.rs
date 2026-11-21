@@ -315,9 +315,14 @@ mod tests {
         }
     }
 
+    fn complete_ok(stats: &mut RootStats, read: Read, revision: u64, total: usize) {
+        let result = response(&read, revision, total);
+        stats.complete(read, result);
+    }
+
     #[gpui::test]
     fn artwork_sessions_do_not_start_or_revive_root_statistics(cx: &mut gpui::TestAppContext) {
-        use super::super::tests::{SettingsWindow, fixture};
+        use super::super::tests::{fixture, open_window};
         use super::super::{ArtworkOptions, Config, ConfigPatch};
 
         let (directory, runtime, settings) = fixture(cx);
@@ -332,10 +337,7 @@ mod tests {
                 .apply_settings(ConfigPatch::between(&baseline, &config)),
         );
         assert!(response.observed_result().is_ok());
-        let window = cx.add_window({
-            let settings = settings.clone();
-            move |_, _| SettingsWindow(settings)
-        });
+        let window = open_window(cx, &settings);
         cx.update_window(window.into(), |_, window, cx| {
             settings.update(cx, |this, cx| {
                 let options = ArtworkOptions::from(&config);
@@ -368,18 +370,15 @@ mod tests {
         let read = stats.prepare().unwrap();
         stats.sync(&["/replacement".into()], 2);
         assert!(stats.prepare().is_none());
-        let old = response(&read, 1, 99);
-        stats.complete(read, old);
+        complete_ok(&mut stats, read, 1, 99);
         assert!(stats.values.is_empty());
         let read = stats.prepare().unwrap();
-        let current = response(&read, 2, 3);
-        stats.complete(read, current);
+        complete_ok(&mut stats, read, 2, 3);
         assert_eq!(stats.values[Path::new("/replacement")].total, 3);
         stats.sync(&["/replacement".into()], 3);
         let read = stats.prepare().unwrap();
         stats.cancel();
-        let closed = response(&read, 3, 99);
-        stats.complete(read, closed);
+        complete_ok(&mut stats, read, 3, 99);
         assert!(stats.values.is_empty());
     }
 
@@ -391,8 +390,7 @@ mod tests {
             .collect::<Vec<_>>();
         stats.sync(&roots, 1);
         let read = stats.prepare().unwrap();
-        let first = response(&read, 1, 1);
-        stats.complete(read, first);
+        complete_ok(&mut stats, read, 1, 1);
         assert_eq!(stats.values.len(), MAX_QUERY_ROWS);
         let read = stats.prepare().unwrap();
         stats.fail(&read, "Timed out".into());
@@ -400,8 +398,7 @@ mod tests {
         assert!(stats.prepare().is_none());
         stats.sync(&roots, 2);
         assert!(stats.prepare().is_none());
-        let late = response(&read, 1, 99);
-        stats.complete(read, late);
+        complete_ok(&mut stats, read, 1, 99);
         assert!(stats.values.is_empty());
         assert!(stats.prepare().is_some());
     }
@@ -411,8 +408,7 @@ mod tests {
         let mut stats = RootStats::default();
         stats.sync(&["/empty".into()], 1);
         let read = stats.prepare().unwrap();
-        let zero = response(&read, 1, 0);
-        stats.complete(read, zero);
+        complete_ok(&mut stats, read, 1, 0);
         assert_eq!(stats.values[Path::new("/empty")].total, 0);
         assert!(stats.error.is_none());
         assert!(stats.prepare().is_none());
@@ -475,8 +471,7 @@ mod tests {
         let mut stats = RootStats::default();
         stats.sync(&["/music".into()], 1);
         let read = stats.prepare().unwrap();
-        let stale = response(&read, 2, 99);
-        stats.complete(read, stale);
+        complete_ok(&mut stats, read, 2, 99);
         assert!(stats.values.is_empty());
         assert!(stats.error.is_none());
         assert!(stats.retired);
@@ -525,12 +520,10 @@ mod tests {
         assert!(stats.error.is_none());
         assert!(stats.in_flight.pending());
         assert!(stats.prepare().is_none());
-        let late = response(&read, 1, 99);
-        stats.complete(read, late);
+        complete_ok(&mut stats, read, 1, 99);
         assert!(stats.values.is_empty());
         let read = stats.prepare().unwrap();
-        let current = response(&read, 1, 3);
-        stats.complete(read, current);
+        complete_ok(&mut stats, read, 1, 3);
         assert_eq!(stats.values[Path::new("/music")].total, 3);
     }
     #[test]
@@ -542,8 +535,7 @@ mod tests {
         let start = Instant::now();
         stats.sync_at(&roots, 1, start);
         let read = stats.prepare().unwrap();
-        let loaded = response(&read, 1, 3);
-        stats.complete(read, loaded);
+        complete_ok(&mut stats, read, 1, 3);
         stats.sync_at(&roots, 2, start);
         let read = stats.prepare().unwrap();
         let deadline = stats.retention.deadline();
@@ -569,12 +561,10 @@ mod tests {
         );
         assert!(stats.expire(start + rivu_presentation::refresh::REFRESH_RETENTION));
         assert!(stats.in_flight.pending());
-        let obsolete = response(&read, 2, 99);
-        stats.complete(read, obsolete);
+        complete_ok(&mut stats, read, 2, 99);
         assert!(stats.values.is_empty());
         let read = stats.prepare().unwrap();
-        let loaded = response(&read, 3, 4);
-        stats.complete(read, loaded);
+        complete_ok(&mut stats, read, 3, 4);
         assert_eq!(
             stats
                 .visible_value(Path::new("/music"), start + Duration::from_secs(1))
@@ -594,15 +584,13 @@ mod tests {
         let deadline = start + rivu_presentation::refresh::REFRESH_RETENTION;
         stats.sync_at(&roots, 1, start);
         while let Some(read) = stats.prepare() {
-            let loaded = response(&read, 1, 3);
-            stats.complete(read, loaded);
+            complete_ok(&mut stats, read, 1, 3);
         }
         stats.sync_at(&roots, 2, start);
         assert!(stats.expire(deadline));
         assert!(stats.values.is_empty());
         let read = stats.prepare().unwrap();
-        let partial = response(&read, 2, 4);
-        stats.complete(read, partial);
+        complete_ok(&mut stats, read, 2, 4);
         assert_eq!(stats.visible_value(&roots[0], deadline).unwrap().total, 4);
         assert_eq!(stats.next, MAX_QUERY_ROWS);
         stats.sync_at(&roots, 3, deadline);
@@ -610,8 +598,7 @@ mod tests {
         assert!(stats.values.is_empty());
         assert!(stats.visible_value(&roots[0], deadline).is_none());
         while let Some(read) = stats.prepare() {
-            let loaded = response(&read, 3, 5);
-            stats.complete(read, loaded);
+            complete_ok(&mut stats, read, 3, 5);
         }
         stats.sync_at(&roots, 4, deadline);
         assert_eq!(
@@ -628,18 +615,15 @@ mod tests {
         let now = Instant::now();
         stats.sync_at(&roots, 1, now);
         let read = stats.prepare().unwrap();
-        let loaded = response(&read, 1, 3);
-        stats.complete(read, loaded);
+        complete_ok(&mut stats, read, 1, 3);
         stats.sync_at(&roots, 2, now);
         let read = stats.prepare().unwrap();
-        let same = response(&read, 2, 3);
-        stats.complete(read, same);
+        complete_ok(&mut stats, read, 2, 3);
         assert_eq!(stats.values[Path::new("/music")].total, 3);
         assert!(stats.retention.deadline().is_none());
         stats.sync_at(&roots, 3, now);
         let read = stats.prepare().unwrap();
-        let changed = response(&read, 3, 4);
-        stats.complete(read, changed);
+        complete_ok(&mut stats, read, 3, 4);
         assert_eq!(stats.values[Path::new("/music")].total, 4);
         stats.sync_at(&[PathBuf::from("/other")], 3, now);
         assert!(stats.values.is_empty());
@@ -656,8 +640,7 @@ mod tests {
             let now = Instant::now() + Duration::from_secs(60);
             this.root_stats.sync_at(&roots, 1, now);
             let read = this.root_stats.prepare().unwrap();
-            let loaded = response(&read, 1, 3);
-            this.root_stats.complete(read, loaded);
+            complete_ok(&mut this.root_stats, read, 1, 3);
             this.root_stats.sync_at(&roots, 2, now);
             let _hung_reader = this.root_stats.prepare().unwrap();
             this.schedule_library_stats_expiry(cx);

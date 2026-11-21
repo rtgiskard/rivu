@@ -17,6 +17,8 @@ pub use labels::VisualLabels;
 pub use parameters::VisualParameters;
 pub use style_coordinator::StyleCoordinator;
 pub use waveform::summary::{WaveformFrame, WaveformIdentity, WaveformSummary};
+#[cfg(feature = "test-support")]
+pub use waveform::test_support;
 pub use waveform::{Waveform, WaveformEvent, WaveformViewState};
 
 use gpui::{Div, SharedString, div, prelude::*, rgb};

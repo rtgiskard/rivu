@@ -485,6 +485,9 @@ mod tests {
         let lower = 8 * 1024 * 1024;
         let budget = Budget::new(2);
         assert!(load(&path, lower, budget, 256).is_err());
+        // The encoded limit admits the file, but its 1.22 MiB canvas exceeds a
+        // 1 MiB retained budget: the two limits are independent.
+        assert!(load(&path, admitted, Budget::new(1), 256).is_err());
         let first = load(&path, admitted, budget, 256).unwrap().image;
         assert_eq!(size(&first), (256, 128));
         let thumbnail = thumbnail_path(&path, hash, 256).unwrap();
@@ -521,6 +524,25 @@ mod tests {
         (size.width.into(), size.height.into())
     }
 
+    /// Release the only live display image, then reload the 256 tier from disk
+    /// and require pixels identical to the dropped one.
+    fn reload_from_disk(path: &Path, image: Arc<RenderImage>) -> Arc<RenderImage> {
+        let expected_pixels = image.as_bytes(0).unwrap().to_vec();
+        let released = Arc::downgrade(&image);
+        drop(image);
+        assert!(released.upgrade().is_none());
+        let cached = load(
+            path,
+            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
+            Budget::default(),
+            256,
+        )
+        .unwrap()
+        .image;
+        assert_eq!(cached.as_bytes(0).unwrap(), expected_pixels);
+        cached
+    }
+
     #[test]
     fn static_thumbnails_are_lossless_webp_with_correct_channels_alpha_and_aspect() {
         let directory = tempfile::tempdir().unwrap();
@@ -553,20 +575,7 @@ mod tests {
         assert!(encoded.windows(4).any(|bytes| bytes == b"VP8L"));
         assert!(!encoded.windows(4).any(|bytes| bytes == b"VP8 "));
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        let expected_pixels = image.as_bytes(0).unwrap().to_vec();
-        let released = Arc::downgrade(&image);
-        drop(image);
-        assert!(released.upgrade().is_none());
-        let cached = load(
-            &path,
-            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-            Budget::default(),
-            256,
-        )
-        .unwrap()
-        .image;
-        assert_eq!(size(&cached), (256, 128));
-        assert_eq!(cached.as_bytes(0).unwrap(), expected_pixels);
+        assert_eq!(size(&reload_from_disk(&path, image)), (256, 128));
     }
 
     #[test]
@@ -686,20 +695,7 @@ mod tests {
         }
         assert!(edge_pixels > 0);
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        let expected_pixels = image.as_bytes(0).unwrap().to_vec();
-        let released = Arc::downgrade(&image);
-        drop(image);
-        assert!(released.upgrade().is_none());
-        let cached = load(
-            &path,
-            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-            Budget::default(),
-            256,
-        )
-        .unwrap()
-        .image;
-        assert_eq!(size(&cached), (256, 32));
-        assert_eq!(cached.as_bytes(0).unwrap(), expected_pixels);
+        assert_eq!(size(&reload_from_disk(&path, image)), (256, 32));
     }
 
     #[test]
@@ -707,7 +703,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.png");
         fs::write(&path, png(120, 80, [200, 10, 20, 128])).unwrap();
-        for tier in [256, 512, 1024, u32::MAX] {
+        for tier in [256, 400, 1024, u32::MAX] {
             let loaded = load(
                 &path,
                 rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
@@ -730,7 +726,7 @@ mod tests {
         let path = directory.path().join("source.png");
         let bytes = png(800, 400, [240, 12, 20, 255]);
         fs::write(&path, &bytes).unwrap();
-        for (tier, expected) in [(256, (256, 128)), (512, (512, 256)), (1024, (800, 400))] {
+        for (tier, expected) in [(256, (256, 128)), (400, (400, 200)), (1024, (800, 400))] {
             assert_eq!(
                 size(
                     &load(
@@ -747,7 +743,7 @@ mod tests {
         }
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
         let hex = blake3::hash(&bytes).to_hex();
-        for tier in [256, 512] {
+        for tier in [256, 400] {
             assert!(
                 directory
                     .path()
@@ -902,10 +898,10 @@ mod tests {
             .unwrap()
             .image;
         assert!(Arc::ptr_eq(&image, &repeated));
-        let larger = load(&other_path, max_bytes, Budget::default(), 512)
+        let larger = load(&other_path, max_bytes, Budget::default(), 400)
             .unwrap()
             .image;
-        assert_eq!(size(&larger), (512, 256));
+        assert_eq!(size(&larger), (400, 200));
         assert_eq!(&larger.as_bytes(0).unwrap()[..4], &[40, 30, 210, 255]);
         let shared_original = load(&other_path, max_bytes, Budget::default(), u32::MAX)
             .unwrap()

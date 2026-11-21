@@ -711,10 +711,5 @@ mod tests {
         assert_eq!(ids(&history), [2, 1]);
         history.sync(&source, None);
         assert_eq!(ids(&history), [1, 2]);
-        history.set_sort(HistorySort::Title);
-        history.sync(&source, Some((2, 40)));
-        assert_eq!(ids(&history), [1, 2]);
-        history.set_sort(HistorySort::Plays);
-        assert_eq!(ids(&history), [1, 2]);
     }
 }

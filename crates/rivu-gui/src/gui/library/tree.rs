@@ -1460,33 +1460,29 @@ impl DirectoryTree {
 mod tests {
     use super::*;
     #[test]
-    fn refresh_retains_display_for_199ms_but_not_authority_or_late_results() {
+    fn refresh_retains_display_until_deadline_but_not_authority_or_late_results() {
         use std::time::Duration;
         let start = Instant::now();
         let mut tree = DirectoryTree::default();
         let forest = branch("");
         accept(&mut tree, &forest, 0, 1, &["/a", "/b"], 2);
         tree.refresh(start);
+        let deadline = tree.refresh_deadline().unwrap();
+        let before = deadline - Duration::from_nanos(1);
         tree.refresh(start + Duration::from_millis(150));
-        assert_eq!(
-            tree.refresh_deadline(),
-            Some(start + Duration::from_millis(200))
-        );
+        assert_eq!(tree.refresh_deadline(), Some(deadline));
         assert!(matches!(
-            tree.display_item_at(0, start + Duration::from_millis(199)),
+            tree.display_item_at(0, before),
             Some(TreeItem::Entry(_))
         ));
         assert!(matches!(tree.item(0), Some(TreeItem::Placeholder { .. })));
         assert_eq!(tree.root_total(), None);
         assert_eq!(
-            tree.display_root_total_at(start + Duration::from_millis(199)),
+            tree.display_root_total_at(before),
             Some(2),
             "the header keeps the retained count instead of flashing Loading"
         );
-        assert_eq!(
-            tree.display_root_total_at(start + Duration::from_millis(200)),
-            None
-        );
+        assert_eq!(tree.display_root_total_at(deadline), None);
         assert!(!tree.row_matches(
             0,
             &super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/a")))
@@ -1498,12 +1494,12 @@ mod tests {
         assert_eq!(tree.requests_for_range(0..2), vec![(forest.clone(), 0)]);
         assert!(!tree.accept_at(&forest, 1, page(&["/late"], 1), start));
         tree.begin(forest.clone(), 0, 2);
-        assert!(!tree.expire_refresh(start + Duration::from_millis(199)));
+        assert!(!tree.expire_refresh(before));
         assert!(matches!(
-            tree.display_item_at(0, start + Duration::from_millis(200)),
+            tree.display_item_at(0, deadline),
             Some(TreeItem::Placeholder { .. })
         ));
-        assert!(tree.expire_refresh(start + Duration::from_millis(200)));
+        assert!(tree.expire_refresh(deadline));
         assert!(
             tree.request_pending(&forest, 2),
             "expiry must not cancel the fresh query"
@@ -1624,22 +1620,12 @@ mod tests {
 
     fn bitrate_track(id: i64) -> DirectoryRow {
         DirectoryRow::Track(rivu_protocol::model::LibraryRow {
-            id,
             path: format!("/a/{id}.flac").into(),
             title: format!("Track {id}"),
-            artist: String::new(),
-            album: String::new(),
-            duration: None,
             codec: "flac".into(),
-            bitrate_bps: None,
-            bitrate_exact: false,
             channels: 2,
             sample_rate: 44_100,
-            bits_per_sample: None,
-            cue_number: None,
-            favorite: false,
-            missing: false,
-            play_count: 0,
+            ..crate::test_support::library_row(id)
         })
     }
 
@@ -1670,13 +1656,14 @@ mod tests {
         let projection = tree.projection_revision();
         let start = Instant::now();
         assert!(tree.invalidate_payloads_at(start));
+        let deadline = tree.refresh_deadline().unwrap();
         assert!(!tree.invalidate_payloads_at(start + std::time::Duration::from_millis(150)));
         assert!(matches!(
-            tree.display_item_at(2, start + std::time::Duration::from_millis(199)),
+            tree.display_item_at(2, deadline - std::time::Duration::from_nanos(1)),
             Some(TreeItem::Entry(_))
         ));
         assert!(matches!(
-            tree.display_item_at(2, start + std::time::Duration::from_millis(200)),
+            tree.display_item_at(2, deadline),
             Some(TreeItem::Placeholder { .. })
         ));
         assert_eq!(tree.root_total(), Some(1));
@@ -1691,7 +1678,7 @@ mod tests {
         assert!(tree.cached_row(&root, 0).is_some());
         assert!(tree.cached_row(&root, 1).is_none());
         assert_eq!(tree.requests_for_range(0..3), vec![(root.clone(), 0)]);
-        assert!(tree.expire_refresh(start + std::time::Duration::from_millis(200)));
+        assert!(tree.expire_refresh(deadline));
         assert!(matches!(tree.item(1), Some(TreeItem::Entry(_))));
         tree.begin(root.clone(), 0, 3);
         assert!(tree.requests_for_range(0..3).is_empty());
@@ -1915,23 +1902,6 @@ mod tests {
     }
 
     #[test]
-    fn initial_forest_exposes_viewport_demand_before_any_explicit_request() {
-        let mut tree = DirectoryTree::default();
-        assert!(matches!(
-            tree.item(0),
-            Some(TreeItem::Placeholder {
-                offset: 0,
-                status: BranchStatus::Unloaded,
-                ..
-            })
-        ));
-        assert_eq!(tree.requests_for_range(0..1), vec![(branch(""), 0)]);
-        accept(&mut tree, &branch(""), 0, 1, &["/a"], 1);
-        assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
-        assert!(tree.requests_for_range(0..1).is_empty());
-    }
-
-    #[test]
     fn grouped_projection_preserves_independent_choices_and_never_reuses_tree_children() {
         let mut tree = DirectoryTree::default();
         let forest = branch("");
@@ -1972,6 +1942,15 @@ mod tests {
         let mut tree = DirectoryTree::default();
         let forest = branch("");
         assert_eq!(tree.row_count(), 1);
+        assert!(matches!(
+            tree.item(0),
+            Some(TreeItem::Placeholder {
+                offset: 0,
+                status: BranchStatus::Unloaded,
+                ..
+            })
+        ));
+        assert_eq!(tree.requests_for_range(0..1), vec![(branch(""), 0)]);
         tree.begin(forest.clone(), 0, 1);
         assert!(matches!(tree.item(0), Some(TreeItem::Placeholder {
             branch: key, offset: 0, depth: 0, status: BranchStatus::Loading,
@@ -2013,6 +1992,8 @@ mod tests {
             })
         ));
         assert!(tree.accept(&forest, 3, page(&["/a"], 1)));
+        assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
+        assert!(tree.requests_for_range(0..1).is_empty());
         tree.clear();
         assert_eq!(tree.row_count(), 1);
         assert_eq!(tree.requests_for_range(0..1), vec![(forest, 0)]);
@@ -2452,17 +2433,6 @@ mod tests {
             row: DirectoryRow::Directory { path }, ..
         })) if path == Path::new("/a/x"))
         );
-    }
-
-    #[test]
-    fn newer_selection_cancels_deferred_navigation() {
-        let mut tree = DirectoryTree::default();
-        accept(&mut tree, &branch(""), 0, 1, &["/a"], 1);
-        tree.expand(&branch("/a"));
-        tree.defer_selection(1);
-        tree.cancel_navigation();
-        accept(&mut tree, &branch("/a"), 0, 2, &["/a/target"], 1);
-        assert_eq!(tree.ready_selection(), None);
     }
 
     #[test]

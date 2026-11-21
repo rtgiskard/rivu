@@ -130,10 +130,14 @@ mod tests {
 
     #[test]
     fn collection_timeout_retires_logical_owner_but_not_physical_worker() {
-        {
+        for timeout in [true, false] {
             let mut resolution = CollectionResolution::default();
             let read = resolution.begin().unwrap();
-            assert!(resolution.timeout(&read));
+            if timeout {
+                assert!(resolution.timeout(&read));
+            } else {
+                resolution.cancel();
+            }
             assert!(!read.ticket.is_current());
             assert!(resolution.pending());
             assert!(resolution.begin().is_none());
@@ -143,10 +147,8 @@ mod tests {
             assert!(!resolution.timeout(&read));
             assert!(!resolution.finish(&read));
             assert!(latest.ticket.is_current());
-            resolution.cancel();
-            assert!(!resolution.timeout(&latest));
-            assert!(resolution.pending());
-            assert!(resolution.finish(&latest));
+            drop(resolution);
+            assert!(!latest.ticket.is_current());
         }
     }
 
@@ -377,29 +379,6 @@ mod tests {
             assert!(result.is_err());
             assert_eq!(calls, 2);
         }
-    }
-
-    #[test]
-    fn menu_cancellation_keeps_physical_gate_until_worker_finishes() {
-        let mut resolution = CollectionResolution::default();
-        let read = resolution.begin().unwrap();
-        resolution.cancel();
-        assert!(!read.ticket.is_current());
-        assert!(resolution.pending());
-        assert!(resolution.begin().is_none());
-        assert!(resolution.finish(&read));
-        let next = resolution.begin().unwrap();
-        assert!(!resolution.finish(&read));
-        assert!(next.ticket.is_current());
-        assert!(resolution.finish(&next));
-    }
-
-    #[test]
-    fn destroying_collection_owner_cancels_menu_resolution() {
-        let mut resolution = CollectionResolution::default();
-        let read = resolution.begin().unwrap();
-        drop(resolution);
-        assert!(!read.ticket.is_current());
     }
 
     #[test]

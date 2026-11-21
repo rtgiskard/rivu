@@ -14,18 +14,24 @@ pub(crate) struct CoreRuntime {
 impl CoreRuntime {
     pub(crate) fn start(data_dir: &Path, config: &Path) -> Result<Self> {
         let fixture = rivu::test_support::frontend::FrontendFixture::start(data_dir, config)?;
-        let mut session = rivu_client::client_session(data_dir);
-        session.get_state(rivu_protocol::response::StateSections::default())?;
-        let instance = session
-            .instance_id()
-            .expect("fixture Hello binds Core identity");
-        let frontend = FrontendRuntime::connect(data_dir, instance)?;
+        let frontend = FrontendRuntime::connect(data_dir, fixture.instance_id())?;
         let handle = frontend.handle.clone();
         Ok(Self {
             handle,
             frontend: Some(frontend),
             _fixture: fixture,
         })
+    }
+
+    pub(crate) fn start_at(directory: &Path) -> Self {
+        Self::start(directory, &directory.join("config.toml")).unwrap()
+    }
+
+    /// Starts Core with [`save_quiet_config`]; seed storage first by calling
+    /// the two separately.
+    pub(crate) fn start_quiet(data_dir: &Path) -> Self {
+        let config = save_quiet_config(data_dir);
+        Self::start(data_dir, &config).unwrap()
     }
 
     pub(crate) fn disconnect_frontend(&mut self) {
@@ -58,6 +64,43 @@ impl ConfigFixture for Config {
     }
 }
 
+/// Writes `config.toml` for a muted Core without FFmpeg or MPRIS.
+pub(crate) fn save_quiet_config(directory: &Path) -> std::path::PathBuf {
+    let path = directory.join("config.toml");
+    Config {
+        volume: 0.0,
+        ffmpeg_enabled: false,
+        mpris_enabled: false,
+        ..Default::default()
+    }
+    .save_fixture(&path)
+    .unwrap();
+    path
+}
+
+/// A catalog row whose fields are irrelevant except its identity; tests
+/// override the fields they assert with struct update syntax.
+pub(crate) fn library_row(id: i64) -> rivu_protocol::model::LibraryRow {
+    rivu_protocol::model::LibraryRow {
+        id,
+        path: Default::default(),
+        title: String::new(),
+        artist: String::new(),
+        album: String::new(),
+        duration: None,
+        codec: String::new(),
+        channels: 0,
+        sample_rate: 0,
+        bits_per_sample: None,
+        cue_number: None,
+        bitrate_bps: None,
+        bitrate_exact: false,
+        favorite: false,
+        missing: false,
+        play_count: 0,
+    }
+}
+
 pub(crate) fn relocation_artwork_paths(directory: &Path) -> [std::path::PathBuf; 2] {
     [("before", [255, 0, 0]), ("after", [0, 255, 0])].map(|(name, colour)| {
         let path = directory.join(name);
@@ -67,36 +110,4 @@ pub(crate) fn relocation_artwork_paths(directory: &Path) -> [std::path::PathBuf;
             .unwrap();
         path.join("track.wav")
     })
-}
-
-pub(crate) fn artwork_track(path: std::path::PathBuf) -> rivu_protocol::model::Track {
-    let fingerprint = path
-        .is_file()
-        .then(|| std::fs::read(&path).unwrap())
-        .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
-    rivu_protocol::model::Track {
-        id: 1,
-        path,
-        fingerprint,
-        cue: None,
-        title: String::new(),
-        artist: String::new(),
-        album: String::new(),
-        duration: None,
-        codec: "wav".into(),
-        channels: 1,
-        sample_rate: 8_000,
-        bitrate_bps: None,
-        bitrate_exact: false,
-        track_number: None,
-        disc_number: None,
-        bits_per_sample: Some(16),
-        release_date: None,
-        replaygain_track_gain: None,
-        favorite: false,
-        decoder_hint: Default::default(),
-        missing: false,
-        play_count: 0,
-        last_played: None,
-    }
 }

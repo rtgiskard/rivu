@@ -578,6 +578,18 @@ impl DuplicateReview {
         result: (QueryResponse, Vec<Option<bool>>, SelectedMembers),
         revisions: QueryRevisions,
     ) -> bool {
+        self.accept_members_at(epoch, query, generation, result, revisions, Instant::now)
+    }
+
+    fn accept_members_at(
+        &mut self,
+        epoch: u64,
+        query: &Query,
+        generation: u64,
+        result: (QueryResponse, Vec<Option<bool>>, SelectedMembers),
+        revisions: QueryRevisions,
+        now: impl FnOnce() -> Instant,
+    ) -> bool {
         let (response, existence, selected) = result;
         if !self.accepts_members(epoch, query, generation, revisions) {
             return false;
@@ -639,8 +651,8 @@ impl DuplicateReview {
                     .zip(existence)
                     .map(|(value, exists)| Member { value, exists })
                     .collect::<Vec<_>>();
-                let unchanged = self.visible_members(Instant::now()) == members
-                    && self.members_total == page.total;
+                let unchanged =
+                    self.visible_members(now()) == members && self.members_total == page.total;
                 self.members_total = page.total;
                 if !unchanged {
                     self.members = members;
@@ -2114,7 +2126,6 @@ fn has_target_state(member: &DuplicateMember) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::ConfigFixture;
     use rivu_ui::StatusKind;
 
     use super::{Busy, DuplicateReview, Member, ReviewFeedback, TaskReadOutcome};
@@ -2351,7 +2362,23 @@ mod tests {
         assert!(review.groups_pending);
         assert!(review.begin_members().is_none());
         assert!(!review.can_relocate());
+        let response = QueryResponse {
+            revisions: QueryRevisions::default(),
+            result: Ok(ViewResponse::DuplicateMembers(Page {
+                total: 32,
+                rows: vec![member(1, true).value],
+            })),
+        };
         assert!(!review.members_worker_finished());
+        assert!(!review.accept_members(
+            members.epoch,
+            &members.query,
+            members.generation,
+            (response, vec![Some(false)], None),
+            revisions
+        ));
+        assert!(review.members.is_empty());
+        assert_eq!(review.selection_ids(), (Some(1), Some(2)));
         let (retry, ids) = review.begin_members().unwrap();
         assert_ne!(retry.generation, members.generation);
         assert_eq!(ids, vec![1, 2]);
@@ -2377,40 +2404,6 @@ mod tests {
         review.members_worker_finished();
         let (next, selected) = review.begin_members().unwrap();
         assert_ne!(next.generation, read.generation);
-        assert_eq!(selected, vec![1, 2]);
-    }
-
-    #[test]
-    fn bitrate_change_rejects_old_member_reply_and_reloads_saved_selection() {
-        let mut review = ready_review();
-        review.request_members("fingerprint".into(), 8, QueryRevisions::default());
-        let (read, _) = review.begin_members().unwrap();
-        let current = QueryRevisions {
-            bitrate: 1,
-            ..Default::default()
-        };
-        review.sync_queries(current);
-        assert!(review.members_pending);
-        assert!(review.begin_members().is_none());
-        let response = QueryResponse {
-            revisions: QueryRevisions::default(),
-            result: Ok(ViewResponse::DuplicateMembers(Page {
-                total: 32,
-                rows: vec![member(1, true).value],
-            })),
-        };
-        review.members_worker_finished();
-        assert!(!review.accept_members(
-            read.epoch,
-            &read.query,
-            read.generation,
-            (response, vec![Some(false)], None),
-            current,
-        ));
-        assert!(review.members.is_empty());
-        assert_eq!(review.selection_ids(), (Some(1), Some(2)));
-        let (retry, selected) = review.begin_members().unwrap();
-        assert_ne!(retry.generation, read.generation);
         assert_eq!(selected, vec![1, 2]);
     }
 
@@ -2603,27 +2596,10 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use gpui::AppContext as _;
-        use std::{rc::Rc, sync::Arc};
 
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        rivu_format::config::Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Default::default()
-        }
-        .save_fixture(&path)
-        .unwrap();
-        let runtime = crate::test_support::CoreRuntime::start(directory.path(), &path).unwrap();
-        let context = super::FeatureContext {
-            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
-                runtime.handle.clone(),
-            )),
-            i18n: Arc::new(rivu_presentation::i18n::Localizer::new("en-US")),
-            labels: Default::default(),
-            scroll: Default::default(),
-        };
+        let runtime = crate::test_support::CoreRuntime::start_quiet(directory.path());
+        let context = super::FeatureContext::for_test(runtime.handle.clone());
         for (reopen, closed, failed) in [
             (true, false, false),
             (false, false, false),
@@ -3107,27 +3083,10 @@ mod tests {
     ) {
         use crate::frontend::{CommandDelivery, CommandObservation};
         use gpui::AppContext as _;
-        use std::{rc::Rc, sync::Arc};
 
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        rivu_format::config::Config {
-            volume: 0.0,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            ..Default::default()
-        }
-        .save_fixture(&path)
-        .unwrap();
-        let mut runtime = crate::test_support::CoreRuntime::start(directory.path(), &path).unwrap();
-        let context = super::FeatureContext {
-            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
-                runtime.handle.clone(),
-            )),
-            i18n: Arc::new(rivu_presentation::i18n::Localizer::new("en-US")),
-            labels: Default::default(),
-            scroll: Default::default(),
-        };
+        let mut runtime = crate::test_support::CoreRuntime::start_quiet(directory.path());
+        let context = super::FeatureContext::for_test(runtime.handle.clone());
         runtime.disconnect_frontend();
         for independent in [false, true] {
             for replaced in [false, true] {
@@ -3333,40 +3292,14 @@ mod tests {
     }
 
     #[test]
-    fn retained_read_error_preserves_task_and_does_not_release_page_workers() {
-        let mut review = ready_review();
-        review.request_groups(0, QueryRevisions::default());
-        assert!(review.begin_groups().is_some());
-        review.confirm(true);
-        let (epoch, _) = review.submit(false).unwrap();
-        review.accept_ack(epoch, false, ack(true, Some(7)));
-        review.begin_task_read(7);
-        let response = QueryResponse {
-            revisions: QueryRevisions::default(),
-            result: Err(rivu_protocol::response::QueryError::Message(
-                "read failed".into(),
-            )),
-        };
-        assert!(matches!(
-            review.accept_task_read(epoch, 7, response),
-            TaskReadOutcome::Failed
-        ));
-        assert_eq!(review.task_id(), Some(7));
-        assert_eq!(review.cancellable_task(), Some(7));
-        assert!(review.begin_task_read(7).is_none());
-        assert!(!review.task_query_pending);
-        assert!(review.groups_loading);
-        assert!(matches!(
-            &review.feedback,
-            Some(ReviewFeedback::ReadFailed(_))
-        ));
-    }
-
-    #[test]
     fn failed_task_reads_keep_close_cancellation_and_reject_late_completion() {
         for timeout in [false, true] {
             let mut review = ready_review();
-            review.busy = Some(Busy::Relocating(7));
+            review.request_groups(0, QueryRevisions::default());
+            assert!(review.begin_groups().is_some());
+            review.confirm(true);
+            let (epoch, _) = review.submit(false).unwrap();
+            review.accept_ack(epoch, false, ack(true, Some(7)));
             let epoch = review.begin_task_read(7).unwrap();
             if timeout {
                 assert!(review.timeout_task_read(epoch, 7, timeout_response()));
@@ -3376,6 +3309,14 @@ mod tests {
                     TaskReadOutcome::Failed
                 ));
             }
+            assert_eq!(review.task_id(), Some(7));
+            assert_eq!(review.cancellable_task(), Some(7));
+            assert_eq!(review.task_query_pending, timeout);
+            assert!(review.groups_loading);
+            assert!(matches!(
+                &review.feedback,
+                Some(ReviewFeedback::ReadFailed(_))
+            ));
             assert!(review.begin_task_read(7).is_none());
             assert_eq!(review.close(), Some(7));
             assert!(matches!(
@@ -3422,30 +3363,15 @@ mod tests {
             start + Duration::from_millis(150),
         );
         assert_eq!(review.deadline(), deadline);
+        let deadline = deadline.unwrap();
+        let before = deadline - Duration::from_nanos(1);
         assert!(review.groups_pending && review.members_pending);
         assert!(!groups.ticket.is_current() && !members.ticket.is_current());
-        assert!(
-            review
-                .visible_groups(start + Duration::from_millis(199))
-                .is_some()
-        );
-        assert_eq!(
-            review
-                .visible_members(start + Duration::from_millis(199))
-                .len(),
-            2
-        );
-        assert!(
-            review
-                .visible_groups(start + rivu_presentation::refresh::REFRESH_RETENTION)
-                .is_none()
-        );
-        assert!(
-            review
-                .visible_members(start + rivu_presentation::refresh::REFRESH_RETENTION)
-                .is_empty()
-        );
-        assert!(review.expire(start + rivu_presentation::refresh::REFRESH_RETENTION));
+        assert!(review.visible_groups(before).is_some());
+        assert_eq!(review.visible_members(before).len(), 2);
+        assert!(review.visible_groups(deadline).is_none());
+        assert!(review.visible_members(deadline).is_empty());
+        assert!(review.expire(deadline));
         assert!(review.groups.is_none() && review.members.is_empty());
         assert!(review.source.is_none() && review.target.is_none());
         assert_eq!(review.selection_ids(), (Some(1), Some(2)));
@@ -3467,9 +3393,11 @@ mod tests {
         let allocation = review.members.as_ptr();
         let revisions = QueryRevisions::default();
         review.request_members("fingerprint".into(), 0, revisions);
+        let before =
+            review.members_retention.deadline().unwrap() - std::time::Duration::from_nanos(1);
         let (read, _) = review.begin_members().unwrap();
         review.members_worker_finished();
-        assert!(review.accept_members(
+        assert!(review.accept_members_at(
             read.epoch,
             &read.query,
             read.generation,
@@ -3484,7 +3412,8 @@ mod tests {
                 vec![Some(false), Some(true)],
                 None
             ),
-            revisions
+            revisions,
+            || before,
         ));
         assert_eq!(review.members.as_ptr(), allocation);
         assert!(review.members_current);

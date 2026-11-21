@@ -726,7 +726,7 @@ pub(crate) mod tests;
 mod worker_panic_tests {
     use super::*;
     use rivu_analysis::VisualizerDemand;
-    use rivu_protocol::pcm::{PcmHeader, REQUEST_SIZE, write_status};
+    use rivu_protocol::pcm::{PcmHeader, write_status};
 
     struct Fixture {
         client: Arc<VisualClient>,
@@ -795,6 +795,9 @@ mod worker_panic_tests {
 
     #[test]
     fn initialization_panic_completes_ready_and_notifies_a_late_owner() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(30)) {
+            return;
+        }
         let f = fixture(true);
         assert!(
             f.ready
@@ -863,10 +866,7 @@ mod worker_panic_tests {
                     ..VisualizerDemand::default()
                 },
             });
-            ControlReader::<REQUEST_SIZE>::new()
-                .read(&mut f.server)
-                .await
-                .unwrap();
+            assert!(tests::next_subscription(&mut f.server).await.0);
             write_status(
                 &mut f.server,
                 PcmState {
@@ -905,8 +905,12 @@ mod worker_panic_tests {
                 client.stop();
                 fatal.send(thread::current().id()).unwrap();
             }));
-            let injected = Arc::new(AtomicBool::new(false));
-            let worker_injected = Arc::clone(&injected);
+            // `attempted` keeps later wakes out of the injection; `reached`
+            // proves the panic came from the intended point, not from an
+            // earlier prerequisite assertion unwinding through the same path.
+            let attempted = AtomicBool::new(false);
+            let reached = Arc::new(AtomicBool::new(false));
+            let worker_reached = Arc::clone(&reached);
             let weak = Arc::downgrade(&f.client);
             let (finished, completion) = std::sync::mpsc::sync_channel(1);
             let cancelled_worker = if stopping {
@@ -915,12 +919,13 @@ mod worker_panic_tests {
                 None
             };
             f.client.set_wakeup(Arc::new(move || {
-                if !worker_injected.swap(true, Ordering::AcqRel) {
+                if !attempted.swap(true, Ordering::AcqRel) {
                     let client = weak.upgrade().unwrap();
                     assert!(client.consume_current_analysis(|_| true));
                     if stopping {
                         client.stop();
                     }
+                    worker_reached.store(true, Ordering::Release);
                     panic!("injected publication panic");
                 }
                 let _ = finished.try_send(());
@@ -938,7 +943,7 @@ mod worker_panic_tests {
                 completion.recv_timeout(Duration::from_secs(5)).unwrap();
                 assert!(f.client.state.error.lock().message.is_some());
             }
-            assert!(injected.load(Ordering::Acquire));
+            assert!(reached.load(Ordering::Acquire));
             let mut consumed = false;
             assert!(!f.client.consume_current_analysis(|_| {
                 consumed = true;
@@ -952,11 +957,17 @@ mod worker_panic_tests {
 
     #[test]
     fn runtime_panic_revokes_current_frame_and_notifies_owner_without_self_join() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(30)) {
+            return;
+        }
         runtime_panic(false);
     }
 
     #[test]
     fn panic_during_shutdown_does_not_report_a_fatal_error() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(30)) {
+            return;
+        }
         runtime_panic(true);
     }
 }

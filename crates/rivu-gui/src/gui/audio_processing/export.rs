@@ -897,7 +897,7 @@ mod tests {
         let (_directory, _runtime, owner) = test_support::owner(cx, test_support::config());
         owner.update(cx, |this, cx| {
             this.command_active = true;
-            let mut track = crate::test_support::artwork_track("source.wav".into());
+            let mut track = rivu_protocol::test_support::artwork_track("source.wav".into());
             track.id = 41;
             Rc::make_mut(&mut this.state).current_track = Some(Arc::new(track.clone()));
             Rc::make_mut(&mut this.state).system.export_formats =
@@ -934,7 +934,7 @@ mod tests {
         let (_directory, _runtime, owner) = test_support::owner(cx, test_support::config());
         owner.update(cx, |this, cx| {
             this.command_active = true;
-            let mut track = crate::test_support::artwork_track("source.wav".into());
+            let mut track = rivu_protocol::test_support::artwork_track("source.wav".into());
             track.id = 7;
             Rc::make_mut(&mut this.state).current_track = Some(Arc::new(track));
             Rc::make_mut(&mut this.state).system.export_formats =
@@ -977,6 +977,9 @@ mod tests {
         let (_directory, _runtime, owner) = test_support::owner(cx, test_support::config());
         owner.update(cx, |this, cx| {
             this.command_active = true;
+            Rc::make_mut(&mut this.state).current_track = Some(Arc::new(
+                rivu_protocol::test_support::artwork_track("source.wav".into()),
+            ));
             this.initialize_export(cx);
             assert!(
                 this.commands.is_empty(),
@@ -999,11 +1002,22 @@ mod tests {
             assert!(this.export_format_available(AudioExportFormat::Wav));
             assert!(!this.export_format_available(AudioExportFormat::Mp3));
             this.export.encoding.format = AudioExportFormat::Mp3;
+            this.stage_graph_text(FieldKey::ExportPath, "result.mp3".into(), cx);
+            let draft = this.export_request(cx).unwrap();
             this.start_export(cx);
             assert!(
                 this.commands.is_empty(),
                 "unavailable codec cannot enqueue work"
             );
+            Rc::make_mut(&mut this.state).system.export_formats =
+                Some(vec![AudioExportFormat::Wav, AudioExportFormat::Mp3]);
+            this.start_export(cx);
+            assert_eq!(this.commands.len(), 1);
+            let Command::AudioExport { request } = this.commands.pop_front().unwrap().command
+            else {
+                panic!("publishing MP3 support should admit the same draft");
+            };
+            assert_eq!(request, draft);
         });
     }
 
@@ -1024,7 +1038,7 @@ mod tests {
         let target = GraphPort { node: 2, port: 1 };
         owner.update(cx, |this, cx| {
             let state = Rc::make_mut(&mut this.state);
-            let mut track = crate::test_support::artwork_track("source.wav".into());
+            let mut track = rivu_protocol::test_support::artwork_track("source.wav".into());
             track.id = 7;
             state.current_track = Some(Arc::new(track));
             state.system.export_formats = Some(vec![AudioExportFormat::Wav]);
@@ -1069,7 +1083,7 @@ mod tests {
         owner.update(cx, |this, cx| {
             this.command_active = true;
             Rc::make_mut(&mut this.state).current_track = Some(Arc::new(
-                crate::test_support::artwork_track("source.wav".into()),
+                rivu_protocol::test_support::artwork_track("source.wav".into()),
             ));
             Rc::make_mut(&mut this.state).system.export_formats =
                 Some(vec![AudioExportFormat::Wav, AudioExportFormat::Mp3]);

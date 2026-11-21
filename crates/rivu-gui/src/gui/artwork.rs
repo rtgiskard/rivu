@@ -20,6 +20,9 @@ use gpui::{
 mod ambient;
 mod decode;
 
+#[cfg(test)]
+pub(super) use decode::tests::gif_with_corrupt_second_frame;
+
 impl gpui::Global for decode::DecodeWorkspace {}
 
 #[derive(Default)]
@@ -592,27 +595,26 @@ impl ArtworkView {
     }
 
     #[cfg(test)]
-    pub(super) fn image(&self, cx: &App) -> Option<Img> {
-        let state = self.state.borrow();
-        let image = state.current.as_ref()?;
-        // All consumers already render their default cover for None. A cached
-        // decode error is terminal for this lease, not a new load each render.
-        if image
-            .owner
-            .image
-            .read(cx)
-            .item
+    pub(super) fn has_artwork(&self) -> bool {
+        self.state.borrow().current.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn decode_failed(&self, cx: &App) -> bool {
+        self.state
+            .borrow()
+            .current
             .as_ref()
-            .and_then(ImageCacheItem::get)
+            .and_then(|image| {
+                image
+                    .owner
+                    .image
+                    .read(cx)
+                    .item
+                    .as_ref()
+                    .and_then(ImageCacheItem::get)
+            })
             .is_some_and(|result| result.is_err())
-        {
-            return None;
-        }
-        let mut element = img(image.artwork.path()).image_cache(&image.owner.image);
-        // Img needs a stable ID to retain its animation cursor across frames.
-        element.interactivity().element_id =
-            Some(("artwork-cover", image.owner.image.entity_id()).into());
-        Some(element)
     }
 
     pub(super) fn sizing(&self, consumer: u64) -> Option<ArtworkImageSizing> {
@@ -1464,6 +1466,30 @@ impl DefaultArtwork {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn assert_composed_cover(&self, cx: &mut App, expected: bool) {
+        let cache = self.cache.read(cx);
+        if !expected {
+            assert!(
+                cache.sizes.recent.is_empty(),
+                "pending artwork requested fallback"
+            );
+            return;
+        }
+        assert_eq!(cache.sizes.recent.len(), 1);
+        let key = cache.sizes.recent[0];
+        assert!(matches!(key, DefaultArtworkKey::Cover(_)));
+        let source = cache.source(key);
+        // fetch_asset starts an absent load: check presence before inspecting pixels.
+        assert!(cx.has_asset::<DefaultArtworkBitmap>(&source));
+        let image = cx
+            .fetch_asset::<DefaultArtworkBitmap>(&source)
+            .unwrap()
+            .unwrap();
+        let (pixels, _) = image.as_bytes(0).unwrap().as_chunks::<4>();
+        assert!(pixels.iter().any(|pixel| pixel[3] != 0));
+    }
+
     /// A real source owns the surface while loading. Missing or terminally
     /// failed sources use the shared SVG with the same atmosphere processing.
     pub(super) fn background_image(&self, source: Option<ArtworkSource>, ambient: bool) -> Img {
@@ -1564,9 +1590,9 @@ mod tests {
         cover_wave(&path, bytes);
         let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
         let loaded = manager
-            .load(crate::artwork_source(&crate::test_support::artwork_track(
-                path,
-            )))
+            .load(crate::artwork_source(
+                &rivu_protocol::test_support::artwork_track(path),
+            ))
             .unwrap();
         (directory, loaded)
     }
@@ -1622,7 +1648,7 @@ mod tests {
         let path = directory.path().join("cover.wav");
         cover_wave(&path, &decode::tests::gif());
         let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
-        let mut track = crate::test_support::artwork_track(path);
+        let mut track = rivu_protocol::test_support::artwork_track(path);
         track.id = 1;
         let first = manager.load(crate::artwork_source(&track)).unwrap();
         let mut alias = track.clone();
@@ -1979,14 +2005,10 @@ mod tests {
         let images = ArtworkImageRegistry::default();
         let cover = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
-        window.update(|window, cx| {
-            cover.replace(Some(loaded), cx);
-            let sizing = cover.sizing(1).unwrap();
-            sizing.image.update(cx, |image, cx| {
-                image.request(sizing.token, gpui::px(2000.), Some(560), window, cx);
-            });
-        });
-        draw_cover(window, &cover);
+        window.update(|_, cx| cover.replace(Some(loaded), cx));
+        let mut album = cover.sizing(1).unwrap();
+        album.max_side = Some(560);
+        draw_sizing(window, album, 2000.);
         window.run_until_parked();
         window.update(|_, cx| {
             let state = cover.state.borrow();
@@ -1995,10 +2017,9 @@ mod tests {
             assert_eq!(pixels.size(0).width.0, 560);
             assert_eq!(pixels.size(0).height.0, 280);
         });
-        request_cover_size(window, &cover, 2, 800.);
-        draw_cover(window, &cover);
+        draw_sizing(window, cover.sizing(2).unwrap(), 800.);
         window.run_until_parked();
-        draw_cover(window, &cover);
+        draw_sizing(window, cover.sizing(2).unwrap(), 800.);
         window.update(|window, cx| {
             {
                 let state = cover.state.borrow();
@@ -2235,8 +2256,7 @@ mod tests {
             panel.replace(Some(loaded.clone()), cx);
             material.source().unwrap().sizing.image
         });
-        request_cover_size(window, &panel, 1, 800.);
-        draw_cover(window, &panel);
+        draw_sizing(window, panel.sizing(1).unwrap(), 800.);
         window.run_until_parked();
         draw_ambient(window, &material);
         window.run_until_parked();
@@ -2254,10 +2274,12 @@ mod tests {
             )
         });
         // A cached derivative does not need to render/ACK a source-only upgrade.
-        request_cover_size(window, &panel, 1, 1100.);
-        draw_cover(window, &panel);
+        draw_sizing(window, panel.sizing(1).unwrap(), 1100.);
         window.run_until_parked();
-        draw_cover(window, &panel);
+        draw_sizing(window, panel.sizing(1).unwrap(), 1100.);
+        // The promotion frame still registered the old generation. Repaint the
+        // panel to acknowledge the new pixels before fencing their predecessor.
+        draw_sizing(window, panel.sizing(1).unwrap(), 1100.);
         let (source, ambient) = window.update(|window, cx| {
             let image = cache.read(cx);
             assert_eq!(
@@ -2657,8 +2679,7 @@ mod tests {
         let view = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
         let cache = window.update(|_, cx| install_cover(&view, loaded, cx));
-        request_cover_size(window, &view, 1, 800.);
-        draw_cover(window, &view);
+        draw_sizing(window, view.sizing(1).unwrap(), 800.);
         window.run_until_parked();
         let original = window.update(|_, cx| {
             cache
@@ -2689,7 +2710,7 @@ mod tests {
             });
         });
         window.run_until_parked();
-        draw_cover(window, &view);
+        draw_sizing(window, view.sizing(1).unwrap(), 560.);
         window.update(|_, cx| {
             let image = cache.read(cx);
             assert_eq!(image.tier, 1024);
@@ -2714,7 +2735,7 @@ mod tests {
         });
         window.run_until_parked();
         for _ in 0..3 {
-            draw_cover(window, &view);
+            draw_sizing(window, view.sizing(1).unwrap(), 560.);
             window.update(|_, cx| {
                 let image = cache.read(cx);
                 assert!(image.pending.is_none());
@@ -2723,7 +2744,6 @@ mod tests {
                     &original,
                     &image.item.as_ref().unwrap().get().unwrap().unwrap()
                 ));
-                assert!(view.image(cx).is_some());
             });
         }
         window.update(|window, cx| {
@@ -2746,9 +2766,8 @@ mod tests {
             second.replace(Some(loaded), cx);
             cache
         });
-        request_cover_size(window, &first, 1, 256.);
         request_cover_size(window, &second, 2, 201.);
-        draw_cover(window, &first);
+        draw_sizing(window, first.sizing(1).unwrap(), 256.);
         window.run_until_parked();
         let original = window.update(|_, cx| {
             let image = cache
@@ -2762,8 +2781,7 @@ mod tests {
             assert_eq!(image.size(0).width.0, 256);
             image
         });
-        request_cover_size(window, &first, 1, 257.);
-        draw_cover(window, &first);
+        draw_sizing(window, first.sizing(1).unwrap(), 257.);
         window.update(|_, cx| {
             let image = cache.read(cx);
             assert_eq!(image.target, 400);
@@ -2784,9 +2802,9 @@ mod tests {
             );
         });
         window.run_until_parked();
-        draw_cover(window, &first);
+        draw_sizing(window, first.sizing(1).unwrap(), 800.);
         window.run_until_parked();
-        draw_cover(window, &first);
+        draw_sizing(window, first.sizing(1).unwrap(), 800.);
         window.update(|_, cx| {
             let image = cache.read(cx);
             assert_eq!(image.tier, 1024);
@@ -2806,8 +2824,7 @@ mod tests {
             );
         });
         // Per-pixel changes within the same tier do not start another decode.
-        request_cover_size(window, &first, 1, 801.);
-        draw_cover(window, &first);
+        draw_sizing(window, first.sizing(1).unwrap(), 801.);
         window.update(|window, cx| {
             assert!(cache.read(cx).pending.is_none());
             first.retain_consumers(&[]);
@@ -2829,9 +2846,9 @@ mod tests {
         window.executor().advance_clock(Duration::from_millis(1));
         window.run_until_parked();
         window.update(|_, cx| assert_eq!(cache.read(cx).target, 256));
-        draw_cover(window, &second);
+        draw_sizing(window, second.sizing(2).unwrap(), 201.);
         window.run_until_parked();
-        draw_cover(window, &second);
+        draw_sizing(window, second.sizing(2).unwrap(), 201.);
         window.update(|window, cx| {
             assert_eq!(cache.read(cx).tier, 256);
             second.retain_consumers(&[]);
@@ -2866,8 +2883,7 @@ mod tests {
             let view = ArtworkView::new(images.clone());
             let window = cx.add_empty_window();
             let cache = window.update(|_, cx| install_cover(&view, loaded, cx));
-            request_cover_size(window, &view, 1, 200.);
-            draw_cover(window, &view);
+            draw_sizing(window, view.sizing(1).unwrap(), 200.);
             window.run_until_parked();
             let original = window.update(|_, cx| {
                 assert_eq!(cache.read(cx).source.get().unwrap().animated, animated);
@@ -2881,8 +2897,7 @@ mod tests {
                     .unwrap()
             });
             for side in [257., 800., 2048., 100.] {
-                request_cover_size(window, &view, 1, side);
-                draw_cover(window, &view);
+                draw_sizing(window, view.sizing(1).unwrap(), side);
                 window.update(|_, cx| {
                     let image = cache.read(cx);
                     assert!(image.pending.is_none());
@@ -2909,7 +2924,7 @@ mod tests {
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let path = directory.path().join("large-encoded.wav");
         cover_wave(&path, &decode::tests::large_encoded_bmp());
-        let track = crate::test_support::artwork_track(path);
+        let track = rivu_protocol::test_support::artwork_track(path);
         let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
         let loaded = manager.load(crate::artwork_source(&track)).unwrap();
         assert_eq!(
@@ -2933,8 +2948,7 @@ mod tests {
                 .image
                 .clone()
         });
-        request_cover_size(window, &view, 1, 200.);
-        draw_cover(window, &view);
+        draw_sizing(window, view.sizing(1).unwrap(), 200.);
         window.run_until_parked();
         window.update(|window, cx| {
             let pixels = cache
@@ -2960,39 +2974,27 @@ mod tests {
         let (directory, admitted) = loaded_cover(&static_cover(800, 211));
         let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path())
             .with_max_image_bytes(8 * 1024 * 1024);
-        let track = crate::test_support::artwork_track(directory.path().join("cover.wav"));
+        let track = rivu_protocol::test_support::artwork_track(directory.path().join("cover.wav"));
         let lower = manager.load(crate::artwork_source(&track)).unwrap();
         assert_eq!(lower.path(), admitted.path());
-        // Simulate an external cache-file change: the background reader must
-        // still enforce each immutable session policy, including remembered errors.
-        std::fs::write(admitted.path(), decode::tests::large_encoded_bmp()).unwrap();
         let images = ArtworkImageRegistry::new(2);
         let rejected = ArtworkView::new(images.clone());
         let accepted = ArtworkView::new(images.clone());
         let window = cx.add_empty_window();
         let (rejected_cache, accepted_cache) = window.update(|_, cx| {
-            rejected.replace(Some(lower), cx);
-            accepted.replace(Some(admitted), cx);
-            let rejected = rejected
-                .state
-                .borrow()
-                .current
-                .as_ref()
-                .unwrap()
-                .owner
-                .clone();
-            let accepted = accepted
-                .state
-                .borrow()
-                .current
-                .as_ref()
-                .unwrap()
-                .owner
-                .clone();
-            assert!(!Rc::ptr_eq(&rejected, &accepted));
-            (rejected.image.clone(), accepted.image.clone())
+            let rejected = install_cover(&rejected, lower, cx);
+            let accepted = install_cover(&accepted, admitted, cx);
+            assert_ne!(rejected, accepted);
+            (rejected, accepted)
         });
-        draw_cover(window, &rejected);
+        // Real reader limits are covered above. Model a remembered terminal
+        // result on the lower-policy lease without mutating the shared original.
+        rejected_cache.update(window, |image, cx| {
+            image.item = Some(ImageCacheItem::from_future(
+                async { Err(ImageCacheError::Asset("controlled rejection".into())) },
+                cx,
+            ));
+        });
         window.run_until_parked();
         window.update(|_, cx| {
             assert!(
@@ -3036,23 +3038,25 @@ mod tests {
     }
 
     #[gpui::test]
-    fn artwork_cover_actual_loader_shares_animation_rejects_to_default_and_retires(
+    fn artwork_cover_actual_loader_shares_animation_and_retires_failed_and_live_scenes(
         cx: &mut gpui::TestAppContext,
     ) {
-        std::fs::create_dir_all(".cache").unwrap();
-        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let directory = tempfile::tempdir().unwrap();
         for reject in [false, true] {
             let path = directory.path().join(format!("cover-{reject}.wav"));
-            let mut gif = decode::tests::gif();
-            if reject {
-                gif[6..10].copy_from_slice(&[0, 32, 0, 32]); // 8192-square header only
-            }
+            // The rejected cover is admitted by metadata (manager.load below
+            // succeeds) and fails only in GUI decode.
+            let gif = if reject {
+                decode::tests::gif_with_corrupt_second_frame()
+            } else {
+                decode::tests::gif()
+            };
             cover_wave(&path, &gif);
             let manager = rivu_metadata::artwork::ArtworkManager::new(directory.path());
             let loaded = manager
-                .load(crate::artwork_source(&crate::test_support::artwork_track(
-                    path,
-                )))
+                .load(crate::artwork_source(
+                    &rivu_protocol::test_support::artwork_track(path),
+                ))
                 .unwrap();
             let images = ArtworkImageRegistry::default();
             let first = ArtworkView::new(images.clone());
@@ -3077,39 +3081,16 @@ mod tests {
                     .image
                     .clone()
             });
-            let old_scene = window.update(|_, cx| first.image(cx).unwrap());
             let old_ambient = first.source().unwrap().ambient_image();
-            window.draw(
-                gpui::point(gpui::px(0.), gpui::px(0.)),
-                gpui::size(gpui::px(64.), gpui::px(64.)),
-                |_, cx| {
-                    let image = first.image(cx).unwrap();
-                    cx.new(|_| DecorationScene(Some(image))).into_any_element()
-                },
-            );
+            draw_cover(window, &first);
             window.run_until_parked();
+            draw_cover(window, &second);
             let pixels = window.update(|_, cx| {
                 let result = cache.read(cx).item.as_ref().unwrap().get().unwrap();
                 if reject {
                     assert!(result.is_err());
-                    // Every consumer chooses its existing default cover, and
-                    // repeated renders do not restart a rejected load.
-                    for _ in 0..3 {
-                        assert!(first.image(cx).is_none());
-                        assert!(second.image(cx).is_none());
-                        assert!(!first.is_animated(cx));
-                        assert!(!second.is_animated(cx));
-                        assert!(
-                            cache
-                                .read(cx)
-                                .item
-                                .as_ref()
-                                .unwrap()
-                                .get()
-                                .unwrap()
-                                .is_err()
-                        );
-                    }
+                    assert!(!first.is_animated(cx));
+                    assert!(!second.is_animated(cx));
                     None
                 } else {
                     let decoded = result.unwrap();
@@ -3120,6 +3101,7 @@ mod tests {
                     Some(Arc::downgrade(&decoded))
                 }
             });
+            let old_scene = first.sizing(1).unwrap(); // Scene captured after decode completed.
             window.update(|window, cx| {
                 first.replace(None, cx);
                 assert!(!first.is_animated(cx));
@@ -3137,32 +3119,24 @@ mod tests {
             if let Some(pixels) = &pixels {
                 assert!(pixels.upgrade().is_none());
             }
-            for old_scene in [old_scene, old_ambient] {
-                window.draw(
-                    gpui::point(gpui::px(0.), gpui::px(0.)),
-                    gpui::size(gpui::px(64.), gpui::px(64.)),
-                    |_, cx| {
-                        cx.new(|_| DecorationScene(Some(old_scene)))
-                            .into_any_element()
-                    },
+            draw_sizing(window, old_scene, 64.);
+            draw_source(window, old_ambient);
+            window.run_until_parked();
+            window.update(|_, cx| {
+                let image = cache.read(cx);
+                assert!(
+                    image.artwork.is_none(),
+                    "released scenes must not protect old files"
                 );
-                window.run_until_parked();
-                window.update(|_, cx| {
-                    let image = cache.read(cx);
-                    assert!(
-                        image.artwork.is_none(),
-                        "released scenes must not protect old files"
-                    );
-                    assert!(
-                        image.item.is_none(),
-                        "released scenes must not restart cover decoding"
-                    );
-                    assert!(
-                        image.ambient.is_none(),
-                        "released scenes must not restart filtering"
-                    );
-                });
-            }
+                assert!(
+                    image.item.is_none(),
+                    "released scenes must not restart cover decoding"
+                );
+                assert!(
+                    image.ambient.is_none(),
+                    "released scenes must not restart filtering"
+                );
+            });
         }
     }
 
@@ -3190,8 +3164,6 @@ mod tests {
         draw_cover(window, &first);
         window.run_until_parked();
         window.update(|_, cx| {
-            assert!(first.image(cx).is_none());
-            assert!(second.image(cx).is_none());
             assert!(!images.set_decode_budget(decode::tests::budget(1), cx));
             assert!(
                 cache
@@ -3206,8 +3178,6 @@ mod tests {
 
             assert!(images.set_decode_budget(decode::tests::budget(2), cx));
             assert!(cache.read(cx).item.is_none());
-            assert!(first.image(cx).is_some());
-            assert!(second.image(cx).is_some());
         });
         draw_cover(window, &first);
         window.run_until_parked();
@@ -3231,8 +3201,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(Arc::ptr_eq(&decoded, &unchanged));
-            assert!(first.image(cx).is_some());
-            assert!(second.image(cx).is_some());
+
             Arc::downgrade(&decoded)
         });
 
@@ -3250,9 +3219,13 @@ mod tests {
         });
         draw_cover(window, &second);
         window.run_until_parked();
+        window.update(|_, cx| {
+            assert_eq!(cache.read(cx).replaced.len(), 1);
+        });
+        // The first cover still names the previous budget generation until it
+        // repaints. The second cover cannot acknowledge on its behalf.
+        draw_cover(window, &first);
         window.update(|window, cx| {
-            assert!(first.image(cx).is_none());
-            assert!(second.image(cx).is_none());
             assert!(
                 cache
                     .read(cx)
@@ -3275,6 +3248,57 @@ mod tests {
         });
     }
 
+    type DecodeResult = Result<Arc<RenderImage>, ImageCacheError>;
+
+    struct ControlledDecode {
+        sender: Option<futures::channel::oneshot::Sender<DecodeResult>>,
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ControlledDecode {
+        fn new() -> (Self, impl Future<Output = DecodeResult> + Send + 'static) {
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker = finished.clone();
+            (
+                Self {
+                    sender: Some(sender),
+                    finished,
+                },
+                async move {
+                    let result = receiver.await.expect("controlled decode sender is held");
+                    worker.store(true, std::sync::atomic::Ordering::Release);
+                    result
+                },
+            )
+        }
+
+        fn before_retirement(
+            &mut self,
+            finished: bool,
+            window: &mut gpui::VisualTestContext,
+        ) -> std::sync::Weak<RenderImage> {
+            let pixels = Arc::new(RenderImage::new([image::Frame::new(
+                image::RgbaImage::new(1, 1),
+            )]));
+            let weak = Arc::downgrade(&pixels);
+            if finished {
+                self.sender.take().unwrap().send(Ok(pixels)).unwrap();
+                while !self.finished.load(std::sync::atomic::Ordering::Acquire) {
+                    assert!(window.background_executor.tick());
+                }
+            }
+            weak
+        }
+
+        fn assert_retired(&self, pixels: std::sync::Weak<RenderImage>) {
+            if let Some(pending) = &self.sender {
+                assert!(pending.is_canceled());
+            }
+            assert!(pixels.upgrade().is_none());
+        }
+    }
+
     #[gpui::test]
     fn artwork_budget_change_cancels_pending_completion_before_it_can_publish(
         cx: &mut gpui::TestAppContext,
@@ -3288,66 +3312,29 @@ mod tests {
                 assert!(images.set_decode_budget(decode::tests::budget(2), cx));
                 install_cover(&view, loaded.clone(), cx)
             });
-            let old_scene = window.update(|_, cx| view.image(cx).unwrap());
-            let (sender, receiver) = futures::channel::oneshot::channel();
-            let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let old_scene = view.sizing(1).unwrap();
+            let (mut worker, decode) = ControlledDecode::new();
             window.update(|_, cx| {
-                let finished = finished.clone();
                 cache.update(cx, |image, cx| {
-                    image.item = Some(ImageCacheItem::from_future(
-                        async move {
-                            let result = receiver.await.expect("controlled decode sender is held");
-                            finished.store(true, std::sync::atomic::Ordering::SeqCst);
-                            result
-                        },
-                        cx,
-                    ));
+                    image.item = Some(ImageCacheItem::from_future(decode, cx));
                 });
                 assert!(!images.set_decode_budget(decode::tests::budget(2), cx));
             });
             window.run_until_parked();
             assert!(
-                !sender.is_canceled(),
+                !worker.sender.as_ref().unwrap().is_canceled(),
                 "unchanged budget must keep pending work"
             );
 
-            let decoded = Arc::new(RenderImage::new([image::Frame::new(
-                image::RgbaImage::new(1, 1),
-            )]));
-            let stale_pixels = Arc::downgrade(&decoded);
-            let mut sender = Some(sender);
-            if worker_finished {
-                sender.take().unwrap().send(Ok(decoded)).unwrap();
-                while !finished.load(std::sync::atomic::Ordering::SeqCst) {
-                    assert!(window.background_executor.tick());
-                }
-            } else {
-                drop(decoded);
-            }
+            let stale_pixels = worker.before_retirement(worker_finished, window);
             window.update(|_, cx| {
                 assert!(images.set_decode_budget(decode::tests::budget(1), cx));
                 assert!(cache.read(cx).item.is_none());
             });
             window.run_until_parked();
-            if let Some(sender) = sender {
-                assert!(
-                    sender
-                        .send(Ok(Arc::new(RenderImage::new([image::Frame::new(
-                            image::RgbaImage::new(1, 1)
-                        ),]))))
-                        .is_err()
-                );
-            }
-            assert!(stale_pixels.upgrade().is_none());
+            worker.assert_retired(stale_pixels);
             // Even a scene built under the old policy now uses the new budget.
-            window.draw(
-                gpui::point(gpui::px(0.), gpui::px(0.)),
-                gpui::size(gpui::px(64.), gpui::px(64.)),
-                |_, cx| {
-                    cx.new(|_| DecorationScene(Some(old_scene.size_full())))
-                        .into_any_element()
-                },
-            );
+            draw_sizing(window, old_scene, 64.);
             window.run_until_parked();
             window.update(|window, cx| {
                 assert!(
@@ -3360,7 +3347,7 @@ mod tests {
                         .unwrap()
                         .is_err()
                 );
-                assert!(view.image(cx).is_none());
+
                 view.release_all_images(window, cx);
                 images.release_all_retired(window, cx);
             });
@@ -3379,7 +3366,7 @@ mod tests {
             let cache = install_cover(&view, loaded, cx);
             (
                 cache,
-                view.image(cx).unwrap(),
+                view.sizing(1).unwrap(),
                 view.source().unwrap().ambient_image(),
             )
         });
@@ -3392,21 +3379,13 @@ mod tests {
             window.simulate_next_frame(cx);
             assert!(cache.read(cx).artwork.is_none());
         });
-        for old_scene in [old_cover, old_ambient] {
-            window.draw(
-                gpui::point(gpui::px(0.), gpui::px(0.)),
-                gpui::size(gpui::px(64.), gpui::px(64.)),
-                |_, cx| {
-                    cx.new(|_| DecorationScene(Some(old_scene)))
-                        .into_any_element()
-                },
-            );
-            window.run_until_parked();
-            window.update(|_, cx| {
-                assert!(cache.read(cx).item.is_none());
-                assert!(cache.read(cx).ambient.is_none());
-            });
-        }
+        draw_sizing(window, old_cover, 64.);
+        draw_source(window, old_ambient);
+        window.run_until_parked();
+        window.update(|_, cx| {
+            assert!(cache.read(cx).item.is_none());
+            assert!(cache.read(cx).ambient.is_none());
+        });
     }
 
     #[gpui::test]
@@ -3420,18 +3399,9 @@ mod tests {
                 let view = ArtworkView::new(images.clone());
                 let window = cx.add_empty_window();
                 let cache = window.update(|_, cx| install_cover(&view, loaded.clone(), cx));
-                let (sender, receiver) = futures::channel::oneshot::channel();
-                let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (mut worker, decode) = ControlledDecode::new();
                 cache.update(window, |image, cx| {
-                    let finished = finished.clone();
-                    let pending = ImageCacheItem::from_future(
-                        async move {
-                            let result = receiver.await.expect("controlled decode sender is held");
-                            finished.store(true, std::sync::atomic::Ordering::SeqCst);
-                            result
-                        },
-                        cx,
-                    );
+                    let pending = ImageCacheItem::from_future(decode, cx);
                     if ambient {
                         image.item = Some(ImageCacheItem::from_future(
                             async {
@@ -3447,19 +3417,7 @@ mod tests {
                     }
                 });
                 window.run_until_parked();
-                let decoded = Arc::new(RenderImage::new([image::Frame::new(
-                    image::RgbaImage::new(1, 1),
-                )]));
-                let stale_pixels = Arc::downgrade(&decoded);
-                let mut sender = Some(sender);
-                if worker_finished {
-                    sender.take().unwrap().send(Ok(decoded)).unwrap();
-                    while !finished.load(std::sync::atomic::Ordering::SeqCst) {
-                        assert!(window.background_executor.tick());
-                    }
-                } else {
-                    drop(decoded);
-                }
+                let stale_pixels = worker.before_retirement(worker_finished, window);
                 window.update(|window, cx| {
                     view.replace(None, cx);
                     images.release_retired(window);
@@ -3472,16 +3430,7 @@ mod tests {
                     );
                 });
                 window.run_until_parked();
-                if let Some(sender) = sender {
-                    assert!(
-                        sender
-                            .send(Ok(Arc::new(RenderImage::new([image::Frame::new(
-                                image::RgbaImage::new(1, 1)
-                            ),]))))
-                            .is_err()
-                    );
-                }
-                assert!(stale_pixels.upgrade().is_none());
+                worker.assert_retired(stale_pixels);
                 draw_cover(window, &view);
                 window.run_until_parked();
                 window.update(|window, cx| {
@@ -3506,13 +3455,27 @@ mod tests {
     }
 
     fn draw_cover(window: &mut gpui::VisualTestContext, cover: &ArtworkView) {
+        draw_sizing(window, cover.sizing(1).unwrap(), 64.);
+    }
+
+    fn draw_sizing(
+        window: &mut gpui::VisualTestContext,
+        sizing: ArtworkImageSizing,
+        physical_side: f32,
+    ) {
+        struct Cover(ArtworkImageSizing, f32);
+        impl Render for Cover {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let side = gpui::px(self.1 / window.scale_factor());
+                div()
+                    .size_full()
+                    .children(self.0.request_image(side, window, cx))
+            }
+        }
         window.draw(
             gpui::point(gpui::px(0.), gpui::px(0.)),
             gpui::size(gpui::px(64.), gpui::px(64.)),
-            |_, cx| {
-                let image = cover.image(cx).unwrap();
-                cx.new(|_| DecorationScene(Some(image))).into_any_element()
-            },
+            |_, cx| cx.new(|_| Cover(sizing, physical_side)).into_any_element(),
         );
     }
 
@@ -3620,33 +3583,12 @@ mod tests {
             let first = window.update(|_, cx| images.decoration(0, VINYL, cx));
             let old_cache = first.owner.image.clone();
             let old_scene = first.image();
-            let (sender, receiver) = futures::channel::oneshot::channel();
-            let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (mut worker, decode) = ControlledDecode::new();
             old_cache.update(window, |image, cx| {
-                let finished = finished.clone();
-                image.start(
-                    async move {
-                        let result = receiver.await.expect("controlled decode sender is held");
-                        finished.store(true, std::sync::atomic::Ordering::SeqCst);
-                        result
-                    },
-                    cx,
-                );
+                image.start(decode, cx);
             });
             window.run_until_parked();
-            let decoded = Arc::new(RenderImage::new([image::Frame::new(
-                image::RgbaImage::new(1, 1),
-            )]));
-            let stale_pixels = Arc::downgrade(&decoded);
-            let mut sender = Some(sender);
-            if worker_finished {
-                sender.take().unwrap().send(Ok(decoded)).unwrap();
-                while !finished.load(std::sync::atomic::Ordering::SeqCst) {
-                    assert!(window.background_executor.tick());
-                }
-            } else {
-                drop(decoded);
-            }
+            let stale_pixels = worker.before_retirement(worker_finished, window);
             first.retire();
             window.update(|window, _| images.release_retired(window));
             // Hiding/closing flushes both the pending frame batch and any newer
@@ -3658,16 +3600,7 @@ mod tests {
             let reopened = window.update(|_, cx| images.decoration(0, VINYL, cx));
             assert_ne!(old_cache, reopened.owner.image);
             window.run_until_parked();
-            if let Some(sender) = sender {
-                assert!(
-                    sender
-                        .send(Ok(Arc::new(RenderImage::new([image::Frame::new(
-                            image::RgbaImage::new(1, 1)
-                        ),]))))
-                        .is_err()
-                );
-            }
-            assert!(stale_pixels.upgrade().is_none());
+            worker.assert_retired(stale_pixels);
             draw_decoration(window, &reopened);
             window.run_until_parked();
             let new_pixels = decoded_decoration(window, &reopened.owner.image);
@@ -3762,7 +3695,7 @@ mod tests {
         .map(|(name, bytes)| {
             let path = directory.path().join(name);
             cover_wave(&path, &bytes);
-            let track = crate::test_support::artwork_track(path);
+            let track = rivu_protocol::test_support::artwork_track(path);
             assert!(manager.load(crate::artwork_source(&track)).is_some());
             track
         })
@@ -3976,7 +3909,7 @@ mod tests {
         let directory = tempfile::tempdir_in(".cache").unwrap();
         let path = directory.path().join("paced.wav");
         cover_wave(&path, &decode::tests::gif());
-        let track = crate::test_support::artwork_track(path);
+        let track = rivu_protocol::test_support::artwork_track(path);
         let manager = Arc::new(rivu_metadata::artwork::ArtworkManager::new(
             directory.path(),
         ));
@@ -4401,10 +4334,12 @@ mod tests {
     ) {
         for ambient in [false, true] {
             for cover in ["missing", "real", "corrupt"] {
-                let (_directory, loaded) = loaded_cover(&static_cover(64, 200));
-                if cover == "corrupt" {
-                    std::fs::write(loaded.path(), b"not an image").unwrap();
-                }
+                let bytes = if cover == "corrupt" {
+                    gif_with_corrupt_second_frame()
+                } else {
+                    static_cover(64, 200)
+                };
+                let (_directory, loaded) = loaded_cover(&bytes);
                 let view = ArtworkView::new(ArtworkImageRegistry::default());
                 let window = cx.add_empty_window();
                 let fallback = window.update(|_, cx| {

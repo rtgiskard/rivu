@@ -908,7 +908,7 @@ mod tests {
     fn playback_merge_preserves_waveform_until_cue_range_changes() {
         let (_directory, runtime) = fixture();
         let handle = &runtime.handle;
-        let mut track = crate::test_support::artwork_track("album.wav".into());
+        let mut track = rivu_protocol::test_support::track(1, "album.wav");
         track.cue = Some(rivu_protocol::model::CueSegment {
             sheet: "album.cue".into(),
             number: 1,
@@ -1013,10 +1013,9 @@ mod tests {
                 ),
                 status == AckStatus::Succeeded,
             );
-            assert_eq!(
-                futures::executor::block_on(delivery).unwrap().ack.status,
-                status
-            );
+            let delivery = futures::executor::block_on(delivery).unwrap();
+            assert_eq!(delivery.ack.status, status);
+            assert_eq!(delivery.observation, CommandObservation::NotRequested);
             assert!(*handle.shared.shutdown_admitted.lock());
             handle.request_shutdown().unwrap();
             assert!(requests.is_empty());
@@ -1026,6 +1025,9 @@ mod tests {
 
     #[test]
     fn shutdown_bypasses_full_command_queue_and_is_admitted_only_once() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
+            return;
+        }
         let (_directory, runtime) = fixture();
         let mut handle = runtime.handle.clone();
         let (commands, receiver) = async_channel::bounded(QUEUE_CAPACITY);
@@ -1189,27 +1191,6 @@ mod tests {
     }
 
     #[test]
-    fn successful_ack_survives_failed_refresh_without_replay() {
-        let mut ack = Ack::new(AckStatus::Succeeded, Some("owner warning".into()), 42);
-        ack.scan_id = Some(11);
-        ack.relocation_id = Some(12);
-        ack.processing_id = Some(13);
-        let expected = serde_json::to_value(&ack).unwrap();
-        let mut refreshes = 0;
-        let delivery = CommandDelivery::observe(ack, false, || {
-            refreshes += 1;
-            anyhow::bail!("read failed")
-        });
-        assert_eq!(refreshes, 1);
-        assert_eq!(serde_json::to_value(&delivery.ack).unwrap(), expected);
-        assert!(matches!(
-            delivery.observation,
-            CommandObservation::Unavailable(_)
-        ));
-        assert!(delivery.observed_result().is_err());
-    }
-
-    #[test]
     fn unavailable_command_observation_stops_connection_without_replay_or_late_merge() {
         let (_directory, runtime) = fixture();
         let handle = &runtime.handle;
@@ -1217,7 +1198,11 @@ mod tests {
         let mut session = handle.session().unwrap();
         let stale = session.get_state(StateSections::ALL).unwrap();
         let (reply, receiver) = oneshot::channel();
-        let ack = Ack::new(AckStatus::Succeeded, None, 42);
+        let mut ack = Ack::new(AckStatus::Succeeded, Some("owner warning".into()), 42);
+        ack.scan_id = Some(11);
+        ack.relocation_id = Some(12);
+        ack.processing_id = Some(13);
+        let expected = serde_json::to_value(&ack).unwrap();
         let mut refreshes = 0;
         assert!(!finish_command(
             &handle.shared,
@@ -1232,7 +1217,8 @@ mod tests {
         ));
         let delivery = futures::executor::block_on(receiver).unwrap();
         assert_eq!(refreshes, 1);
-        assert!(delivery.ack.is_success());
+        assert_eq!(serde_json::to_value(&delivery.ack).unwrap(), expected);
+        assert!(delivery.observed_result().is_err());
         assert!(matches!(
             delivery.observation,
             CommandObservation::Unavailable(_)
@@ -1263,16 +1249,6 @@ mod tests {
             delivery.observed_result(),
             Err("partially committed".into())
         );
-    }
-
-    #[test]
-    fn shutdown_ack_never_requires_a_post_acceptance_read() {
-        let delivery =
-            CommandDelivery::observe(Ack::new(AckStatus::Succeeded, None, 1), true, || {
-                panic!("Shutdown must not refresh after acceptance")
-            });
-        assert!(delivery.ack.is_success());
-        assert_eq!(delivery.observation, CommandObservation::NotRequested);
     }
 
     #[test]
@@ -1309,15 +1285,18 @@ mod tests {
 
     #[test]
     fn incomplete_conditional_refresh_is_not_successful_or_published() {
-        use rivu::test_support::ipc;
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
+            return;
+        }
+        use rivu::test_support::ipc::socket_test_directory;
         use rivu_protocol::{
-            transport::encode_response_frame_into,
+            test_support::{read_test_request, write_test_response},
             wire::{HelloResponse, WireRequest, WireResponse, wire_state},
         };
-        use std::{io::Write, os::unix::net::UnixListener};
+        use std::os::unix::net::UnixListener;
 
         let (_directory, runtime) = fixture();
-        let directory = ipc::socket_test_directory();
+        let directory = socket_test_directory();
         let listener =
             UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
                 .unwrap();
@@ -1330,16 +1309,11 @@ mod tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            let reply = |stream: &mut std::os::unix::net::UnixStream, response| {
-                let mut frame = Vec::new();
-                encode_response_frame_into(&response, &mut frame).unwrap();
-                stream.write_all(&frame).unwrap();
-            };
             assert!(matches!(
-                ipc::read_test_request(&mut stream),
+                read_test_request(&mut stream),
                 WireRequest::Hello(_)
             ));
-            reply(
+            write_test_response(
                 &mut stream,
                 WireResponse::Hello(HelloResponse {
                     instance_id: instance_id.to_le_bytes(),
@@ -1347,10 +1321,10 @@ mod tests {
                 }),
             );
             assert!(
-                matches!(ipc::read_test_request(&mut stream), WireRequest::State(request)
+                matches!(read_test_request(&mut stream), WireRequest::State(request)
                 if request.sections == StateSections::ALL && request.since == Some(baseline))
             );
-            reply(
+            write_test_response(
                 &mut stream,
                 WireResponse::State(wire_state(StateResponse {
                     revisions: rivu_protocol::response::StateRevisions {
@@ -1490,10 +1464,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn logical_timeout_retains_real_ipc_wait_until_reply_and_discards_late_success() {
-        let (_directory, runtime) = fixture();
-        let pause = ExecutorPause::new(&runtime);
+    struct PausedQuery {
+        pause: ExecutorPause,
+        notice: QueryResponse,
+        completion: std::sync::mpsc::Receiver<QueryResponse>,
+        worker: thread::JoinHandle<()>,
+    }
+
+    fn paused_query(runtime: &crate::test_support::CoreRuntime) -> PausedQuery {
+        let pause = ExecutorPause::new(runtime);
         let (notice, notices) = std::sync::mpsc::sync_channel(1);
         let handle = runtime.handle.clone().with_query_timeout(move |response| {
             let _ = notice.try_send(response);
@@ -1510,6 +1489,26 @@ mod tests {
         let notice = notices
             .recv_timeout(Duration::from_secs(5))
             .expect("logical timeout was not reported");
+        PausedQuery {
+            pause,
+            notice,
+            completion,
+            worker,
+        }
+    }
+
+    #[test]
+    fn logical_timeout_retains_real_ipc_wait_until_reply_and_discards_late_success() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
+            return;
+        }
+        let (_directory, runtime) = fixture();
+        let PausedQuery {
+            pause,
+            notice,
+            completion,
+            worker,
+        } = paused_query(&runtime);
         assert!(matches!(notice.result, Err(QueryError::Message(_))));
         assert!(matches!(
             completion.try_recv(),
@@ -1532,24 +1531,16 @@ mod tests {
 
     #[test]
     fn runtime_drop_cancels_a_retained_ipc_wait_while_core_remains_alive() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
+            return;
+        }
         let (directory, mut runtime) = fixture();
-        let pause = ExecutorPause::new(&runtime);
-        let (notice, notices) = std::sync::mpsc::sync_channel(1);
-        let handle = runtime.handle.clone().with_query_timeout(move |response| {
-            let _ = notice.try_send(response);
-        });
-        let (finished, completion) = std::sync::mpsc::sync_channel(1);
-        let worker = thread::spawn(move || {
-            let response = futures::executor::block_on(handle.query_with_ticket(
-                Query::Track { track_id: i64::MAX },
-                None,
-                Duration::from_millis(10),
-            ));
-            finished.send(response).unwrap();
-        });
-        let timed_out = notices
-            .recv_timeout(Duration::from_secs(5))
-            .expect("query did not enter retained waiting");
+        let PausedQuery {
+            pause,
+            notice: timed_out,
+            completion,
+            worker,
+        } = paused_query(&runtime);
         assert!(matches!(
             completion.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
@@ -1568,6 +1559,9 @@ mod tests {
 
     #[test]
     fn logical_timeout_retires_only_the_request_owner_and_keeps_its_reply_receiver() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
+            return;
+        }
         use futures::FutureExt;
 
         let (_directory, runtime) = fixture();
@@ -1636,12 +1630,14 @@ mod tests {
 
     #[test]
     fn query_worker_cancels_dropped_reply_and_retired_ticket_before_reusing_its_session() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
+            return;
+        }
         use futures::FutureExt;
-        use rivu::test_support::ipc::{
-            complete_test_handshake, read_test_request, reply_test_query, socket_test_directory,
-        };
+        use rivu::test_support::ipc::socket_test_directory;
         use rivu_protocol::{
             response::ViewResponse,
+            test_support::{complete_test_handshake, read_test_request, reply_test_query},
             wire::{WireQuery, WireRequest},
         };
         use std::os::unix::net::UnixListener;

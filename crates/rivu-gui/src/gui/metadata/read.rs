@@ -255,45 +255,6 @@ mod tests {
     use super::*;
     use rivu_protocol::response::QueryError;
 
-    #[test]
-    fn bitrate_change_rejects_reply_and_preserves_worker_until_completion() {
-        let now = Instant::now();
-        let mut owner = MetadataReadCoordinator::default();
-        let mut session = MetadataSession::default();
-        request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
-        assert!(owner.submit(first.read, &session, environment(true)));
-        let revisions = QueryRevisions {
-            bitrate: 1,
-            ..QueryRevisions::default()
-        };
-        owner.sync(Some(1), revisions, now);
-        assert!(owner.prepare(&mut session, true, now).is_none());
-        assert!(matches!(
-            owner.finish(
-                first.read,
-                &mut session,
-                ReadEnvironment {
-                    visible: true,
-                    revisions
-                },
-                response(),
-                || "wrong response".into(),
-            ),
-            ReadCompletion::Retired
-        ));
-        assert!(session.track().is_none());
-        let retry = owner.prepare(&mut session, true, now).unwrap();
-        assert!(owner.submit(
-            retry.read,
-            &session,
-            ReadEnvironment {
-                visible: true,
-                revisions
-            }
-        ));
-    }
-
     fn environment(visible: bool) -> ReadEnvironment {
         ReadEnvironment {
             visible,
@@ -529,45 +490,10 @@ mod tests {
     }
 
     #[test]
-    fn current_failure_stops_automatic_retry_but_explicit_retry_can_load() {
-        let now = Instant::now();
-        let mut owner = MetadataReadCoordinator::default();
-        let mut session = MetadataSession::default();
-        request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
-        assert!(owner.submit(first.read, &session, environment(true)));
-        assert!(matches!(
-            owner.finish(
-                first.read,
-                &mut session,
-                environment(true),
-                QueryResponse {
-                    revisions: QueryRevisions::default(),
-                    result: Err(QueryError::Message("read failed".into())),
-                },
-                || "wrong response".into(),
-            ),
-            ReadCompletion::Failed
-        ));
-        assert!(owner.prepare(&mut session, true, now).is_none());
-        request(&mut owner, &mut session, 1, now);
-        let retry = owner.prepare(&mut session, true, now).unwrap();
-        assert!(owner.submit(retry.read, &session, environment(true)));
-        assert!(matches!(
-            finish(&mut owner, &mut session, retry.read, true),
-            ReadCompletion::Loaded(_)
-        ));
-        assert!(owner.prepare(&mut session, true, now).is_none());
-    }
-
-    #[test]
-    fn current_transport_error_with_unscoped_revisions_fails_without_retry() {
+    fn current_transport_errors_park_until_successful_explicit_retry() {
         use super::super::session::MetadataReadState;
 
         let now = Instant::now();
-        let mut owner = MetadataReadCoordinator::default();
-        let mut session = MetadataSession::default();
-        session.select(1);
         let scoped = QueryRevisions {
             library: 7,
             track: Some(rivu_protocol::response::TrackRevision {
@@ -576,75 +502,109 @@ mod tests {
             }),
             ..Default::default()
         };
-        owner.request(1, scoped, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
-        assert!(owner.submit(
-            first.read,
-            &session,
-            ReadEnvironment {
-                visible: true,
-                revisions: scoped,
+        let live = || ReadEnvironment {
+            visible: true,
+            revisions: scoped,
+        };
+        for revisions in [
+            scoped,
+            QueryRevisions {
+                library: 9,
+                ..Default::default()
             },
-        ));
-        let completion = owner.finish(
-            first.read,
-            &mut session,
-            ReadEnvironment {
-                visible: true,
-                revisions: scoped,
-            },
-            QueryResponse {
-                revisions: QueryRevisions {
-                    library: 9,
-                    ..Default::default()
+        ] {
+            let mut owner = MetadataReadCoordinator::default();
+            let mut session = MetadataSession::default();
+            session.select(1);
+            owner.request(1, scoped, now);
+            let first = owner.prepare(&mut session, true, now).unwrap();
+            assert!(owner.submit(first.read, &session, live()));
+            let completion = owner.finish(
+                first.read,
+                &mut session,
+                live(),
+                QueryResponse {
+                    revisions,
+                    result: Err(QueryError::Message("Core unavailable".into())),
                 },
-                result: Err(QueryError::Message("Core unavailable".into())),
-            },
-            || "wrong response".into(),
-        );
-        assert!(matches!(completion, ReadCompletion::Failed));
-        assert_eq!(
-            session.read_state(),
-            &MetadataReadState::Failed("Core unavailable".into())
-        );
-        assert!(owner.prepare(&mut session, true, now).is_none());
-        owner.request(1, scoped, now);
-        assert!(owner.prepare(&mut session, true, now).is_some());
+                || "wrong response".into(),
+            );
+            assert!(matches!(completion, ReadCompletion::Failed));
+            assert_eq!(
+                session.read_state(),
+                &MetadataReadState::Failed("Core unavailable".into())
+            );
+            assert!(owner.prepare(&mut session, true, now).is_none());
+            owner.request(1, scoped, now);
+            let retry = owner.prepare(&mut session, true, now).unwrap();
+            assert!(owner.submit(retry.read, &session, live()));
+            assert!(matches!(
+                owner.finish(
+                    retry.read,
+                    &mut session,
+                    live(),
+                    QueryResponse {
+                        revisions: scoped,
+                        ..response()
+                    },
+                    || "wrong response".into()
+                ),
+                ReadCompletion::Loaded(_)
+            ));
+            assert!(owner.prepare(&mut session, true, now).is_none());
+        }
     }
 
     #[test]
     fn freshness_change_queues_latest_read_without_releasing_physical_worker() {
         let now = Instant::now();
-        let mut owner = MetadataReadCoordinator::default();
-        let mut session = MetadataSession::default();
-        request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
-        assert!(owner.submit(first.read, &session, environment(true)));
-        let revisions = QueryRevisions {
-            library: 1,
-            ..Default::default()
-        };
-        let changed = now + Duration::from_millis(100);
-        owner.sync(Some(1), revisions, changed);
-        assert!(!first.ticket.is_current());
-        assert!(owner.prepare(&mut session, true, changed).is_none());
-        // A late duplicate timer callback must not retire already submitted I/O.
-        assert!(!owner.submit(first.read, &session, environment(true)));
-        assert!(owner.prepare(&mut session, true, changed).is_none());
-        assert!(matches!(
-            finish(&mut owner, &mut session, first.read, true),
-            ReadCompletion::Retired
-        ));
-        let next = owner.prepare(&mut session, true, changed).unwrap();
-        assert_eq!(next.delay, first.delay);
-        assert!(owner.submit(
-            next.read,
-            &session,
-            ReadEnvironment {
-                visible: true,
-                revisions,
+        for revisions in [
+            QueryRevisions {
+                library: 1,
+                ..Default::default()
             },
-        ));
+            QueryRevisions {
+                bitrate: 1,
+                ..Default::default()
+            },
+        ] {
+            let mut owner = MetadataReadCoordinator::default();
+            let mut session = MetadataSession::default();
+            request(&mut owner, &mut session, 1, now);
+            let first = owner.prepare(&mut session, true, now).unwrap();
+            assert!(owner.submit(first.read, &session, environment(true)));
+            let changed = now + Duration::from_millis(100);
+            owner.sync(Some(1), revisions, changed);
+            assert!(!first.ticket.is_current());
+            assert!(owner.prepare(&mut session, true, changed).is_none());
+            // A late duplicate timer callback must not retire already submitted I/O.
+            assert!(!owner.submit(first.read, &session, environment(true)));
+            assert!(owner.prepare(&mut session, true, changed).is_none());
+            assert!(matches!(
+                owner.finish(
+                    first.read,
+                    &mut session,
+                    ReadEnvironment {
+                        visible: true,
+                        revisions
+                    },
+                    response(),
+                    || "wrong response".into()
+                ),
+                ReadCompletion::Retired
+            ));
+            assert!(session.track().is_none());
+            let next = owner.prepare(&mut session, true, changed).unwrap();
+            assert_eq!(next.delay, first.delay);
+            assert!(owner.submit(
+                next.read,
+                &session,
+                ReadEnvironment {
+                    visible: true,
+                    revisions,
+                },
+            ));
+        }
     }
 
     #[test]

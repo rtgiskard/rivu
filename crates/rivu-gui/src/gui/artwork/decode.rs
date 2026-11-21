@@ -9,11 +9,6 @@ pub(super) use thumbnail::DecodeWorkspace;
 
 use std::{io::Cursor, sync::Arc};
 
-#[cfg(test)]
-use std::path::Path;
-
-#[cfg(test)]
-use gpui::ImageCacheError;
 use gpui::RenderImage;
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageFormat, ImageReader, Limits,
@@ -121,22 +116,6 @@ pub(super) struct DecodedArtwork {
     pub(super) animated: bool,
     /// Original dimensions after applying the same orientation as pixel decode.
     pub(super) source_dimensions: (u32, u32),
-}
-
-#[cfg(test)]
-/// Blocking background work; never call this from the UI thread.
-pub(super) fn load(
-    path: &Path,
-    max_encoded_bytes: usize,
-    budget: Budget,
-    requested_side: u32,
-) -> Result<DecodedArtwork, ImageCacheError> {
-    thumbnail::load(
-        path,
-        max_encoded_bytes,
-        budget,
-        requested_tier(requested_side),
-    )
 }
 
 fn decode(bytes: &[u8], budget: Budget) -> image::ImageResult<Vec<Frame>> {
@@ -308,41 +287,6 @@ pub(super) mod tests {
         bytes[2..6].copy_from_slice(&length.to_le_bytes());
         bytes[10..14].copy_from_slice(&((offset + padding) as u32).to_le_bytes());
         bytes
-    }
-
-    #[test]
-    fn encoded_session_limit_is_independent_of_retained_pixels_and_workspace() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("large-encoded.bmp");
-        let bytes = large_encoded_bmp();
-        assert_eq!(bytes.len(), 9 * MIB as usize);
-        std::fs::write(&path, bytes).unwrap();
-        // The decoded canvas is only 1.22 MiB and fits a 2 MiB retained budget.
-        let budget = Budget::new(2);
-        assert!(load(&path, 8 * MIB as usize, budget, 2048).is_err());
-        let decoded = load(
-            &path,
-            rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-            budget,
-            2048,
-        )
-        .unwrap();
-        assert_eq!(u32::from(decoded.image.size(0).width), 800);
-        assert_eq!(u32::from(decoded.image.size(0).height), 400);
-        assert_eq!(
-            &decoded.image.as_bytes(0).unwrap()[..4],
-            &[40, 30, 210, 255]
-        );
-        assert!(
-            load(
-                &path,
-                rivu_metadata::artwork::DEFAULT_MAX_IMAGE_BYTES,
-                Budget::new(1),
-                2048
-            )
-            .is_err()
-        );
-        assert!(load(&path, 8 * MIB as usize, budget, 2048).is_err());
     }
 
     pub(in crate::gui::artwork) fn budget(frames: u64) -> Budget {
@@ -526,10 +470,10 @@ pub(super) mod tests {
         assert!(decode(&nested, budget(2)).is_err());
     }
 
-    #[test]
-    fn animated_cover_gif_rejects_decode_errors_after_a_valid_frame() {
+    /// Valid first frame, corrupt second-frame LZW code size. Metadata admission
+    /// validates only the first frame, so this is admitted there but rejected here.
+    pub(in crate::gui) fn gif_with_corrupt_second_frame() -> Vec<u8> {
         let mut bytes = gif();
-        // Preserve frame one, corrupt the second frame's LZW code size.
         let frames = bytes
             .iter()
             .enumerate()
@@ -544,7 +488,12 @@ pub(super) mod tests {
             0
         };
         bytes[second + 10 + palette] = 0xff;
-        assert!(decode(&bytes, budget(2)).is_err());
+        bytes
+    }
+
+    #[test]
+    fn animated_cover_gif_rejects_decode_errors_after_a_valid_frame() {
+        assert!(decode(&gif_with_corrupt_second_frame(), budget(2)).is_err());
     }
 
     #[test]

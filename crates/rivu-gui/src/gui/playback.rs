@@ -994,19 +994,57 @@ mod tests {
     }
 
     #[test]
-    fn seek_keys_require_queue_identity_and_finite_positive_duration() {
+    fn seek_keys_target_only_the_rendered_queue_occurrence_with_a_playable_duration() {
         let mut state = PlaybackState {
             position: 12.,
             duration: Some(42.),
             ..Default::default()
         };
-        for key in [
-            SliderKey::Decrease,
-            SliderKey::Increase,
-            SliderKey::Start,
-            SliderKey::End,
+        let command = |key, rendered, current, state: &PlaybackState| {
+            let PlaybackEvent::SliderKey {
+                slider,
+                key,
+                queue_id,
+            } = Playback::slider_event(Dragging::Seek(3), SliderInput::Key(key), rendered)
+            else {
+                panic!("seek key event");
+            };
+            slider_command(slider, key, queue_id, current, state)
+        };
+        for (key, expected) in [
+            (
+                SliderKey::Start,
+                Command::SeekQueue {
+                    queue_id: 10,
+                    seconds: 0.,
+                },
+            ),
+            (
+                SliderKey::End,
+                Command::SeekQueue {
+                    queue_id: 10,
+                    seconds: 42.,
+                },
+            ),
+            (
+                SliderKey::Decrease,
+                Command::SeekRelative {
+                    queue_id: 10,
+                    delta: -5.,
+                },
+            ),
+            (
+                SliderKey::Increase,
+                Command::SeekRelative {
+                    queue_id: 10,
+                    delta: 5.,
+                },
+            ),
         ] {
-            assert!(slider_command(Dragging::Seek(3), key, None, Some(10), &state).is_none());
+            // Occurrences, not track IDs: a repeated copy of the same song is new.
+            for (rendered, current) in [(None, Some(10)), (Some(10), Some(11)), (Some(10), None)] {
+                assert!(command(key, rendered, current, &state).is_none());
+            }
             for duration in [
                 None,
                 Some(0.),
@@ -1015,58 +1053,12 @@ mod tests {
                 Some(f64::NAN),
             ] {
                 state.duration = duration;
-                assert!(
-                    slider_command(Dragging::Seek(3), key, Some(10), Some(10), &state).is_none()
-                );
+                assert!(command(key, Some(10), Some(10), &state).is_none());
             }
             state.duration = Some(42.);
-        }
-    }
-
-    #[test]
-    fn seek_keys_never_retarget_an_old_render_to_a_new_queue_occurrence() {
-        let state = PlaybackState {
-            position: 12.,
-            duration: Some(42.),
-            ..Default::default()
-        };
-        for key in [
-            SliderKey::Decrease,
-            SliderKey::Increase,
-            SliderKey::Start,
-            SliderKey::End,
-        ] {
-            let PlaybackEvent::SliderKey {
-                slider,
-                key,
-                queue_id,
-            } = Playback::slider_event(Dragging::Seek(3), SliderInput::Key(key), Some(10))
-            else {
-                panic!("seek key event");
-            };
-            // Occurrences, not track IDs: a repeated copy of the same song is new.
-            assert!(slider_command(slider, key, queue_id, Some(11), &state).is_none());
-            assert!(slider_command(slider, key, queue_id, None, &state).is_none());
-            let command = slider_command(slider, key, queue_id, Some(10), &state).unwrap();
-            match (key, command) {
-                (
-                    SliderKey::Start | SliderKey::End,
-                    Command::SeekQueue {
-                        queue_id: 10,
-                        seconds,
-                    },
-                ) => {
-                    assert_eq!(seconds, if key == SliderKey::End { 42. } else { 0. });
-                }
-                (
-                    SliderKey::Decrease | SliderKey::Increase,
-                    Command::SeekRelative {
-                        queue_id: 10,
-                        delta,
-                    },
-                ) => assert_eq!(delta, if key == SliderKey::Increase { 5. } else { -5. }),
-                _ => panic!("unexpected seek command for {key:?}"),
-            }
+            let actual = command(key, Some(10), Some(10), &state).unwrap();
+            // `Command` has no `PartialEq`; its derived `Debug` spells every field.
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
         }
     }
 

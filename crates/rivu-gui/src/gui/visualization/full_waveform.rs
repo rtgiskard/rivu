@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn replaced_request_waits_for_physical_worker_retirement() {
-        let track = crate::test_support::artwork_track("track.wav".into());
+        let track = rivu_protocol::test_support::artwork_track("track.wav".into());
         let mut request = FullWaveformRequest::default();
         let first = request.begin(&track);
         assert_eq!(request.reserve(), Some((first, track.id)));

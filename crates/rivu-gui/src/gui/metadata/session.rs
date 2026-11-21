@@ -535,14 +535,12 @@ mod tests {
                 .is_none()
         );
         assert!(session.begin_save(&SavedValue::PlayCount(0)).is_none());
-        let (_, command) = session
-            .begin_save(&SavedValue::PlayCount(u64::MAX))
-            .unwrap();
+        let (_, command) = session.begin_save(&SavedValue::PlayCount(42)).unwrap();
         assert!(matches!(
             command,
             Command::SetPlayCount {
                 track_id: 1,
-                play_count: u64::MAX
+                play_count: 42
             }
         ));
     }

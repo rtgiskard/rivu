@@ -203,20 +203,8 @@ impl ContentGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivu_protocol::model::{AlbumKey, Query};
-    use std::path::PathBuf;
+    use rivu_protocol::model::AlbumKey;
 
-    fn album_query() -> Query {
-        Query::AlbumTracks {
-            key: AlbumKey {
-                directory: PathBuf::from("/album"),
-                title: "Album".into(),
-            },
-            query: None,
-            offset: 0,
-            limit: rivu_protocol::model::MAX_QUERY_ROWS,
-        }
-    }
     #[test]
     fn drag_freezes_exactly_once_and_preserves_occurrences() {
         let drag = ContentDrag::pending();
@@ -231,14 +219,16 @@ mod tests {
         let mut state = GuiSnapshot::default();
         let drag = ContentDrag::pending();
         state.library.album_revision += 1;
-        let Query::AlbumTracks { key, .. } = album_query() else {
-            unreachable!()
+        let key = AlbumKey {
+            directory: "/album".into(),
+            title: "Album".into(),
         };
         drag.initialize(TrackSource::Album {
             key: key.clone(),
             revision: state.library.album_revision,
         });
-        assert!(can_transfer(&drag, &state, DragDestination::Queue, false));
+        // A pending Library selection does not gate an already resolved album.
+        assert!(can_transfer(&drag, &state, DragDestination::Queue, true));
         state.library.album_revision += 1;
         drag.initialize(TrackSource::Album {
             key,
@@ -293,21 +283,5 @@ mod tests {
         ));
         let empty = ContentDrag::new(TrackSource::Tracks(Vec::new()));
         assert!(!can_transfer(&empty, &state, DragDestination::Queue, false,));
-        let Query::AlbumTracks { key, .. } = album_query() else {
-            unreachable!()
-        };
-        let album = ContentDrag::new(TrackSource::Album {
-            key,
-            revision: state.library.album_revision,
-        });
-        assert!(can_transfer(&album, &state, DragDestination::Queue, true));
-        let mut changed = state.clone();
-        changed.library.album_revision += 1;
-        assert!(!can_transfer(
-            &album,
-            &changed,
-            DragDestination::Queue,
-            false
-        ));
     }
 }
