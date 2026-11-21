@@ -6,7 +6,7 @@
 //! outside GPUI's quit observer; dropping it only drains already requested saves.
 
 use super::LayoutSet;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::{path::PathBuf, sync::Arc, thread::JoinHandle};
 
 type SaveResult = Result<(), String>;
@@ -250,12 +250,11 @@ impl LayoutPersistenceHandle {
     }
 
     fn flush(&self) -> SaveResult {
+        self.flush_with_wait(|state| self.0.changed.wait(state))
+    }
+
+    fn flush_with_wait(&self, mut wait: impl FnMut(&mut MutexGuard<'_, State>)) -> SaveResult {
         let mut state = self.0.state.lock();
-        // A fallback is not consent to replace a damaged input. Only explicit
-        // sync may authorize replacement; ordinary edits and teardown preserve it.
-        if state.load_error.is_some() && state.request_id == 0 {
-            return Ok(());
-        }
         let mut attempted_revision = None;
         loop {
             let revision = state.revision;
@@ -265,7 +264,18 @@ impl LayoutPersistenceHandle {
                     .as_ref()
                     .is_some_and(|request| request.revision == revision);
             if requested_latest {
+                // Both recovery and this request can finish before we wake.
                 attempted_revision = Some(revision);
+            }
+            // Only an explicit request can write while startup input is damaged.
+            // Drain those captured snapshots; a successful save lifts protection.
+            if state.load_error.is_some() {
+                if state.pending.is_none() && state.saving_revision.is_none() {
+                    return state
+                        .completion
+                        .as_ref()
+                        .map_or(Ok(()), |completion| completion.result.clone());
+                }
             } else if state.saved_revision != Some(revision) && attempted_revision != Some(revision)
             {
                 // Retry a prior failure once per flush, but never loop on a
@@ -286,7 +296,7 @@ impl LayoutPersistenceHandle {
                     Ok(())
                 };
             }
-            self.0.changed.wait(&mut state);
+            wait(&mut state);
         }
     }
 }
@@ -443,9 +453,77 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), invalid);
         let request = handle.sync();
         assert!(wait_for_completion(&handle, request).result.is_ok());
+        handle.submit(&named("after recovery"));
         owner.flush().unwrap();
-        assert_eq!(LayoutSet::load(&path).unwrap().active_name(), "replacement");
+        assert_eq!(
+            LayoutSet::load(&path).unwrap().active_name(),
+            "after recovery"
+        );
         assert!(handle.snapshot().1.is_none());
+    }
+
+    #[test]
+    fn failed_recovery_sync_does_not_authorize_exit_save() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let attempts = Arc::clone(&written);
+        let owner = LayoutPersistence::start(
+            LayoutSet::default(),
+            Some("damaged input".into()),
+            false,
+            move |snapshot| {
+                attempts.lock().push(snapshot.active_name().to_owned());
+                Err("replacement failed".into())
+            },
+        );
+        let handle = owner.handle();
+        handle.submit(&named("explicit"));
+        let request = handle.sync();
+        handle.submit(&named("later draft"));
+        assert_eq!(owner.flush(), Err("replacement failed".into()));
+        assert_eq!(handle.completion().unwrap().revision, request);
+        assert_eq!(&*written.lock(), &["explicit"]);
+        assert_eq!(handle.snapshot().1.as_deref(), Some("damaged input"));
+    }
+
+    #[test]
+    fn flush_does_not_retry_latest_request_after_recovery() {
+        let (gate, starts, release) = writer_gate();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let attempts = Arc::clone(&written);
+        let owner = LayoutPersistence::start(
+            LayoutSet::default(),
+            Some("damaged input".into()),
+            false,
+            move |snapshot| {
+                attempts.lock().push(snapshot.active_name().to_owned());
+                if snapshot.active_name() == "recovery" {
+                    gate.wait(snapshot)
+                } else {
+                    Err("latest save failed".into())
+                }
+            },
+        );
+        let mut release = Some(release);
+        let handle = owner.handle();
+        handle.submit(&named("recovery"));
+        handle.sync();
+        assert_eq!(starts.recv_timeout(WAIT).unwrap(), "recovery");
+        handle.submit(&named("latest"));
+        let latest = handle.sync();
+        let result = handle.flush_with_wait(|state| {
+            let request = state.request_id;
+            // Force both writes to finish before flush can recheck the state.
+            MutexGuard::unlocked(state, || {
+                if let Some(release) = release.take() {
+                    release.send(()).unwrap();
+                }
+                wait_for_completion(&handle, request);
+            });
+        });
+        assert_eq!(result, Err("latest save failed".into()));
+        assert!(handle.snapshot().1.is_none());
+        assert_eq!(handle.completion().unwrap().revision, latest);
+        assert_eq!(&*written.lock(), &["recovery", "latest"]);
     }
 
     #[test]

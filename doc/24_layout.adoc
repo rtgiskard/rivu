@@ -348,8 +348,8 @@ overwriting a newer completed one without an unbounded request queue.
 The writer validates unchanged content but skips encoding and I/O against its
 last successful snapshot; runtime IDs and locks do not affect equality. Only the
 captured successful request advances this baseline. Missing input has no saved
-baseline. Failed startup input can be replaced only after explicit Sync
-authorizes writing; authorization does not require the sync to succeed.
+baseline. While startup input could not be read, only an explicit Sync may
+write its captured snapshot. A failed Sync does not lift that protection.
 
 Validation precedes a unique sibling temporary file and atomic rename. Failure
 preserves the destination, baseline and session edits; atomicity does not promise
@@ -361,12 +361,13 @@ enqueue a retry.
 
 After the GPUI loop returns, the desktop flushes the latest layout revision and
 joins the writer, propagating save failure. The quit observer does not wait for
-file I/O inside GPUI's deadline. The flush honors the failed-input protection
-unless the user has explicitly requested Sync. With saving allowed, it can retry
-a previously failed latest dirty revision once. If that revision is already
-pending or in flight, the flush waits for its result and does not retry a failure
-observed in the same flush. For write triggers and desktop versus Core lifetime,
-see link:01_config.adoc#persistence-responsibilities[Persistence responsibilities].
+file I/O inside GPUI's deadline. While failed-input protection remains active,
+exit waits for already requested Sync writes without retrying or saving a newer
+draft. Once a replacement succeeds, normal exit saving resumes. For an ordinary
+dirty layout, exit can retry a previously failed latest revision once. If that
+revision is already pending or in flight, the flush waits for its result and
+does not retry a failure observed in the same flush. See
+link:01_config.adoc#persistence-responsibilities[Persistence responsibilities].
 
 == Rationale and alternatives
 
