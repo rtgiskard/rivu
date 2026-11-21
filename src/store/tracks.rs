@@ -397,13 +397,27 @@ impl Store {
             return Ok(LibraryLocateResult::OutsideRoot);
         }
         let query = search_query(query);
-        let location = self.conn.prepare_cached(&format!(
-            "WITH ranked AS (SELECT id,row_number() OVER (ORDER BY {})-1 AS position,COUNT(*) OVER () AS total FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE}) SELECT position,total FROM ranked WHERE id=?5", library_order(sort)
-        ))?.query_row(params![query, favorite, missing, roots, track_id], |row| {
-            Ok(LibraryLocation { offset: row.get::<_, i64>(0)? as usize,
-                total: row.get::<_, i64>(1)? as usize, child: None })
-        }).optional()?;
-        Ok(location.map_or(LibraryLocateResult::Filtered, LibraryLocateResult::Located))
+        let matches = self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT EXISTS(SELECT 1 FROM tracks {TRACK_SEARCH_FILTER} AND id=?4)"
+            ))?
+            .query_row(params![query, favorite, missing, track_id], |row| {
+                row.get::<_, bool>(0)
+            })?;
+        if !matches {
+            return Ok(LibraryLocateResult::Filtered);
+        }
+        let (offset, total) = self.flat_library_rank(
+            OTHER_SCOPE,
+            sort,
+            params![query, favorite, missing, roots, track_id],
+        )?;
+        Ok(LibraryLocateResult::Located(LibraryLocation {
+            offset,
+            total,
+            child: None,
+        }))
     }
 
     pub(crate) fn playback_source(&self, track: &Track) -> Result<Option<PlaybackSource>> {
@@ -660,33 +674,29 @@ impl Store {
         } else {
             DIRECTORY_SCOPE
         };
-        let child = if tree {
-            rest.find('/').map(|separator| {
-                if prefix.is_empty() && separator == 0 {
-                    PathBuf::from("/")
-                } else {
-                    PathBuf::from(format!("{}{}", prefix, &rest[..separator]))
-                }
-            })
-        } else {
-            None
-        };
-        let (sql, target) = if tree {
-            (
-                format!(
-                    "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}), children AS {DIRECTORY_CHILDREN}, ranked AS (SELECT kind,child,track_id,row_number() OVER (ORDER BY kind,child,track_id)-1 AS position,COUNT(*) OVER () AS total FROM children) SELECT position,total FROM ranked WHERE (?5 IS NOT NULL AND kind=0 AND child=?5) OR (?5 IS NULL AND kind=1 AND track_id=?6)"
-                ),
-                child.as_deref().and_then(Path::to_str),
-            )
-        } else {
-            (
-                format!(
-                    "WITH ranked AS (SELECT id,row_number() OVER (ORDER BY {})-1 AS position,COUNT(*) OVER () AS total FROM tracks {TRACK_SEARCH_FILTER}{scope}) SELECT position,total FROM ranked WHERE id=?6 AND ?5 IS NULL",
-                    library_order(sort)
-                ),
-                None,
-            )
-        };
+        if !tree {
+            let (offset, total) = self.flat_library_rank(
+                scope,
+                sort,
+                params![query, favorite, missing, prefix, track_id],
+            )?;
+            return Ok(LibraryLocateResult::Located(LibraryLocation {
+                offset,
+                total,
+                child: None,
+            }));
+        }
+        let child = rest.find('/').map(|separator| {
+            if prefix.is_empty() && separator == 0 {
+                PathBuf::from("/")
+            } else {
+                PathBuf::from(format!("{}{}", prefix, &rest[..separator]))
+            }
+        });
+        let sql = format!(
+            "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}), children AS {DIRECTORY_CHILDREN}, ranked AS (SELECT kind,child,track_id,row_number() OVER (ORDER BY kind,child,track_id)-1 AS position,COUNT(*) OVER () AS total FROM children) SELECT position,total FROM ranked WHERE (?5 IS NOT NULL AND kind=0 AND child=?5) OR (?5 IS NULL AND kind=1 AND track_id=?6)"
+        );
+        let target = child.as_deref().and_then(Path::to_str);
         let location = self
             .conn
             .prepare_cached(&sql)?
@@ -709,6 +719,28 @@ impl Store {
                 })
             }),
         )
+    }
+
+    fn flat_library_rank(
+        &self,
+        scope: &str,
+        sort: rivu_protocol::model::LibrarySort,
+        bindings: impl rusqlite::Params,
+    ) -> Result<(usize, usize)> {
+        use rivu_protocol::model::LibrarySort;
+        let precedes = match sort {
+            LibrarySort::Id => "tracks.id<t.id",
+            LibrarySort::MostPlayed => "tracks.play_count>t.play_count OR (tracks.play_count=t.play_count AND tracks.id<t.id)",
+            // Blank albums ignore disc and track numbers, as in library_order.
+            LibrarySort::Album => "(tracks.album,CASE WHEN tracks.album='' THEN 0 ELSE COALESCE(tracks.disc_number,4294967295) END,
+                CASE WHEN tracks.album='' THEN 0 ELSE COALESCE(tracks.track_number,4294967295) END,tracks.title,tracks.id)
+                < (t.album,CASE WHEN t.album='' THEN 0 ELSE COALESCE(t.disc_number,4294967295) END,
+                CASE WHEN t.album='' THEN 0 ELSE COALESCE(t.track_number,4294967295) END,t.title,t.id)",
+        };
+        Ok(self.conn.prepare_cached(&format!(
+            "WITH target AS MATERIALIZED (SELECT id,play_count,album,disc_number,track_number,title FROM tracks WHERE id=?5)
+             SELECT COUNT(*) FILTER (WHERE {precedes}),COUNT(*) FROM target AS t CROSS JOIN tracks {TRACK_SEARCH_FILTER}{scope}"
+        ))?.query_row(bindings, |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize)))?)
     }
 
     fn unfiltered_library_rank(
