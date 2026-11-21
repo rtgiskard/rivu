@@ -1366,20 +1366,7 @@ mod tests {
     }
 
     fn pcm_file() -> tempfile::NamedTempFile {
-        use std::io::Write;
-
-        let mut file = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
-        let samples = 16_000_u32;
-        let bytes = samples * 2;
-        file.write_all(b"RIFF").unwrap();
-        file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
-        file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x01\0").unwrap();
-        file.write_all(&8_000_u32.to_le_bytes()).unwrap();
-        file.write_all(&16_000_u32.to_le_bytes()).unwrap();
-        file.write_all(b"\x02\0\x10\0data").unwrap();
-        file.write_all(&bytes.to_le_bytes()).unwrap();
-        file.write_all(&vec![0; bytes as usize]).unwrap();
-        file
+        crate::test_support::i16_wav_file(".wav", 1, 8_000, std::iter::repeat_n(0, 16_000))
     }
 
     #[test]
@@ -1434,6 +1421,9 @@ mod tests {
 
     #[test]
     fn ffmpeg_opens_the_checked_file_when_its_path_is_replaced_by_fifo() {
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
+            return;
+        }
         let original = pcm_file();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("audio.wav");
@@ -1443,39 +1433,30 @@ mod tests {
         let name = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let (completed, receive) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let input = Input::from_file(path, file, runtime().unwrap()).unwrap();
-            let mut decoder = Decoder::from_input(input, Tags::default(), None).unwrap();
-            let mut frames = Vec::new();
-            let mut samples = 0;
-            loop {
-                match decoder.next_frames(&mut frames, None, &mut 64).unwrap() {
-                    DecodeStep::Frames(_) => samples += frames.len(),
-                    DecodeStep::Yield => (),
-                    DecodeStep::Eof => break,
-                }
+        let input = Input::from_file(path, file, runtime().unwrap()).unwrap();
+        let mut decoder = Decoder::from_input(input, Tags::default(), None).unwrap();
+        let mut frames = Vec::new();
+        let mut samples = 0;
+        loop {
+            match decoder.next_frames(&mut frames, None, &mut 64).unwrap() {
+                DecodeStep::Frames(_) => samples += frames.len(),
+                DecodeStep::Yield => (),
+                DecodeStep::Eof => break,
             }
-            assert_eq!(samples, 16_000);
-            // Decoder seek may return preroll; Source owns sample-accurate clipping.
-            // Rewinding must still replay the checked object, not the FIFO path.
-            decoder.seek(0.0, None).unwrap();
-            samples = 0;
-            loop {
-                match decoder.next_frames(&mut frames, None, &mut 64).unwrap() {
-                    DecodeStep::Frames(_) => samples += frames.len(),
-                    DecodeStep::Yield => (),
-                    DecodeStep::Eof => break,
-                }
+        }
+        assert_eq!(samples, 16_000);
+        // Decoder seek may return preroll; Source owns sample-accurate clipping.
+        // Rewinding must still replay the checked object, not the FIFO path.
+        decoder.seek(0.0, None).unwrap();
+        samples = 0;
+        loop {
+            match decoder.next_frames(&mut frames, None, &mut 64).unwrap() {
+                DecodeStep::Frames(_) => samples += frames.len(),
+                DecodeStep::Yield => (),
+                DecodeStep::Eof => break,
             }
-            assert_eq!(samples, 16_000);
-            completed.send(()).unwrap();
-        });
-        // Do not join on timeout: reopening the substituted path would hang.
-        receive
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
-        worker.join().unwrap();
+        }
+        assert_eq!(samples, 16_000);
     }
 
     #[test]

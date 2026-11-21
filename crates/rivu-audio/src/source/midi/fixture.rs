@@ -3,13 +3,18 @@
 use super::*;
 use std::io::Seek;
 
-fn chunk(out: &mut Vec<u8>, tag: &[u8; 4], payload: &[u8]) {
+pub(super) fn chunk(out: &mut Vec<u8>, tag: &[u8; 4], payload: &[u8]) {
     out.extend_from_slice(tag);
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(payload);
 }
 
 pub(super) fn bank() -> Arc<SoundFont> {
+    static BANK: std::sync::LazyLock<Arc<SoundFont>> = std::sync::LazyLock::new(build_bank);
+    Arc::clone(&BANK)
+}
+
+fn build_bank() -> Arc<SoundFont> {
     let mut info = b"INFO".to_vec();
     chunk(&mut info, b"ifil", &[2, 0, 1, 0]);
     chunk(&mut info, b"isng", b"EMU8000\0");
@@ -100,15 +105,23 @@ pub(super) fn smf(events: &[(u32, &[u8])]) -> Vec<u8> {
 }
 
 pub(in crate::source) fn held_note() -> Vec<u8> {
-    smf(&[
+    held_note_with_release(false)
+}
+
+pub(super) fn held_note_with_release(explicit: bool) -> Vec<u8> {
+    let mut events: Vec<(u32, &[u8])> = vec![
         (0, &[0xb0, 91, 96]),
         (0, &[0xb0, 93, 80]),
         (0, &[0x90, 60, 100]),
         (240, &[0xb0, 64, 127]),
         (240, &[0x80, 60, 0]),
         (240, &[0xb0, 11, 80]),
-        (240, &[0xff, 0x2f, 0]),
-    ])
+    ];
+    if explicit {
+        events.push((240, &[0xb0, 64, 0]));
+    }
+    events.push((if explicit { 0 } else { 240 }, &[0xff, 0x2f, 0]));
+    smf(&events)
 }
 
 pub(in crate::source) fn source(bytes: &[u8]) -> MidiSource {

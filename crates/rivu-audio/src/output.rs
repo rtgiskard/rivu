@@ -3028,25 +3028,18 @@ mod pcm_tests {
     }
 
     #[test]
-    fn close_does_not_count_device_queued_tail_as_heard() {
-        let (mut output, mut callback, _analyzer) = test_output(1000, false);
-        output.push([[0.5, -0.5]; 8].as_flattened());
-        let mut data = [0.0_f32; 16];
-        callback.render(&mut data, timestamp(0, 20));
-        callback.render(&mut data, timestamp(22, 40));
-        assert_eq!(output.close(), 0.002);
-        assert!(!output.drained());
-    }
-
-    #[test]
     fn retired_output_keeps_final_count_when_shared_pcm_epoch_is_reused() {
-        for frames in [2, 8] {
+        for (frames, during_close) in [(2, false), (2, true), (8, true)] {
             let (mut output, mut callback, pcm) = test_output(1000, false);
             output.push([[0.5, -0.5]; 8].as_flattened());
             callback.render(&mut [0.0; 16], timestamp(0, 20));
-            output.on_close_for_test(move || {
-                callback.render(&mut [], timestamp(20 + frames, 40 + frames));
-            });
+            if during_close {
+                output.on_close_for_test(move || {
+                    callback.render(&mut [], timestamp(20 + frames, 40 + frames));
+                });
+            } else {
+                callback.render(&mut [0.0; 16], timestamp(22, 40));
+            }
             let heard = frames as f64 / 1000.0;
             assert_eq!(output.close(), heard);
             let drained = output.drained();
@@ -3622,6 +3615,9 @@ mod routing_tests {
 
     #[test]
     fn native_stream_drop_wakes_and_joins_its_owner_loop() {
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
+            return;
+        }
         let control = Arc::new(NativeControl::default());
         let (wake, receiver) = pw::channel::channel();
         let (ready, started) = crossbeam_channel::bounded(1);

@@ -396,7 +396,7 @@ impl MidiSource {
         // `release` (e.g. on test panic) disconnects `wait` and ends the loader.
         let (release, wait) = crossbeam_channel::bounded(1);
         let bank = Arc::new(SoundFontLoad::start(move || {
-            let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
+            let _ = wait.recv();
             anyhow::bail!("Test bank is unavailable")
         }));
         (Self::with_bank_load(sequence, bank), release)
@@ -595,12 +595,7 @@ mod tests {
 
     #[test]
     fn validates_generator_boundaries_and_record_shape() {
-        fn chunk(out: &mut Vec<u8>, tag: &[u8; 4], payload: &[u8]) {
-            out.extend_from_slice(tag);
-            out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-            out.extend_from_slice(payload);
-        }
-
+        use super::fixture::chunk;
         for target in [b"pgen", b"igen"] {
             for (size, boundary, valid) in [
                 (Some(8), 1_u16, true), // One generator and its terminator.

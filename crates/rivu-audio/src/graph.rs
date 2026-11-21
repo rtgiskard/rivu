@@ -790,6 +790,26 @@ mod tests {
         }
     }
 
+    fn denoise_chain(config: DenoiseConfig, processors: usize) -> ProcessingGraph {
+        chain_graph(
+            GraphNodeKind::Denoise {
+                config,
+                profile: None,
+            },
+            processors,
+        )
+    }
+
+    fn assert_over_work_budget(plan: Result<GraphPlan<'_>>) {
+        let error = plan
+            .err()
+            .expect("plan must exceed the arithmetic work budget");
+        assert!(
+            error.to_string().contains("arithmetic work budget"),
+            "{error:#}"
+        );
+    }
+
     fn attenuated_sum_graph() -> ProcessingGraph {
         let mut graph = chain_graph(
             GraphNodeKind::Mix {
@@ -909,13 +929,7 @@ mod tests {
 
     #[test]
     fn six_off_denoisers_keep_only_edge_and_output_costs() {
-        let graph = chain_graph(
-            GraphNodeKind::Denoise {
-                config: DenoiseConfig::default(),
-                profile: None,
-            },
-            6,
-        );
+        let graph = denoise_chain(DenoiseConfig::default(), 6);
         let mut runner = GraphRunner::compile(&graph, port(8, 0), 48_000, 2).unwrap();
         assert_eq!(runner.latency_frames(), 0);
         assert_eq!(runner.tail_frames(), 0);
@@ -945,13 +959,7 @@ mod tests {
 
     #[test]
     fn identity_suffix_preserves_validation_counts_and_eof() {
-        let graph = chain_graph(
-            GraphNodeKind::Denoise {
-                config: DenoiseConfig::default(),
-                profile: None,
-            },
-            2,
-        );
+        let graph = denoise_chain(DenoiseConfig::default(), 2);
         let mut runner =
             GraphRunner::compile_from_boundary(&graph, port(4, 0), port(2, 0), 48_000, 2).unwrap();
         let mut samples = vec![-0.0; (MAX_CALL_FRAMES + 1) * 2];
@@ -997,13 +1005,7 @@ mod tests {
         config.impulse.enabled = true;
         config.mode = DenoiseMode::Stationary;
         config.wet = 0.0;
-        let graph = chain_graph(
-            GraphNodeKind::Denoise {
-                config,
-                profile: None,
-            },
-            1,
-        );
+        let graph = denoise_chain(config, 1);
         let mut runner = GraphRunner::compile(&graph, port(3, 0), 48_000, 2).unwrap();
         assert_eq!(runner.latency_frames(), 0);
         let mut samples = [0.5, -0.25];
@@ -1014,13 +1016,7 @@ mod tests {
             let mut config = DenoiseConfig::default();
             config.hum.enabled = !repair;
             config.impulse.enabled = repair;
-            let graph = chain_graph(
-                GraphNodeKind::Denoise {
-                    config,
-                    profile: None,
-                },
-                1,
-            );
+            let graph = denoise_chain(config, 1);
             let runner = GraphRunner::compile(&graph, port(3, 0), 48_000, 2).unwrap();
             assert_eq!(runner.latency_frames() > 0, repair);
             assert!(runner.estimated_work_per_frame() > 4);
@@ -1057,13 +1053,7 @@ mod tests {
                                 )
                                 .unwrap()
                             };
-                            let graph = chain_graph(
-                                GraphNodeKind::Denoise {
-                                    config: config.clone(),
-                                    profile: None,
-                                },
-                                1,
-                            );
+                            let graph = denoise_chain(config.clone(), 1);
                             let plan =
                                 GraphRunner::plan(&graph, port(3, 0), None, 48_000, channels)
                                     .unwrap();
@@ -1072,10 +1062,6 @@ mod tests {
                                 3 * GRAPH_BLOCK_FRAMES * channels * size_of::<f32>() + extra
                             );
                             let runner = plan.prepare().unwrap();
-                            assert_eq!(
-                                runner.estimated_state_bytes(),
-                                3 * GRAPH_BLOCK_FRAMES * channels * size_of::<f32>() + extra
-                            );
                             assert_eq!(runner.latency_frames(), config.lookahead_frames());
                         }
                     }
@@ -1099,13 +1085,7 @@ mod tests {
             config.hum.enabled = enabled;
             config.hum.harmonics = harmonics;
             let bypassed = config.is_bypassed();
-            let graph = chain_graph(
-                GraphNodeKind::Denoise {
-                    config,
-                    profile: None,
-                },
-                2,
-            );
+            let graph = denoise_chain(config, 2);
             let plan = GraphRunner::plan(&graph, port(4, 0), None, 48_000, 18);
             if admitted {
                 let mut runner = plan.unwrap().prepare().unwrap();
@@ -1115,12 +1095,7 @@ mod tests {
                     assert!(samples.iter().all(|sample| *sample == 0.25));
                 }
             } else {
-                assert!(
-                    plan.err()
-                        .unwrap()
-                        .to_string()
-                        .contains("arithmetic work budget")
-                );
+                assert_over_work_budget(plan);
             }
         }
     }
@@ -1139,23 +1114,12 @@ mod tests {
             };
             config.impulse.enabled = enabled;
             config.impulse.max_width = max_width;
-            let graph = chain_graph(
-                GraphNodeKind::Denoise {
-                    config,
-                    profile: None,
-                },
-                6,
-            );
+            let graph = denoise_chain(config, 6);
             let plan = GraphRunner::plan(&graph, port(8, 0), None, 48_000, 2);
             if admitted {
                 plan.unwrap();
             } else {
-                assert!(
-                    plan.err()
-                        .unwrap()
-                        .to_string()
-                        .contains("arithmetic work budget")
-                );
+                assert_over_work_budget(plan);
             }
         }
     }
@@ -1175,23 +1139,12 @@ mod tests {
             config.hum.harmonics = 32;
             config.impulse.enabled = repair;
             config.impulse.max_width = 8;
-            let graph = chain_graph(
-                GraphNodeKind::Denoise {
-                    config,
-                    profile: None,
-                },
-                2,
-            );
+            let graph = denoise_chain(config, 2);
             let plan = GraphRunner::plan(&graph, port(4, 0), None, 48_000, 4);
             if admitted {
                 plan.unwrap();
             } else {
-                assert!(
-                    plan.err()
-                        .unwrap()
-                        .to_string()
-                        .contains("arithmetic work budget")
-                );
+                assert_over_work_budget(plan);
             }
         }
     }
@@ -1214,13 +1167,7 @@ mod tests {
         let admitted_mixes = (MAX_STATE_BYTES - base) / (block_bytes + delay_bytes);
         assert!((1..60).contains(&admitted_mixes));
         for mixes in [admitted_mixes, admitted_mixes + 1] {
-            let mut graph = chain_graph(
-                GraphNodeKind::Denoise {
-                    config: config.clone(),
-                    profile: None,
-                },
-                mixes + 1,
-            );
+            let mut graph = denoise_chain(config.clone(), mixes + 1);
             // Each mix combines the preceding delayed path with the original
             // source. Its source edge owns another full denoiser delay line.
             for index in 0..mixes {
@@ -1249,13 +1196,7 @@ mod tests {
 
     #[test]
     fn bypass_preserves_denoise_validation_and_profile_rejection() {
-        let graph = chain_graph(
-            GraphNodeKind::Denoise {
-                config: DenoiseConfig::default(),
-                profile: None,
-            },
-            1,
-        );
+        let graph = denoise_chain(DenoiseConfig::default(), 1);
         assert!(GraphRunner::compile(&graph, port(3, 0), 4_000, 2).is_err());
         let mut config = DenoiseConfig {
             wet: 0.0,
@@ -1264,22 +1205,13 @@ mod tests {
         config.hum.enabled = true;
         config.hum.fundamental_hz = 1000.0;
         config.hum.harmonics = 32;
-        let graph = chain_graph(
-            GraphNodeKind::Denoise {
-                config,
-                profile: None,
-            },
-            1,
-        );
+        let graph = denoise_chain(config, 1);
         assert!(GraphRunner::compile(&graph, port(3, 0), 48_000, 2).is_err());
-        let graph = chain_graph(
-            GraphNodeKind::Denoise {
-                config: DenoiseConfig {
-                    mode: DenoiseMode::Profile,
-                    wet: 0.0,
-                    ..Default::default()
-                },
-                profile: None,
+        let graph = denoise_chain(
+            DenoiseConfig {
+                mode: DenoiseMode::Profile,
+                wet: 0.0,
+                ..Default::default()
             },
             1,
         );

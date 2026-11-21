@@ -780,13 +780,66 @@ mod tests {
     use super::*;
     use crate::{PcmBudget, SourceRenderer};
 
+    // The FFmpeg verification lane opts in to all three export codecs. Other
+    // builds can have a decoder runtime without SWR or the optional encoders.
+    fn export_capability(available: bool, capability: impl std::fmt::Display) -> bool {
+        if !available {
+            assert!(
+                std::env::var_os("RIVU_TEST_REQUIRE_FFMPEG_EXPORT").is_none(),
+                "missing required FFmpeg export capability: {capability}"
+            );
+            eprintln!("skipping unavailable FFmpeg export capability: {capability}");
+        }
+        available
+    }
+
+    fn encoder_available(format: AudioExportFormat) -> bool {
+        export_capability(export_encoder_available(format), format_args!("{format:?}"))
+    }
+
+    fn stereo_roundtrip(
+        path: &Path,
+        format: AudioExportFormat,
+        bits: u16,
+        samples: &[f32],
+        chunk: usize,
+    ) -> crate::PcmAudio {
+        let options = AudioExportEncoding {
+            format,
+            pcm_bits: bits,
+            ..Default::default()
+        };
+        let mut encoder = AudioEncoder::new(path, 48_000, 3, &options).unwrap();
+        for block in samples.chunks(chunk) {
+            encoder.write(block).unwrap();
+        }
+        encoder.finish().unwrap();
+        drop(encoder);
+        let cancel = AtomicBool::new(false);
+        let renderer = SourceRenderer::open(
+            path,
+            None,
+            rivu_format::decoder_hint::DecoderHint::Ffmpeg,
+            1,
+            true,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(renderer.format().sample_rate, 48_000);
+        assert_eq!(
+            &*renderer.format().layout,
+            &[Channel::FrontLeft, Channel::FrontRight]
+        );
+        renderer
+            .render_pcm(PcmBudget::new(8 * 1024 * 1024), &cancel)
+            .unwrap()
+    }
     #[test]
     fn flac_integer_quantization_is_unbiased_and_block_invariant() {
-        if !export_encoder_available(AudioExportFormat::Flac) {
+        if !encoder_available(AudioExportFormat::Flac) {
             return;
         }
         let directory = tempfile::tempdir().unwrap();
-        let cancel = AtomicBool::new(false);
         for bits in [16, 24] {
             let scale = (1_u32 << (bits - 1)) as f32;
             let samples = (0..65_536)
@@ -794,28 +847,8 @@ mod tests {
                 .collect::<Vec<_>>();
             let render = |chunk_size: usize| {
                 let path = directory.path().join(format!("{bits}-{chunk_size}.flac"));
-                let options = AudioExportEncoding {
-                    format: AudioExportFormat::Flac,
-                    pcm_bits: bits,
-                    ..Default::default()
-                };
-                let mut encoder = AudioEncoder::new(&path, 48_000, 3, &options).unwrap();
-                for chunk in samples.chunks(chunk_size) {
-                    encoder.write(chunk).unwrap();
-                }
-                encoder.finish().unwrap();
-                drop(encoder);
-                let pcm = SourceRenderer::open(
-                    &path,
-                    None,
-                    rivu_format::decoder_hint::DecoderHint::Ffmpeg,
-                    1,
-                    true,
-                    &cancel,
-                )
-                .unwrap()
-                .render_pcm(PcmBudget::new(8 * 1024 * 1024), &cancel)
-                .unwrap();
+                let pcm =
+                    stereo_roundtrip(&path, AudioExportFormat::Flac, bits, &samples, chunk_size);
                 let mut decoded = vec![0.0; samples.len()];
                 assert_eq!(pcm.frames(), (samples.len() / 2) as u64);
                 assert_eq!(pcm.read_frames(0, &mut decoded), samples.len() / 2);
@@ -847,47 +880,19 @@ mod tests {
             (AudioExportFormat::Opus, 32),
             (AudioExportFormat::Mp3, 32),
         ] {
-            if !export_encoder_available(format) {
+            if !encoder_available(format) {
                 continue;
             }
             for frames in [1, 31, 46, 47, 48, 1151, 1152, 1153, 1198, 1199, 1200, 48013] {
                 let directory = tempfile::tempdir().unwrap();
                 let path = directory.path().join("encoded.audio");
-                let options = AudioExportEncoding {
-                    format,
-                    pcm_bits: bits,
-                    ..Default::default()
-                };
-                let mut encoder = AudioEncoder::new(&path, 48_000, 3, &options).unwrap();
                 let samples = (0..frames)
                     .flat_map(|i| {
                         let value = (i as f32 * 0.071).sin() * 0.25;
                         [value, -value * 0.5]
                     })
                     .collect::<Vec<_>>();
-                for chunk in samples.chunks(74) {
-                    encoder.write(chunk).unwrap();
-                }
-                encoder.finish().unwrap();
-                drop(encoder);
-                let cancel = AtomicBool::new(false);
-                let renderer = SourceRenderer::open(
-                    &path,
-                    None,
-                    rivu_format::decoder_hint::DecoderHint::Ffmpeg,
-                    1,
-                    true,
-                    &cancel,
-                )
-                .unwrap();
-                assert_eq!(renderer.format().sample_rate, 48_000);
-                assert_eq!(
-                    &*renderer.format().layout,
-                    &[Channel::FrontLeft, Channel::FrontRight]
-                );
-                let pcm = renderer
-                    .render_pcm(PcmBudget::new(8 * 1024 * 1024), &cancel)
-                    .unwrap();
+                let pcm = stereo_roundtrip(&path, format, bits, &samples, 74);
                 assert_eq!(
                     pcm.frames(),
                     frames as u64,
@@ -916,7 +921,7 @@ mod tests {
 
     #[test]
     fn converter_drains_resampling_tail_and_does_not_normalize_stereo_to_mono() {
-        if api().is_err() {
+        if !export_capability(api().is_ok(), "converter runtime") {
             return;
         }
         let mut converter = ExportConverter::new(44_100, 3, 48_000, 3).unwrap();
@@ -962,7 +967,7 @@ mod tests {
 
     #[test]
     fn converter_preserves_constant_sources_at_filter_and_block_boundaries() {
-        if api().is_err() {
+        if !export_capability(api().is_ok(), "converter runtime") {
             return;
         }
         for (input_rate, output_rate) in [
@@ -993,7 +998,7 @@ mod tests {
 
     #[test]
     fn converter_output_is_independent_of_input_partitioning() {
-        if api().is_err() {
+        if !export_capability(api().is_ok(), "converter runtime") {
             return;
         }
         let input = (0..16385)
@@ -1021,7 +1026,7 @@ mod tests {
 
     #[test]
     fn converter_rejects_a_missing_tail_instead_of_publishing_it() {
-        if api().is_err() {
+        if !export_capability(api().is_ok(), "converter runtime") {
             return;
         }
         let mut converter = ExportConverter::new(44_100, 3, 48_000, 3).unwrap();
@@ -1037,7 +1042,7 @@ mod tests {
 
     #[test]
     fn lossy_encoder_rejects_overload_and_nonfinite_input() {
-        if !export_encoder_available(AudioExportFormat::Opus) {
+        if !encoder_available(AudioExportFormat::Opus) {
             return;
         }
         let directory = tempfile::tempdir().unwrap();

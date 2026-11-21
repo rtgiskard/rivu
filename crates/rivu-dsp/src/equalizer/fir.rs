@@ -536,8 +536,9 @@ mod tests {
         let mut realized = [0.0; 4];
         FirEqualizer::sample_response_db(&config, 48_000, 1, 0, taps, &frequencies, &mut realized)
             .unwrap();
+        let mut fir = FirEqualizer::new(&config, 48_000, 1, taps).unwrap();
         for (&frequency, &expected) in frequencies.iter().zip(&realized) {
-            let mut fir = FirEqualizer::new(&config, 48_000, 1, taps).unwrap();
+            fir.reset();
             let frames = fir.tail_frames() + 48_000;
             let mut signal: Vec<f32> = (0..frames)
                 .map(|i| (2.0 * PI * frequency * i as f64 / 48_000.0).sin() as f32)
@@ -721,6 +722,26 @@ mod tests {
         assert!((signal[fir.latency_frames() * 2 + 1] - 1.0).abs() < 2e-6);
     }
 
+    fn assert_mono_reference<const CHANNELS: usize>(
+        config: &EqualizerConfig,
+        channel: usize,
+        input: &[f32],
+        actual: &[f32],
+    ) {
+        assert_eq!(input.len(), actual.len());
+        assert!(input.len().is_multiple_of(CHANNELS));
+        let mut expected: Vec<_> = input
+            .iter()
+            .skip(channel)
+            .step_by(CHANNELS)
+            .copied()
+            .collect();
+        let mut mono = FirEqualizer::new(config, 48_000, 1, 513).unwrap();
+        mono.process_interleaved(&mut expected).unwrap();
+        for (frame, sample) in actual.as_chunks::<CHANNELS>().0.iter().zip(expected) {
+            assert_eq!(frame[channel], sample);
+        }
+    }
     #[test]
     fn channel_targets_and_global_solo_match_independent_streams() {
         let selected = EqBand {
@@ -750,18 +771,16 @@ mod tests {
         let mut multi = FirEqualizer::new(&config, 48_000, 3, 513).unwrap();
         let frames = multi.tail_frames() + 1024;
         let input: Vec<_> = (0..frames)
-            .map(|i| {
-                if i < 1024 {
+            .flat_map(|i| {
+                let x = if i < 1024 {
                     (i as f32 * 0.13).sin()
                 } else {
                     0.0
-                }
+                };
+                [x, -x * 0.5, x * 0.25]
             })
             .collect();
-        let mut actual: Vec<_> = input
-            .iter()
-            .flat_map(|&x| [x, -x * 0.5, x * 0.25])
-            .collect();
+        let mut actual = input.clone();
         multi.process_interleaved(&mut actual).unwrap();
         for channel in 0..3 {
             let mut independent = config.clone();
@@ -773,13 +792,7 @@ mod tests {
                     ..selected.clone()
                 }]
             };
-            let mut mono = FirEqualizer::new(&independent, 48_000, 1, 513).unwrap();
-            let scale = [1.0, -0.5, 0.25][channel];
-            let mut expected: Vec<_> = input.iter().map(|&x| x * scale).collect();
-            mono.process_interleaved(&mut expected).unwrap();
-            for (frame, expected) in actual.as_chunks::<3>().0.iter().zip(expected) {
-                assert_eq!(frame[channel], expected);
-            }
+            assert_mono_reference::<3>(&independent, channel, &input, &actual);
         }
     }
 
@@ -832,22 +845,7 @@ mod tests {
                     }],
                     ..config.clone()
                 };
-                let mut mono = FirEqualizer::new(&mono_config, 48_000, 1, 513).unwrap();
-                let mut expected: Vec<_> = input
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|f| f[channel])
-                    .collect();
-                mono.process_interleaved(&mut expected).unwrap();
-                assert!(
-                    actual
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .zip(expected)
-                        .all(|(f, x)| f[channel] == x)
-                );
+                assert_mono_reference::<2>(&mono_config, channel, &input, &actual);
             }
             let mut different = config;
             different.bands[1].frequency_hz += 1.0;
@@ -903,22 +901,7 @@ mod tests {
                 }],
                 ..config.clone()
             };
-            let mut mono = FirEqualizer::new(&mono_config, 48_000, 1, 513).unwrap();
-            let mut expected: Vec<_> = original
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|frame| frame[channel])
-                .collect();
-            mono.process_interleaved(&mut expected).unwrap();
-            assert!(
-                actual
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(expected)
-                    .all(|(frame, expected)| frame[channel] == expected)
-            );
+            assert_mono_reference::<4>(&mono_config, channel, &original, &actual);
         }
         multi.reset();
         let mut silence = vec![0.0; frames * 4];

@@ -758,6 +758,11 @@ mod tests {
 
     #[test]
     fn measured_sine_gain_matches_response() {
+        let frequency = 1_500.0;
+        let tone: Vec<f32> = (0..48_000)
+            .map(|n| (0.01 * (2.0 * PI * frequency * n as f64 / 48_000.0).sin()) as f32)
+            .collect();
+        let mut samples = Vec::with_capacity(tone.len());
         for kind in [
             FilterKind::Peak,
             FilterKind::LowShelf,
@@ -768,10 +773,7 @@ mod tests {
             FilterKind::Notch,
         ] {
             let mut eq = Equalizer::new(&config(kind), 48_000, 1).unwrap();
-            let frequency = 1_500.0;
-            let mut samples: Vec<f32> = (0..48_000)
-                .map(|n| (0.01 * (2.0 * PI * frequency * n as f64 / 48_000.0).sin()) as f32)
-                .collect();
+            samples.clone_from(&tone);
             eq.process(&mut samples).unwrap();
             let power: f64 = samples[24_000..]
                 .iter()

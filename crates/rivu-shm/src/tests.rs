@@ -2,12 +2,12 @@ use super::*;
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::{
-        fs::MetadataExt,
-        net::{UnixListener, UnixStream},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::{fs::MetadataExt, net::UnixStream},
     },
-    process::{Child, Command},
-    time::Duration,
+    process::{Child, Command, Stdio},
+    time::{Duration, Instant},
 };
 
 const NATIVE_LAYOUT: [u32; 6] = [17, 0, 5, 3, 2, 1];
@@ -78,17 +78,12 @@ impl Drop for ChildGuard {
     }
 }
 
-#[test]
-fn cross_process_child() {
-    let Some(data_dir) = std::env::var_os("RIVU_PCM_TEST_CHILD") else {
-        return;
-    };
-    let path = PathBuf::from(std::env::var_os("RIVU_PCM_TEST_PATH").unwrap());
+fn cross_process_child(path: PathBuf) {
     let window = SharedPcmWindow::open(&path).unwrap();
     let original = window.file.metadata().unwrap();
     let original_identity = (original.dev(), original.ino());
     assert_eq!(window.sequence(), 0);
-    let mut signal = UnixStream::connect(Path::new(&data_dir).join("ready.sock")).unwrap();
+    let mut signal = UnixStream::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap());
     signal
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
@@ -123,30 +118,30 @@ fn cross_process_child() {
 
 #[test]
 fn independent_process_native_pcm_survives_owner_drop() {
-    let data = directory();
-    let listener = UnixListener::bind(data.path().join("ready.sock")).unwrap();
+    if let Some(path) = std::env::var_os("RIVU_PCM_TEST_PATH") {
+        return cross_process_child(path.into());
+    }
+    let (mut signal, child_signal) = UnixStream::pair().unwrap();
     let window = SharedPcmWindow::new().unwrap();
     let path = window.share_path();
     let mut child = ChildGuard(
         Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::cross_process_child", "--nocapture"])
-            .env("RIVU_PCM_TEST_CHILD", data.path())
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .stdin(Stdio::from(OwnedFd::from(child_signal)))
             .env("RIVU_PCM_TEST_PATH", &path)
             .spawn()
             .unwrap(),
     );
-    let mut ready = libc::pollfd {
-        fd: listener.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    assert_eq!(unsafe { libc::poll(&mut ready, 1, 10_000) }, 1);
-    let (mut signal, _) = listener.accept().unwrap();
     signal
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let mut byte = [0];
     signal.read_exact(&mut byte).unwrap();
+    assert_eq!(byte, [1]);
     assert!(window.publish(
         header(77),
         &NATIVE_LAYOUT,
@@ -154,10 +149,20 @@ fn independent_process_native_pcm_survives_owner_drop() {
     ));
     signal.write_all(&[1]).unwrap();
     signal.read_exact(&mut byte).unwrap();
+    assert_eq!(byte, [2]);
     drop(window);
     signal.write_all(&[2]).unwrap();
     signal.read_exact(&mut byte).unwrap();
-    assert!(child.0.wait().unwrap().success());
+    assert_eq!(byte, [3]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(status.success(), "PCM reader failed: {status}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "PCM reader did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

@@ -130,16 +130,7 @@ fn identity_change_is_a_source_failure_but_cancellation_is_not() {
 #[test]
 fn end_of_track_releases_a_pedal_held_note_like_an_explicit_release() {
     let implicit = drain(&mut fixture::source(&fixture::held_note()), 0);
-    let explicit = fixture::smf(&[
-        (0, &[0xb0, 91, 96]),
-        (0, &[0xb0, 93, 80]),
-        (0, &[0x90, 60, 100]),
-        (240, &[0xb0, 64, 127]),
-        (240, &[0x80, 60, 0]),
-        (240, &[0xb0, 11, 80]),
-        (240, &[0xb0, 64, 0]),
-        (0, &[0xff, 0x2f, 0]),
-    ]);
+    let explicit = fixture::held_note_with_release(true);
     assert_eq!(implicit, drain(&mut fixture::source(&explicit), 0));
 }
 

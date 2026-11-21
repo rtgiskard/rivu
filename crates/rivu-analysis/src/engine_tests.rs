@@ -165,9 +165,12 @@ fn invalid_sample_observation_revokes_history_without_committing_audio_time() {
     assert_eq!(frame.visualizer.density, expected.visualizer.density);
     assert_eq!(frame.visualizer.pcm, expected.visualizer.pcm);
     assert_eq!(frame.rms_left, expected.rms_left);
-    assert_eq!(
-        frame.sample_time,
-        previous.sample_time + Duration::from_secs_f64(256.0 / 48_000.0) * 2
+    // Two accepted 256-frame packets; allow nanosecond rounding per packet.
+    assert!(
+        frame
+            .sample_time
+            .abs_diff(previous.sample_time + Duration::from_secs_f64(512.0 / 48_000.0))
+            <= Duration::from_nanos(2)
     );
 }
 
@@ -472,9 +475,12 @@ fn time_domain_demand_skips_fft_without_shortening_window_or_cadence() {
         assert!(engine.publish(&mut frame, now));
         assert!(frame.settings.is_some());
         assert_eq!([frame.rms_left, frame.rms_right], [0.5, 0.25]);
-        assert_eq!(
-            frame.sample_time,
-            Duration::from_secs_f64(511.0 / 48_000.0) + Duration::from_secs_f64(1.0 / 48_000.0)
+        // Accepted 511 + 1 frames; allow nanosecond rounding per packet.
+        assert!(
+            frame
+                .sample_time
+                .abs_diff(Duration::from_secs_f64(512.0 / 48_000.0))
+                <= Duration::from_nanos(2)
         );
         assert!(frame.frequencies_hz.is_empty());
         assert!(frame.spectrum_db.is_empty());

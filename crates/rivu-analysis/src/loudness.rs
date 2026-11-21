@@ -208,11 +208,27 @@ mod tests {
             assert!(LoudnessAnalyzer::new(RATE, &layout).is_err());
         }
         assert!(LoudnessAnalyzer::new(0, &[2]).is_err());
+        // A decoder that admits the valid prefix before rejecting its tail
+        // would raise the later measurement relative to the clean control.
+        let stereo =
+            |mono: Vec<f32>| -> Vec<f32> { mono.into_iter().flat_map(|s| [s, s]).collect() };
+        let loud_prefix = stereo(tone(0.9, RATE as usize));
+        let accepted = stereo(tone(0.1, RATE as usize * 3));
         let mut analyzer = LoudnessAnalyzer::new(RATE, &[0, 1]).unwrap();
-        assert!(analyzer.push(&[0.5]).is_err());
+        assert!(
+            analyzer
+                .push(&[loud_prefix.as_slice(), &[0.5]].concat())
+                .is_err()
+        );
         for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert!(analyzer.push(&[100.0, sample]).is_err());
+            let mut rejected = loud_prefix.clone();
+            *rejected.last_mut().unwrap() = sample;
+            assert!(analyzer.push(&rejected).is_err());
         }
-        assert_eq!(analyzer.integrated_lufs().unwrap(), measure(&[0, 1], &[]));
+        analyzer.push(&accepted).unwrap();
+        assert_eq!(
+            analyzer.integrated_lufs().unwrap(),
+            measure(&[0, 1], &accepted)
+        );
     }
 }

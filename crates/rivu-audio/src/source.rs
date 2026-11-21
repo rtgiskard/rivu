@@ -2533,6 +2533,44 @@ pub(super) mod tests {
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
 
+    fn snapshot(
+        path: &Path,
+        range: Option<crate::PlaybackRange>,
+        hint: DecoderHint,
+    ) -> crate::AudioRenderSnapshot {
+        crate::AudioRenderSnapshot::original(
+            path.to_owned(),
+            range,
+            hint,
+            rivu_format::config::VisualizationSignal::Before,
+            Arc::default(),
+        )
+    }
+
+    // Finite file inputs only: allow even a one-byte packet for each unit of
+    // decode work, replay from origin for a seek, and several setup rounds.
+    #[track_caller]
+    pub(crate) fn finish_fixture_open(source: &mut Source) {
+        let SourceIdentity::File { len, .. } = source.identity() else {
+            panic!("expected file fixture")
+        };
+        let rounds = 8 + 2 * len.div_ceil(DECODE_WORK_BUDGET as u64);
+        for _ in 0..rounds {
+            if source.poll_open().unwrap() {
+                return;
+            }
+        }
+        panic!(
+            "{} {}: range {}..{:?}, seek {:?}/{:?}, last span {}, still opening after {rounds} rounds",
+            source.info.title,
+            source.probe_backend,
+            source.range_start,
+            source.range_end,
+            source.pending_seek,
+            source.seek_target,
+            source.frame_start
+        );
+    }
     #[cfg(feature = "midi")]
     #[test]
     fn midi_probe_and_intake_use_the_admitted_file_after_path_replacement() {
@@ -2694,17 +2732,26 @@ pub(super) mod tests {
         assert_eq!(probe(file.path(), false).unwrap().sample_rate, 8000);
     }
 
-    #[test]
-    fn opening_rounds_keep_real_packet_progress_and_the_first_pcm() {
-        let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, true);
-        let mut source = Source::begin_open(
+    fn open_prefix(
+        hint: DecoderHint,
+        packets: usize,
+        selected_pcm: bool,
+    ) -> (tempfile::NamedTempFile, Source) {
+        let file = opening_prefix_file(packets, selected_pcm);
+        let source = Source::begin_open(
             file.path(),
             PROBE_BUFFER_LEN,
-            DecoderHint::Native,
-            false,
+            hint,
+            hint == DecoderHint::Ffmpeg,
             SourceSelection::default(),
         )
         .unwrap();
+        (file, source)
+    }
+    #[test]
+    fn opening_rounds_keep_real_packet_progress_and_the_first_pcm() {
+        let (_file, mut source) =
+            open_prefix(DecoderHint::Native, DECODE_WORK_BUDGET * 3 + 1, true);
         for _ in 0..3 {
             assert!(!source.poll_open().unwrap());
         }
@@ -2720,15 +2767,7 @@ pub(super) mod tests {
 
     #[test]
     fn opening_an_empty_selected_stream_fails_after_finite_prefix_rounds() {
-        let file = opening_prefix_file(DECODE_WORK_BUDGET * 2, false);
-        let mut source = Source::begin_open(
-            file.path(),
-            PROBE_BUFFER_LEN,
-            DecoderHint::Native,
-            false,
-            SourceSelection::default(),
-        )
-        .unwrap();
+        let (_file, mut source) = open_prefix(DecoderHint::Native, DECODE_WORK_BUDGET * 2, false);
         assert!(!source.poll_open().unwrap());
         assert!(!source.poll_open().unwrap());
         assert!(is_source_failure(&source.poll_open().unwrap_err()));
@@ -2775,15 +2814,8 @@ pub(super) mod tests {
     #[cfg(feature = "ffmpeg")]
     #[test]
     fn ffmpeg_opening_rounds_preserve_the_first_selected_pcm() {
-        let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, true);
-        let mut source = Source::begin_open(
-            file.path(),
-            PROBE_BUFFER_LEN,
-            DecoderHint::Ffmpeg,
-            true,
-            SourceSelection::default(),
-        )
-        .unwrap();
+        let (_file, mut source) =
+            open_prefix(DecoderHint::Ffmpeg, DECODE_WORK_BUDGET * 3 + 1, true);
         let mut rounds = 0;
         while !source.poll_open().unwrap() {
             rounds += 1;
@@ -3101,7 +3133,7 @@ pub(super) mod tests {
                 },
             )
             .unwrap();
-            while !source.poll_open().unwrap() {}
+            finish_fixture_open(&mut source);
             assert!(source.uses_ffmpeg());
             assert!((source.info().duration.unwrap() - 1.2).abs() < 1e-9);
             let (samples, timestamp) = source.next_frames().unwrap().unwrap();
@@ -3642,7 +3674,7 @@ pub(super) mod tests {
             ];
             for (mut source, expected_peak) in sources.into_iter().zip([Some(0.8), Some(0.8), None])
             {
-                while !source.poll_open().unwrap() {}
+                finish_fixture_open(&mut source);
                 assert_eq!(source.info().title, expected_title);
                 assert!(source.info().artist.is_empty());
                 assert!(source.info().album.is_empty());
@@ -3756,15 +3788,8 @@ pub(super) mod tests {
     #[cfg(feature = "ffmpeg")]
     #[test]
     fn empty_ffmpeg_opening_fails_without_an_unbounded_prime() {
-        let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, false);
-        let mut source = Source::begin_open(
-            file.path(),
-            PROBE_BUFFER_LEN,
-            DecoderHint::Ffmpeg,
-            true,
-            SourceSelection::default(),
-        )
-        .unwrap();
+        let (_file, mut source) =
+            open_prefix(DecoderHint::Ffmpeg, DECODE_WORK_BUDGET * 3 + 1, false);
         for _ in 0..8 {
             match source.poll_open() {
                 Ok(false) => {}
@@ -3804,7 +3829,7 @@ pub(super) mod tests {
                 },
             )
             .unwrap();
-            while !source.poll_open().unwrap() {}
+            finish_fixture_open(&mut source);
             assert!(source.next_frames().unwrap().is_none());
             assert_eq!(source.completed_bitrate(), None);
             source.seek(0.25).unwrap();
@@ -3835,11 +3860,7 @@ pub(super) mod tests {
                     SourceSelection { range: None, start },
                 )
                 .unwrap();
-                while !source
-                    .poll_open()
-                    .unwrap_or_else(|error| panic!("reported={reported}, start={start}: {error:#}"))
-                {
-                }
+                finish_fixture_open(&mut source);
                 let offset = ((start * 8000.0) as usize).min(expected.len());
                 assert_eq!(decode_remaining(&mut source), expected[offset..]);
                 assert_eq!(source.completed_duration(), None);
@@ -3851,23 +3872,12 @@ pub(super) mod tests {
     }
 
     fn pcm_file() -> tempfile::NamedTempFile {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        let samples = 88_200_u32;
-        let bytes = samples * 2;
-        let mut header = Vec::new();
-        header.extend_from_slice(b"RIFF");
-        header.extend_from_slice(&(36 + bytes).to_le_bytes());
-        header.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x01\0");
-        header.extend_from_slice(&44_100_u32.to_le_bytes());
-        header.extend_from_slice(&88_200_u32.to_le_bytes());
-        header.extend_from_slice(b"\x02\0\x10\0data");
-        header.extend_from_slice(&bytes.to_le_bytes());
-        file.write_all(&header).unwrap();
-        for index in 0..samples {
-            let value = ((index * 37) % 32_768) as i16 - 16_384;
-            file.write_all(&value.to_le_bytes()).unwrap();
-        }
-        file
+        crate::test_support::i16_wav_file(
+            "",
+            1,
+            44_100,
+            (0..88_200).map(|index| ((index * 37) % 32_768) as i16 - 16_384),
+        )
     }
 
     fn assert_incremental_pcm_start(hint: DecoderHint, ffmpeg_enabled: bool) {
@@ -3883,7 +3893,7 @@ pub(super) mod tests {
             SourceSelection::default(),
         )
         .unwrap();
-        while !source.poll_open().unwrap() {}
+        finish_fixture_open(&mut source);
         assert_eq!(
             decode_remaining(&mut source),
             expected,
@@ -3911,7 +3921,7 @@ pub(super) mod tests {
                 },
             )
             .unwrap();
-            while !source.poll_open().unwrap() {}
+            finish_fixture_open(&mut source);
             if first != end {
                 let (samples, timestamp) = source.next_frames().unwrap().unwrap();
                 assert!((timestamp - start).abs() < 1e-9);
@@ -3938,24 +3948,10 @@ pub(super) mod tests {
 
     #[test]
     fn stereo_ranges_preserve_channel_pairs_and_sample_accurate_seek_timestamps() {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        let rate = 8_000_u32;
-        let count = 8_192_u32;
-        let bytes = count * 4;
-        file.write_all(b"RIFF").unwrap();
-        file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
-        file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x02\0").unwrap();
-        file.write_all(&rate.to_le_bytes()).unwrap();
-        file.write_all(&(rate * 4).to_le_bytes()).unwrap();
-        file.write_all(b"\x04\0\x10\0data").unwrap();
-        file.write_all(&bytes.to_le_bytes()).unwrap();
-        let mut expected = Vec::with_capacity(count as usize * 2);
-        for value in 1..=count as i16 {
-            for sample in [value, -value] {
-                file.write_all(&sample.to_le_bytes()).unwrap();
-                expected.push(f32::from(sample) / 32_768.0);
-            }
-        }
+        let rate = 8_000;
+        let samples = (1..=8_192_i16).flat_map(|value| [value, -value]);
+        let file = crate::test_support::i16_wav_file("", 2, rate, samples.clone());
+        let expected: Vec<_> = samples.map(|sample| f32::from(sample) / 32_768.0).collect();
         for hint in [
             DecoderHint::Native,
             #[cfg(feature = "ffmpeg")]
@@ -3992,6 +3988,9 @@ pub(super) mod tests {
 
     #[test]
     fn audio_entries_reject_writerless_fifo_and_fifo_symlink() {
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
         let fifo = directory.path().join("audio.wav");
         let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
@@ -3999,54 +3998,37 @@ pub(super) mod tests {
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         let alias = directory.path().join("alias.wav");
         std::os::unix::fs::symlink(&fifo, &alias).unwrap();
-        let (completed, receive) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let cancelled = AtomicBool::new(false);
-            for path in [&fifo, &alias] {
-                for enabled in [false, true] {
-                    for hint in [DecoderHint::Auto, DecoderHint::Native, DecoderHint::Ffmpeg] {
-                        if hint == DecoderHint::Ffmpeg && (!enabled || !cfg!(feature = "ffmpeg")) {
-                            continue;
-                        }
-                        assert!(Source::open(path, PROBE_BUFFER_LEN, hint, enabled).is_err());
-                        crate::render::collect_stream(
-                            &crate::AudioRenderSnapshot::original(
-                                (path).to_owned(),
-                                None,
-                                hint,
-                                rivu_format::config::VisualizationSignal::Before,
-                                std::sync::Arc::new(
-                                    rivu_dsp::equalizer::config::EqualizerConfig::default(),
-                                ),
-                            ),
-                            2,
-                            enabled,
-                            &cancelled,
-                        )
-                        .unwrap_err();
+        let cancelled = AtomicBool::new(false);
+        for path in [&fifo, &alias] {
+            for enabled in [false, true] {
+                for hint in [DecoderHint::Auto, DecoderHint::Native, DecoderHint::Ffmpeg] {
+                    if hint == DecoderHint::Ffmpeg && (!enabled || !cfg!(feature = "ffmpeg")) {
+                        continue;
                     }
-                    assert!(probe(path, enabled).is_err());
-                    assert!(probe_details(path, enabled, false).is_err());
+                    assert!(Source::open(path, PROBE_BUFFER_LEN, hint, enabled).is_err());
+                    crate::render::collect_stream(
+                        &snapshot(path, None, hint),
+                        2,
+                        enabled,
+                        &cancelled,
+                    )
+                    .unwrap_err();
                 }
-                #[cfg(feature = "ffmpeg")]
-                {
-                    assert!(probe_details(path, true, true).is_err());
-                }
+                assert!(probe(path, enabled).is_err());
+                assert!(probe_details(path, enabled, false).is_err());
             }
-            completed.send(()).unwrap();
-        });
-        // Do not join on timeout: a regression must fail rather than hang the suite.
-        receive
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
-        worker.join().unwrap();
+            #[cfg(feature = "ffmpeg")]
+            {
+                assert!(probe_details(path, true, true).is_err());
+            }
+        }
     }
 
     #[test]
     fn regular_symlink_preserves_native_ffmpeg_and_rendered_source() {
         let file = pcm_file();
         let directory = tempfile::tempdir().unwrap();
-        let alias = directory.path().join("alias.wav");
+        let alias = directory.path().join("Logical title.wav");
         std::os::unix::fs::symlink(file.path(), &alias).unwrap();
         let identity = crate::source_identity(file.as_file()).unwrap();
         let mut reference =
@@ -4059,58 +4041,68 @@ pub(super) mod tests {
                     continue;
                 }
                 let mut source = Source::open(&alias, PROBE_BUFFER_LEN, hint, enabled).unwrap();
+                if hint != DecoderHint::Ffmpeg {
+                    assert_eq!(source.info().title, "Logical title");
+                }
                 assert_eq!(source.identity(), identity);
                 assert_eq!(decode_remaining(&mut source), expected);
-                let frame =
-                    crate::render::collect_stream(
-                        &crate::AudioRenderSnapshot::original(
-                            alias.to_owned(),
-                            None,
-                            hint,
-                            rivu_format::config::VisualizationSignal::Before,
-                            std::sync::Arc::new(
-                                rivu_dsp::equalizer::config::EqualizerConfig::default(),
-                            ),
-                        ),
-                        2,
-                        enabled,
-                        &cancelled,
-                    )
-                    .unwrap();
-                assert!(frame.duration.is_some());
+                let frame = crate::render::collect_stream(
+                    &snapshot(&alias, None, hint),
+                    2,
+                    enabled,
+                    &cancelled,
+                )
+                .unwrap();
+                assert_eq!(frame.source_identity, Some(identity));
+                assert_eq!(frame.samples, expected);
                 assert_eq!(frame.duration, Some(2.0));
             }
         }
     }
 
     #[test]
-    fn underestimated_metadata_does_not_limit_seek_cue_or_completed_render() {
+    fn missing_or_underestimated_metadata_does_not_limit_seek_cue_or_completed_render() {
         let file = pcm_file();
         let cancelled = AtomicBool::new(false);
-        for hint in [DecoderHint::Native, DecoderHint::Ffmpeg] {
+        for (hint, duration) in [
+            (DecoderHint::Auto, None),
+            (DecoderHint::Native, Some(0.25)),
+            (DecoderHint::Ffmpeg, Some(0.25)),
+        ] {
             if hint == DecoderHint::Ffmpeg && !cfg!(feature = "ffmpeg") {
                 continue;
             }
-            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
-            source.info.duration = Some(0.25);
+            let enabled = hint != DecoderHint::Auto;
+            let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, enabled).unwrap();
+            source.info.duration = duration;
+            if duration.is_none() {
+                assert!(!source.next_frames().unwrap().unwrap().0.is_empty());
+            }
             source.seek(1.0).unwrap();
-            assert_eq!(decode_remaining(&mut source).len(), 44_100);
+            let mut count = 0;
+            while let Some((samples, timestamp)) = source.next_frames().unwrap() {
+                assert!((timestamp - (1.0 + count as f64 / 44_100.0)).abs() < 1e-9);
+                count += samples.len();
+            }
+            assert_eq!(count, 44_100);
             source.seek(0.0).unwrap();
             let frame = source
                 .collect_pcm(file.path(), None, hint, &cancelled)
                 .unwrap();
             assert_eq!(frame.duration, Some(2.0));
+            assert_eq!(frame.samples.len(), 88_200);
+            assert!(frame.samples.iter().any(|sample| sample.abs() >= 0.49));
             let mut source = Source::open_input_unprimed(
                 file.path(),
                 FileInput::read_path(file.path(), hint, None).unwrap(),
                 PROBE_BUFFER_LEN,
                 hint,
-                true,
+                enabled,
                 SourceMetadata::Descriptive,
                 None,
             )
             .unwrap();
-            source.info.duration = Some(0.25);
+            source.info.duration = duration;
             source
                 .select(
                     SourceSelection {
@@ -4123,7 +4115,7 @@ pub(super) mod tests {
                     None,
                 )
                 .unwrap();
-            while !source.poll_open().unwrap() {}
+            finish_fixture_open(&mut source);
             assert_eq!(decode_remaining(&mut source).len(), 44_100);
         }
     }
@@ -4191,19 +4183,12 @@ pub(super) mod tests {
         assert_eq!(decode_remaining(&mut source).len(), actual_frames);
         let cancelled = AtomicBool::new(false);
         let rendered = crate::render::collect_stream(
-            &crate::AudioRenderSnapshot::original(
-                (file.path()).to_owned(),
-                None,
-                DecoderHint::Native,
-                rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-            ),
+            &snapshot(file.path(), None, DecoderHint::Native),
             2,
             false,
             &cancelled,
         )
         .unwrap();
-        assert!(rendered.duration.is_some());
         assert_eq!(rendered.duration, Some(actual_duration));
         assert_eq!(rendered.samples.len(), actual_frames);
         let mut source = open_selected(
@@ -4396,18 +4381,7 @@ pub(super) mod tests {
 
     #[test]
     fn decoder_hints_respect_global_disable_and_keep_native_runtime_cold() {
-        const CHILD: &str = "RIVU_DECODER_HINTS_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "source::tests::decoder_hints_respect_global_disable_and_keep_native_runtime_cold",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap();
-            assert!(status.success());
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
             return;
         }
 
@@ -4417,13 +4391,7 @@ pub(super) mod tests {
         assert!(Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, false).is_err());
         assert!(
             crate::render::collect_stream(
-                &crate::AudioRenderSnapshot::original(
-                    file.path().to_owned(),
-                    None,
-                    DecoderHint::Ffmpeg,
-                    rivu_format::config::VisualizationSignal::Before,
-                    std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-                ),
+                &snapshot(file.path(), None, DecoderHint::Ffmpeg),
                 2,
                 false,
                 &cancelled
@@ -4444,13 +4412,7 @@ pub(super) mod tests {
         assert!(!native.uses_ffmpeg());
         assert_eq!(decode_remaining(&mut native), expected);
         let rendered = crate::render::collect_stream(
-            &crate::AudioRenderSnapshot::original(
-                (file.path()).to_owned(),
-                None,
-                DecoderHint::Native,
-                rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-            ),
+            &snapshot(file.path(), None, DecoderHint::Native),
             2,
             true,
             &cancelled,
@@ -4481,13 +4443,7 @@ pub(super) mod tests {
             .expect("Forced FFmpeg must fail when the extension is not compiled");
         let cancelled = AtomicBool::new(false);
         crate::render::collect_stream(
-            &crate::AudioRenderSnapshot::original(
-                (file.path()).to_owned(),
-                None,
-                DecoderHint::Ffmpeg,
-                rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-            ),
+            &snapshot(file.path(), None, DecoderHint::Ffmpeg),
             2,
             true,
             &cancelled,
@@ -4498,20 +4454,7 @@ pub(super) mod tests {
     #[cfg(feature = "ffmpeg")]
     #[test]
     fn lazy_wave_probe_preserves_native_pcm() {
-        const CHILD: &str = "RIVU_LAZY_WAVE_PROBE_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            // Other FFmpeg tests may load the process-wide runtime. Isolate the
-            // cold-to-ready transition rather than depending on test order.
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "source::tests::lazy_wave_probe_preserves_native_pcm",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .status()
-                .unwrap();
-            assert!(status.success());
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
             return;
         }
 
@@ -4575,26 +4518,14 @@ pub(super) mod tests {
             }),
         ] {
             let native = crate::render::collect_stream(
-                &crate::AudioRenderSnapshot::original(
-                    (file.path()).to_owned(),
-                    range,
-                    DecoderHint::Native,
-                    rivu_format::config::VisualizationSignal::Before,
-                    std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-                ),
+                &snapshot(file.path(), range, DecoderHint::Native),
                 2,
                 true,
                 &cancelled,
             )
             .unwrap();
             let forced = crate::render::collect_stream(
-                &crate::AudioRenderSnapshot::original(
-                    (file.path()).to_owned(),
-                    range,
-                    DecoderHint::Ffmpeg,
-                    rivu_format::config::VisualizationSignal::Before,
-                    std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-                ),
+                &snapshot(file.path(), range, DecoderHint::Ffmpeg),
                 2,
                 true,
                 &cancelled,
@@ -4661,36 +4592,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn linked_audio_keeps_logical_metadata_and_rendered_identity() {
-        let file = pcm_file();
-        let directory = tempfile::tempdir().unwrap();
-        let alias = directory.path().join("Logical title.wav");
-        std::os::unix::fs::symlink(file.path(), &alias).unwrap();
-        let mut source = Source::open(&alias, PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
-        assert_eq!(source.info().title, "Logical title");
-        assert_eq!(decode_remaining(&mut source).len(), 88_200);
-        let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let rendered = crate::render::collect_stream(
-            &crate::AudioRenderSnapshot::original(
-                alias.to_owned(),
-                None,
-                DecoderHint::Auto,
-                rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-            ),
-            2,
-            false,
-            &cancelled,
-        )
-        .unwrap();
-        assert!(rendered.duration.is_some());
-        assert_eq!(
-            rendered.source_identity,
-            Some(crate::source_identity(file.as_file()).unwrap())
-        );
-    }
-
-    #[test]
     fn rendered_covers_the_full_file_and_exact_cue_boundaries() {
         let file = pcm_file();
         let mut source =
@@ -4709,13 +4610,7 @@ pub(super) mod tests {
             });
             let samples = &reference[start * 588..end.map_or(reference.len(), |end| end * 588)];
             let actual = crate::render::collect_stream(
-                &crate::AudioRenderSnapshot::original(
-                    (file.path()).to_owned(),
-                    range,
-                    DecoderHint::Auto,
-                    rivu_format::config::VisualizationSignal::Before,
-                    std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-                ),
+                &snapshot(file.path(), range, DecoderHint::Auto),
                 2,
                 false,
                 &cancelled,
@@ -4728,7 +4623,6 @@ pub(super) mod tests {
 
     #[test]
     fn render_preserves_all_channels_and_does_not_pad_short_clips() {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
         let frames: [[i16; 2]; 6] = [
             [8192, -8192],
             [0, 16384],
@@ -4737,30 +4631,10 @@ pub(super) mod tests {
             [4096, -4096],
             [0, i16::MIN],
         ];
-        let bytes = frames.len() as u32 * 4;
-        let mut header = Vec::new();
-        header.extend_from_slice(b"RIFF");
-        header.extend_from_slice(&(36 + bytes).to_le_bytes());
-        header.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x02\0");
-        header.extend_from_slice(&48_000_u32.to_le_bytes());
-        header.extend_from_slice(&192_000_u32.to_le_bytes());
-        header.extend_from_slice(b"\x04\0\x10\0data");
-        header.extend_from_slice(&bytes.to_le_bytes());
-        file.write_all(&header).unwrap();
-        for frame in frames {
-            for sample in frame {
-                file.write_all(&sample.to_le_bytes()).unwrap();
-            }
-        }
+        let file = crate::test_support::i16_wav_file("", 2, 48_000, frames.into_iter().flatten());
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let rendered = crate::render::collect_stream(
-            &crate::AudioRenderSnapshot::original(
-                (file.path()).to_owned(),
-                None,
-                DecoderHint::Auto,
-                rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-            ),
+            &snapshot(file.path(), None, DecoderHint::Auto),
             2,
             false,
             &cancelled,
@@ -4826,28 +4700,11 @@ pub(super) mod tests {
 
     #[test]
     fn render_preserves_float_samples_above_full_scale() {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
         let samples = [0.25_f32, -1.0, 1.5, -2.0, f32::NAN, f32::INFINITY];
-        let bytes = samples.len() as u32 * 4;
-        file.write_all(b"RIFF").unwrap();
-        file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
-        file.write_all(b"WAVEfmt \x10\0\0\0\x03\0\x01\0").unwrap();
-        file.write_all(&48_000_u32.to_le_bytes()).unwrap();
-        file.write_all(&192_000_u32.to_le_bytes()).unwrap();
-        file.write_all(b"\x04\0\x20\0data").unwrap();
-        file.write_all(&bytes.to_le_bytes()).unwrap();
-        for sample in samples {
-            file.write_all(&sample.to_le_bytes()).unwrap();
-        }
+        let file = crate::test_support::float_wav_file("", 1, 48_000, samples);
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let rendered = crate::render::collect_stream(
-            &crate::AudioRenderSnapshot::original(
-                (file.path()).to_owned(),
-                None,
-                DecoderHint::Auto,
-                rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-            ),
+            &snapshot(file.path(), None, DecoderHint::Auto),
             2,
             false,
             &cancelled,
@@ -4860,13 +4717,7 @@ pub(super) mod tests {
     fn rendered_cancellation_precedes_opening_the_file() {
         let cancelled = std::sync::atomic::AtomicBool::new(true);
         let error = crate::render::collect_stream(
-            &crate::AudioRenderSnapshot::original(
-                (Path::new("")).to_owned(),
-                None,
-                DecoderHint::Auto,
-                rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
-            ),
+            &snapshot(Path::new(""), None, DecoderHint::Auto),
             2,
             false,
             &cancelled,
@@ -4911,22 +4762,6 @@ pub(super) mod tests {
             cancelled.store(false, Ordering::Relaxed);
             source.seek(0.0).unwrap();
             assert!(source.next_frames().unwrap().is_some());
-        }
-    }
-
-    #[test]
-    fn decoded_cue_seek_timestamps_are_selected_source_relative() {
-        let file = pcm_file();
-        let range = crate::PlaybackRange {
-            start_seconds: 30.0 / 75.0,
-            end_seconds: Some(80.0 / 75.0),
-        };
-        let mut source = open_selected(file.path(), DecoderHint::Auto, false, Some(range));
-        for target in [0.2, 0.0] {
-            source.seek(target).unwrap();
-            let (samples, timestamp) = source.next_frames().unwrap().unwrap();
-            assert!((timestamp - target).abs() < 1e-9);
-            assert!(!samples.is_empty());
         }
     }
 
@@ -5169,7 +5004,7 @@ pub(super) mod tests {
                     SourceSelection { range, start },
                 )
                 .unwrap();
-                while !source.poll_open().unwrap() {}
+                finish_fixture_open(&mut source);
                 let (actual, spans) = capture_spans(&mut source);
                 assert!(actual == original[288_000..end], "{hint:?}: {range:?}");
                 assert!((spans[0].media_start - start).abs() < 1e-8);
@@ -5193,7 +5028,7 @@ pub(super) mod tests {
                     .is_err()
             );
             source.seek(7.0).unwrap();
-            while !source.poll_open().unwrap() {}
+            finish_fixture_open(&mut source);
             assert!(decode_remaining(&mut source) == original[336_000..]);
         }
     }
@@ -5619,25 +5454,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn unknown_duration_seek_decodes_the_exact_remaining_timeline() {
-        let file = pcm_file();
-        let mut source =
-            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
-        source.info.duration = None;
-        let rate = source.info.sample_rate;
-        let channels = source.layout.len();
-        let first = source.next_frames().unwrap().unwrap().0.to_vec();
-        source.seek(1.0).unwrap();
-        let mut frames = 0;
-        while let Some((samples, timestamp)) = source.next_frames().unwrap() {
-            assert!((timestamp - (1.0 + frames as f64 / f64::from(rate))).abs() < 1e-9);
-            frames += samples.len() / channels;
-        }
-        assert!(!first.is_empty());
-        assert_eq!(frames, rate as usize);
-    }
-
-    #[test]
     fn cue_ranges_crop_pcm_and_seek_relative_to_track() {
         let file = pcm_file();
         let mut full =
@@ -5661,12 +5477,20 @@ pub(super) mod tests {
                 (source.info().duration.unwrap() - (end - start) as f64 / 44_100.0).abs() < 1e-9
             );
             assert_eq!(decode_remaining(&mut source), reference[start..end]);
-            source.seek(0.2).unwrap();
-            assert_eq!(decode_remaining(&mut source), reference[start + 8_820..end]);
-            source.seek(source.info().duration.unwrap()).unwrap();
-            assert!(source.next_frames().unwrap().is_none());
-            source.seek(0.0).unwrap();
-            assert_eq!(decode_remaining(&mut source), reference[start..end]);
+            for target in [0.2, source.info().duration.unwrap(), 0.0] {
+                source.seek(target).unwrap();
+                if target == source.info().duration.unwrap() {
+                    assert!(source.next_frames().unwrap().is_none());
+                    continue;
+                }
+                let (first, timestamp) = source.next_frames().unwrap().unwrap();
+                assert!(!first.is_empty());
+                assert!((timestamp - target).abs() < 1e-9);
+                let mut samples = first.to_vec();
+                samples.extend(decode_remaining(&mut source));
+                let offset = (target * 44_100.0).round() as usize;
+                assert_eq!(samples, reference[start + offset..end]);
+            }
         }
     }
 

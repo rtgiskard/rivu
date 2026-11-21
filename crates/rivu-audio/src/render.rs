@@ -282,21 +282,13 @@ mod tests {
 
     fn float_source(directory: &Path) -> std::path::PathBuf {
         let path = directory.join("source.wav");
-        let mut writer = hound::WavWriter::create(
+        crate::test_support::write_float_wav(
             &path,
-            hound::WavSpec {
-                channels: 2,
-                sample_rate: 8_000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
+            2,
+            8_000,
+            (0..800).flat_map(|frame| [frame as f32 / 100.0, -(frame as f32) / 200.0]),
         )
         .unwrap();
-        for frame in 0..800 {
-            writer.write_sample(frame as f32 / 100.0).unwrap();
-            writer.write_sample(-(frame as f32) / 200.0).unwrap();
-        }
-        writer.finalize().unwrap();
         path
     }
 

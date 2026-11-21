@@ -1542,16 +1542,22 @@ mod tests {
             fft_size: 256,
             ..Default::default()
         };
-        for rate in [8000, 44_100, 48_000, 192_000, 384_000] {
-            for channels in [1, 2, 6, 32] {
-                for frames in [0, 1, 2, 63, 127, 128, 255, 256, 257, 713] {
-                    let input = noise(frames * channels, 12, 0.5);
-                    let output = run(config.clone(), rate, channels, &input, None, 37);
+        for channels in [1, 2, 6, 32] {
+            let noise = noise(713 * channels, 12, 0.5);
+            for frames in [0, 1, 2, 63, 127, 128, 255, 256, 257, 713] {
+                let input = &noise[..frames * channels];
+                for rate in [8_000, 44_100, 48_000, 192_000, 384_000] {
+                    let output = run(config.clone(), rate, channels, input, None, 37);
                     for (x, y) in input.iter().zip(&output) {
-                        assert!((x - y).abs() < 2.0e-6);
+                        assert!(
+                            (x - y).abs() < 2.0e-6,
+                            "{rate} Hz, {channels} ch, {frames} frames"
+                        );
                     }
-                    let other = run(config.clone(), rate, channels, &input, None, 113);
-                    assert_eq!(output, other);
+                    assert_eq!(
+                        output,
+                        run(config.clone(), rate, channels, input, None, 113)
+                    );
                 }
             }
         }

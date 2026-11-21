@@ -67,59 +67,26 @@ pub(crate) fn replaygain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivu_format::config::ReplayGainPeakPolicy::{Off, PreventClipping};
 
     #[test]
     fn replaygain_is_opt_in_and_applies_track_gain_without_limiting_boosts() {
-        let mut info = crate::PlaybackMetadata {
-            replaygain_track_gain: Some(-6.020599913279624),
-            ..Default::default()
-        };
-        assert_eq!(
-            replaygain(
-                &info,
-                false,
-                rivu_format::config::ReplayGainPeakPolicy::Off,
-                None,
-                false
-            )
-            .0,
-            1.0
-        );
-        assert_eq!(
-            replaygain(
-                &info,
-                true,
-                rivu_format::config::ReplayGainPeakPolicy::Off,
-                None,
-                false
-            )
-            .0,
-            0.5
-        );
-        info.replaygain_track_gain = Some(0.0);
-        assert_eq!(
-            replaygain(
-                &info,
-                true,
-                rivu_format::config::ReplayGainPeakPolicy::Off,
-                None,
-                false
-            )
-            .0,
-            1.0
-        );
-        info.replaygain_track_gain = Some(12.041199826559248);
-        assert_eq!(
-            replaygain(
-                &info,
-                true,
-                rivu_format::config::ReplayGainPeakPolicy::Off,
-                None,
-                false
-            )
-            .0,
-            4.0
-        );
+        for (enabled, track_gain, expected) in [
+            (false, -6.020599913279624, 1.0),
+            (true, -6.020599913279624, 0.5),
+            (true, 0.0, 1.0),
+            (true, 12.041199826559248, 4.0),
+        ] {
+            let info = crate::PlaybackMetadata {
+                replaygain_track_gain: Some(track_gain),
+                ..Default::default()
+            };
+            assert_eq!(
+                replaygain(&info, enabled, Off, None, false).0,
+                expected,
+                "enabled={enabled} gain={track_gain}"
+            );
+        }
     }
 
     #[test]
@@ -135,14 +102,7 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                replaygain(
-                    &info,
-                    true,
-                    rivu_format::config::ReplayGainPeakPolicy::PreventClipping,
-                    Some(2.0),
-                    false
-                )
-                .0,
+                replaygain(&info, true, PreventClipping, Some(2.0), false).0,
                 1.0
             );
         }
@@ -160,13 +120,7 @@ mod tests {
                 replaygain_track_gain: Some(decibels),
                 ..Default::default()
             };
-            let (gain, status) = replaygain(
-                &info,
-                true,
-                rivu_format::config::ReplayGainPeakPolicy::Off,
-                None,
-                false,
-            );
+            let (gain, status) = replaygain(&info, true, Off, None, false);
             assert_eq!(gain, expected);
             assert!(status.applied_gain_db.is_finite());
         }
@@ -174,7 +128,6 @@ mod tests {
 
     #[test]
     fn peak_policy_caps_only_valid_unprocessed_track_peaks() {
-        use rivu_format::config::ReplayGainPeakPolicy::{Off, PreventClipping};
         let info = crate::PlaybackMetadata {
             replaygain_track_gain: Some(12.041199826559248),
             ..Default::default()

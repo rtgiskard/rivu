@@ -586,12 +586,7 @@ mod tests {
         bytes
     }
 
-    fn flac_frame(_number: u8, payload: usize) -> Vec<u8> {
-        // Payload is intentionally opaque: cheap summaries never validate frames.
-        vec![0; 12 + payload]
-    }
-
-    fn flac_file(picture_bytes: usize, frame_padding: usize) -> (Vec<u8>, u64) {
+    fn flac_file(picture_bytes: usize) -> (Vec<u8>, u64) {
         let mut info = [0; 34];
         info[..2].copy_from_slice(&16_u16.to_be_bytes());
         info[2..4].copy_from_slice(&16_u16.to_be_bytes());
@@ -604,12 +599,10 @@ mod tests {
             bytes.extend_from_slice(&[0x86, len[1], len[2], len[3]]);
             bytes.resize(bytes.len() + picture_bytes, 0);
         }
-        let first = flac_frame(0, 0);
-        let last = flac_frame(1, frame_padding);
-        let audio_bytes = (first.len() + last.len()) as u64;
-        bytes.extend_from_slice(&first);
-        bytes.extend_from_slice(&last);
-        (bytes, audio_bytes)
+        // Audio is opaque: cheap summaries never parse frames.
+        let audio_bytes = 24;
+        bytes.resize(bytes.len() + audio_bytes, 0);
+        (bytes, audio_bytes as u64)
     }
 
     fn mpeg_frame(kbps_index: u8) -> Vec<u8> {
@@ -723,7 +716,7 @@ mod tests {
 
     #[test]
     fn flac_uses_frames_not_metadata_artwork_or_trailing_tags() {
-        let (audio, audio_bytes) = flac_file(300_000, 0);
+        let (audio, audio_bytes) = flac_file(300_000);
         let mut bytes = id3(100_000);
         bytes.extend_from_slice(&audio);
         bytes.extend_from_slice(&ape(200_000, true));
@@ -738,13 +731,13 @@ mod tests {
 
     #[test]
     fn flac_estimates_do_not_claim_tail_integrity_and_require_sample_count() {
-        let (mut bytes, audio_bytes) = flac_file(0, 0);
+        let (mut bytes, audio_bytes) = flac_file(0);
         bytes.extend_from_slice(b"unknown trailing data");
         assert_eq!(
             summary(bytes),
             Some((CODEC_ID_FLAC, average(audio_bytes + 21, 32, 8000).unwrap()))
         );
-        let (mut zero, _) = flac_file(0, 0);
+        let (mut zero, _) = flac_file(0);
         zero[21] &= 0xf0;
         zero[22..26].fill(0);
         assert_eq!(summary(zero), None);
@@ -824,7 +817,7 @@ mod tests {
         for _ in 0..=MAX_HEADERS {
             repeated.extend_from_slice(&id3(0));
         }
-        repeated.extend_from_slice(&flac_file(0, 0).0);
+        repeated.extend_from_slice(&flac_file(0).0);
         assert_eq!(summary(repeated), None);
         let mut oversized = b"fLaC\x80\xff\xff\xff".to_vec();
         oversized.resize(64, 0);

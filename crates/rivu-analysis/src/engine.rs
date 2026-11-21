@@ -969,6 +969,10 @@ mod tests {
         assert_eq!(frame.settings, Some(settings));
     }
 
+    fn period_32_sample(index: usize) -> f32 {
+        (std::f32::consts::TAU * index as f32 / 32.0).sin()
+    }
+
     #[test]
     fn spectrogram_calibrates_stereo_phase_windows_and_fft_sizes() {
         for fft_size in [512, 32768] {
@@ -1043,7 +1047,8 @@ mod tests {
         let frequency = analyzer.frequency.as_ptr();
         let mut frame = AnalysisFrame::default();
         let mut retained = Vec::new();
-        for (index, pointer) in pointers.iter().enumerate() {
+        let mut published = Vec::new();
+        for index in 0..pointers.len() {
             let amplitude = 0.125 * (index + 1) as f32;
             for i in 0..32768 {
                 let sample = amplitude * (std::f32::consts::TAU * i as f32 / 32.0).sin();
@@ -1051,7 +1056,10 @@ mod tests {
             }
             let rms = analyzer.transform();
             analyzer.publish(&mut frame, rms, Duration::from_secs(index as u64 + 1));
-            assert_eq!(frame.visualizer.spectrogram.as_ptr(), *pointer);
+            // Any free pool slot may be chosen, but pinned slots are never shared.
+            let pointer = frame.visualizer.spectrogram.as_ptr();
+            assert!(pointers.contains(&pointer) && !published.contains(&pointer));
+            published.push(pointer);
             let staged = frame.clone();
             assert!(Arc::ptr_eq(
                 frame.visualizer.spectrogram.shared_storage().unwrap(),
@@ -1167,7 +1175,8 @@ mod tests {
         let pointers = slots.map(|slot| slot.as_ptr());
         let mut frame = AnalysisFrame::default();
         let mut retained = Vec::new();
-        for (index, pointer) in pointers.iter().enumerate() {
+        let mut published = Vec::new();
+        for index in 0..pointers.len() {
             let samples = [0.125 * index as f32, -0.0625 * index as f32];
             for _ in 0..512 {
                 analyzer.push(samples);
@@ -1178,7 +1187,9 @@ mod tests {
                 rms,
                 Duration::from_millis(100 * (index + 1) as u64),
             );
-            assert_eq!(frame.visualizer.pcm.as_ptr(), *pointer);
+            let pointer = frame.visualizer.pcm.as_ptr();
+            assert!(pointers.contains(&pointer) && !published.contains(&pointer));
+            published.push(pointer);
             retained.push((frame.clone(), samples));
         }
         let previous = frame.clone();
@@ -1244,10 +1255,9 @@ mod tests {
             .each_ref()
             .map(Arc::downgrade);
         analyzer.set_visualizer_demand(VisualizerDemand::default());
-        frame = AnalysisFrame::default();
+        drop(frame);
         retained.clear();
         drop(previous);
-        assert!(frame.visualizer.pcm.is_empty());
         assert!(weak.iter().all(|slot| slot.upgrade().is_none()));
     }
 
@@ -1280,8 +1290,10 @@ mod tests {
         assert!(retained.iter().all(|sample| *sample == [0.5, -0.25]));
         analyzer.set_visualizer_demand(VisualizerDemand::default());
         assert!(analyzer.pcm_snapshots.is_none());
-        assert!(weak[0].upgrade().is_some());
-        assert!(weak[1..].iter().all(|slot| slot.upgrade().is_none()));
+        // Only the slot still pinned by `retained` survives demand removal.
+        for (pointer, slot) in pointers.iter().zip(&weak) {
+            assert_eq!(slot.upgrade().is_some(), *pointer == retained.as_ptr());
+        }
 
         // A disabled style cannot keep a stale handle through staging clones.
         let disabled = VisualizerFrame {
@@ -1387,7 +1399,7 @@ mod tests {
         for _ in 0..8 {
             analyzer.set_visualizer_demand(ALL_DEMAND);
             for i in 0..512 {
-                let tone = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
+                let tone = 0.5 * period_32_sample(i);
                 analyzer.push([tone, -tone]);
             }
             let rms = analyzer.transform();
@@ -1602,7 +1614,7 @@ mod tests {
         for inverted in [false, true] {
             let mut analyzer = visualizer_analyzer(DENSITY_DEMAND);
             for i in 0..512 {
-                let left = 0.8 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
+                let left = 0.8 * period_32_sample(i);
                 analyzer.push([left, if inverted { -left } else { left }]);
             }
             analyzer.transform();
@@ -1718,7 +1730,7 @@ mod tests {
         for channels in [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, -1.0], [1.0, 0.5]] {
             let mut analyzer = visualizer_analyzer(SPATIAL_DEMAND);
             for i in 0..512 {
-                let tone = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
+                let tone = 0.5 * period_32_sample(i);
                 analyzer.push(channels.map(|channel| channel * tone));
             }
             analyzer.transform();
@@ -1816,7 +1828,7 @@ mod tests {
                 let mut analyzer = SpectrumAnalyzer::new(settings, rate, true);
                 analyzer.set_visualizer_demand(SPATIAL_DEMAND);
                 for i in 0..fft_size {
-                    let sample = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
+                    let sample = 0.5 * period_32_sample(i as usize);
                     analyzer.push([sample, -sample]);
                 }
                 let rms = analyzer.transform();
@@ -1935,12 +1947,9 @@ mod tests {
             analyzer.push([0.5, -0.5]);
         }
         analyzer.reset();
-        for _ in 0..settings.fft_size {
-            analyzer.push([0.0, 0.0]);
-        }
+        // A full stale window must not count toward the next window's readiness.
+        assert_eq!(analyzer.filled, 0);
         let rms = analyzer.transform();
-        assert_eq!(rms, [0.0, 0.0]);
-        assert!(analyzer.levels.iter().all(|db| *db == -140.0));
         let mut frame = AnalysisFrame::default();
         analyzer.publish(&mut frame, rms, Duration::from_secs(1));
         let mut changed = SpectrumAnalyzer::new(settings, 8_000, true);

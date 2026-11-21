@@ -956,27 +956,26 @@ pub(super) mod tests {
         signal: VisualizationSignal,
     ) -> (Arc<PcmControl>, crate::capture::TestCapture) {
         let worker = Arc::new(PcmControl::new().unwrap());
+        worker.reset(playback.source.info().sample_rate, playback.source.layout());
         worker.set_playback_active(true);
         worker.set_enabled(true);
-        let (producer, captured) = PcmProducer::capture_for_test(&worker, playback.source.layout());
-        playback.visualization.producer = Some(producer);
+        let captured = crate::capture::TestCapture::new(&worker);
+        playback.visualization.producer = Some(worker.audio_producer());
         playback.set_signal(signal);
         (worker, captured)
     }
 
     fn loudness_pcm() -> (tempfile::NamedTempFile, Vec<f32>) {
-        let mut file = pcm_samples(16_000);
-        file.seek(SeekFrom::Start(44)).unwrap();
-        let samples = (0..16_000)
-            .map(|index| {
-                let amplitude = if index < 6_000 { 0.05 } else { 0.3 };
-                let phase = std::f64::consts::TAU * 997.0 * index as f64 / 8_000.0;
-                let sample = (amplitude * phase.sin() * 32768.0) as i16;
-                file.write_all(&sample.to_le_bytes()).unwrap();
-                f32::from(sample) / 32768.0
-            })
-            .collect();
-        (file, samples)
+        let samples = (0..16_000).map(|index| {
+            let amplitude = if index < 6_000 { 0.05 } else { 0.3 };
+            let phase = std::f64::consts::TAU * 997.0 * index as f64 / 8_000.0;
+            (amplitude * phase.sin() * 32768.0) as i16
+        });
+        let file = crate::test_support::i16_wav_file("", 1, 8_000, samples.clone());
+        (
+            file,
+            samples.map(|sample| f32::from(sample) / 32768.0).collect(),
+        )
     }
 
     fn expected_source_loudness(samples: &[f32]) -> Option<f64> {
@@ -1539,30 +1538,16 @@ pub(super) mod tests {
     }
 
     fn pcm_samples(samples: u32) -> tempfile::NamedTempFile {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        let rate = 8_000_u32;
-        let bytes = samples * 2;
-        file.write_all(b"RIFF").unwrap();
-        file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
-        file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x01\0").unwrap();
-        file.write_all(&rate.to_le_bytes()).unwrap();
-        file.write_all(&(rate * 2).to_le_bytes()).unwrap();
-        file.write_all(b"\x02\0\x10\0data").unwrap();
-        file.write_all(&bytes.to_le_bytes()).unwrap();
-        for index in 0..samples {
-            file.write_all(&((index % 16000) as i16).to_le_bytes())
-                .unwrap();
-        }
-        file
+        crate::test_support::i16_wav_file("", 1, 8_000, (0..samples).map(|i| (i % 16_000) as i16))
     }
 
     fn pcm_level(samples: u32, level: i16) -> tempfile::NamedTempFile {
-        let mut file = pcm_samples(samples);
-        file.seek(SeekFrom::Start(44)).unwrap();
-        for _ in 0..samples {
-            file.write_all(&level.to_le_bytes()).unwrap();
-        }
-        file
+        crate::test_support::i16_wav_file(
+            "",
+            1,
+            8_000,
+            std::iter::repeat_n(level, samples as usize),
+        )
     }
 
     fn large_packet_flac(rate: u32) -> tempfile::NamedTempFile {
@@ -1611,7 +1596,7 @@ pub(super) mod tests {
             crate::source::SourceSelection { range, start: 0.0 },
         )
         .unwrap();
-        while !source.poll_open().unwrap() {}
+        crate::source::tests::finish_fixture_open(&mut source);
         let rate = source.info().sample_rate;
         let (output, render) = crate::output::test_backend(rate, false, source.layout());
         let equalizer =
@@ -1684,13 +1669,7 @@ pub(super) mod tests {
             for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
                 for processed in [false, true] {
                     let (mut playback, _) = test_playback_selected(file.path(), None);
-                    let worker = Arc::new(PcmControl::new().unwrap());
-                    worker.reset(rate, playback.source.layout());
-                    worker.set_playback_active(true);
-                    worker.set_enabled(true);
-                    playback.visualization.producer = Some(worker.audio_producer());
-                    let mut captured = crate::capture::TestCapture::new(&worker);
-                    playback.set_signal(signal);
+                    let (_worker, mut captured) = attach_capture(&mut playback, signal);
                     if processed {
                         playback.equalizer = Equalizer::new(
                             &EqualizerConfig {
@@ -1855,13 +1834,8 @@ pub(super) mod tests {
             playback.before_skip_frames = graph.source_lead_frames();
             playback.graph_output_remaining = Some(published);
             playback.graph = Some(graph);
-            let worker = Arc::new(PcmControl::new().unwrap());
-            worker.set_playback_active(true);
-            worker.set_enabled(true);
-            let (producer, mut captured) =
-                PcmProducer::capture_for_test(&worker, playback.source.layout());
-            playback.visualization.producer = Some(producer);
-            playback.set_signal(VisualizationSignal::Before);
+            let (_worker, mut captured) =
+                attach_capture(&mut playback, VisualizationSignal::Before);
             let mut packets = 0;
             playback.fill_with(|| packets += 1).unwrap();
             assert!(playback.eof);
@@ -1887,6 +1861,69 @@ pub(super) mod tests {
         }
     }
 
+    // The device consumes only what output admitted; the observer is an independent check.
+    fn drain_mono_admissions(
+        playback: &mut Playback,
+        signal: VisualizationSignal,
+        rounds: usize,
+        expect_full_first_batch: bool,
+        expected: impl Fn(usize) -> (f32, f32),
+    ) -> Vec<usize> {
+        const CAPACITY: usize = 73;
+        let rate = playback.source.info().sample_rate;
+        assert_eq!(playback.source.layout().len(), 1);
+        let weights = crate::channels::analysis_weights(playback.source.layout())[0];
+        let (_worker, mut captured) = attach_capture(playback, signal);
+        let (output, mut render) = crate::output::test_backend_with_capacity(
+            rate,
+            false,
+            playback.source.layout(),
+            CAPACITY,
+        );
+        playback.output = output;
+        let tick = (CAPACITY as u64 * 1000).div_ceil(u64::from(rate));
+        let mut gaps = Vec::new();
+        for step in 0..rounds {
+            let start = playback.output.submitted();
+            playback.fill().unwrap();
+            let count = usize::try_from(playback.output.submitted() - start).unwrap();
+            if step == 0 && expect_full_first_batch {
+                assert_eq!(count, CAPACITY);
+                assert!(!playback.eof, "first admission must not drain the source");
+            }
+            assert!(count <= CAPACITY);
+            let mut audible = [0.0; CAPACITY];
+            render(&mut audible[..count], step as u64 * tick);
+            for (offset, &sample) in audible[..count].iter().enumerate() {
+                let index = start as usize + offset;
+                let tap = captured.try_pop().expect("missing tap for admitted frame");
+                if tap.gap {
+                    gaps.push(index);
+                }
+                let (before, after) = expected(index);
+                assert!(
+                    (sample - after).abs() < 2e-6,
+                    "audible frame {index}: {sample} != {after}"
+                );
+                let selected = if signal == VisualizationSignal::Before {
+                    before
+                } else {
+                    after
+                };
+                for (actual, weight) in tap.samples.into_iter().zip(weights) {
+                    assert!(
+                        (actual - selected * weight).abs() < 2e-6,
+                        "{signal:?} tap at frame {index}"
+                    );
+                }
+            }
+            assert!(captured.try_pop().is_none(), "tap without output admission");
+            if playback.eof && playback.offset_frames == playback.pending.len() {
+                return gaps;
+            }
+        }
+        panic!("mono fixture did not drain in {rounds} rounds");
+    }
     #[test]
     fn vorbis_timestamp_conventions_preserve_pcm_and_only_real_tap_gaps() {
         use rivu_format::config::processing_graph::GraphPort;
@@ -1990,64 +2027,24 @@ pub(super) mod tests {
                         )
                         .unwrap();
                     }
-                    let (_worker, mut captured) = attach_capture(&mut playback, signal);
-                    let (output, mut render) = crate::output::test_backend_with_capacity(
-                        rate,
-                        false,
-                        playback.source.layout(),
-                        73,
+                    // Bypass and the latency-trimmed unity FIR both reproduce the decoded PCM.
+                    let gain = if processing == 1 {
+                        10.0_f32.powf(6.0 / 20.0)
+                    } else {
+                        1.0
+                    };
+                    let gaps = drain_mono_admissions(
+                        &mut playback,
+                        signal,
+                        total / 73 + 16,
+                        true,
+                        |index| (reference[index], reference[index] * gain),
                     );
-                    playback.output = output;
-                    let weights = crate::channels::analysis_weights(playback.source.layout())[0];
-                    let mut taps = Vec::new();
-                    for step in 0..(total / 73 + 16) {
-                        playback.fill().unwrap();
-                        let submitted = taps.len();
-                        taps.extend(captured.pop_iter());
-                        let count = taps.len() - submitted;
-                        assert!(count <= 73, "tap must follow partial output admission");
-                        if step == 0 {
-                            assert_eq!(count, 73);
-                            assert!(!playback.eof, "admission must not drain the whole source");
-                        }
-                        let mut audible = vec![0.0; count];
-                        render(&mut audible, step as u64 * 2);
-                        for (index, (tap, sample)) in
-                            taps[submitted..].iter().zip(audible).enumerate()
-                        {
-                            let original = reference[submitted + index];
-                            if processing != 2 {
-                                let gain = if processing == 1 {
-                                    10.0_f32.powf(6.0 / 20.0)
-                                } else {
-                                    1.0
-                                };
-                                assert!((sample - original * gain).abs() < 2e-6);
-                            }
-                            let selected = if signal == VisualizationSignal::Before {
-                                original
-                            } else {
-                                sample
-                            };
-                            for (actual, weight) in tap.samples.into_iter().zip(weights) {
-                                assert!((actual - selected * weight).abs() < 2e-6);
-                            }
-                        }
-                        if playback.eof && playback.offset_frames == playback.pending.len() {
-                            break;
-                        }
-                    }
-                    assert!(playback.eof);
                     assert_eq!(
-                        taps.len(),
-                        total,
+                        playback.output.submitted(),
+                        total as u64,
                         "{name}: every sample admitted exactly once"
                     );
-                    let gaps: Vec<_> = taps
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, frame)| frame.gap.then_some(index))
-                        .collect();
                     // Source traversal starts with a boundary; graphs trim
                     // boundaries at/before their source preguard.
                     let mut expected = if processing == 2 { vec![] } else { vec![0] };
@@ -2170,50 +2167,16 @@ pub(super) mod tests {
                     )
                     .unwrap();
                 }
-                let (_worker, mut captured) = attach_capture(&mut playback, signal);
-                let (output, mut render) = crate::output::test_backend_with_capacity(
-                    8_000,
-                    false,
-                    playback.source.layout(),
-                    73,
-                );
-                playback.output = output;
-                let weights = crate::channels::analysis_weights(playback.source.layout())[0];
-                let mut taps = Vec::new();
-                for step in 0..96 {
-                    playback.fill().unwrap();
-                    let submitted = taps.len();
-                    taps.extend(captured.pop_iter());
-                    let count = taps.len() - submitted;
-                    assert!(count <= 73, "tap must follow finite output admission");
-                    if count != 0 {
-                        let mut audible = vec![0.0; count];
-                        render(&mut audible, step * 10);
-                        for (index, (tap, sample)) in
-                            taps[submitted..].iter().zip(audible).enumerate()
-                        {
-                            let source_frame = guard as usize + submitted + index;
-                            let selected = if signal == VisualizationSignal::Before {
-                                [0.25, 0.5, 0.75][source_frame / 512]
-                            } else {
-                                sample
-                            };
-                            for (actual, weight) in tap.samples.into_iter().zip(weights) {
-                                assert!((actual - selected * weight).abs() < 2e-6);
-                            }
-                        }
-                    }
-                    if playback.eof && playback.offset_frames == playback.pending.len() {
-                        break;
-                    }
-                }
-                assert!(playback.eof);
-                assert_eq!(taps.len(), published as usize);
-                let gaps: Vec<_> = taps
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, frame)| frame.gap.then_some(index))
-                    .collect();
+                let gain = if processing == 1 {
+                    10.0_f32.powf(6.0 / 20.0)
+                } else {
+                    1.0
+                };
+                let gaps = drain_mono_admissions(&mut playback, signal, 96, false, |index| {
+                    let original = [0.25, 0.5, 0.75][(guard as usize + index) / 512];
+                    (original, original * gain)
+                });
+                assert_eq!(playback.output.submitted(), published);
                 let mut expected = if processing == 2 { vec![] } else { vec![0] };
                 if guard < 1024 {
                     expected.push(1024 - guard as usize);
@@ -2822,14 +2785,7 @@ pub(super) mod tests {
     fn before_pcm_stays_continuous_across_monitor_eq_bypass_roundtrip() {
         let file = pcm_samples(24_000);
         let (mut playback, _) = test_playback_selected(file.path(), None);
-        let worker = Arc::new(PcmControl::new().unwrap());
-        worker.reset(8_000, playback.source.layout());
-        worker.set_playback_active(true);
-        worker.set_enabled(true);
-        let (producer, mut captured) =
-            PcmProducer::capture_for_test(&worker, playback.source.layout());
-        playback.visualization.producer = Some(producer);
-        playback.set_signal(VisualizationSignal::Before);
+        let (_worker, mut captured) = attach_capture(&mut playback, VisualizationSignal::Before);
         let (output, mut render) =
             crate::output::test_backend_with_capacity(8_000, false, playback.source.layout(), 512);
         playback.output = output;
@@ -2905,13 +2861,7 @@ pub(super) mod tests {
         for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
             for volume in [0.0, 0.25, 1.0] {
                 let (mut playback, mut render) = test_playback_selected(file.path(), None);
-                let worker = Arc::new(PcmControl::new().unwrap());
-                worker.set_playback_active(true);
-                worker.set_enabled(true);
-                let (producer, mut captured) =
-                    PcmProducer::capture_for_test(&worker, playback.source.layout());
-                playback.visualization.producer = Some(producer);
-                playback.set_signal(signal);
+                let (_worker, mut captured) = attach_capture(&mut playback, signal);
                 playback.set_equalizer(&config).unwrap();
                 playback.set_volume(volume);
                 playback.fill().unwrap();
@@ -3104,10 +3054,12 @@ pub(super) mod tests {
             GraphEdge, GraphNode, GraphNodeKind, GraphPort,
         };
         for frames in [1, 7, 117, 511] {
-            let mut file = pcm_level(frames, 0);
-            file.seek(SeekFrom::Start(44 + u64::from(frames - 1) * 2))
-                .unwrap();
-            file.write_all(&24576_i16.to_le_bytes()).unwrap();
+            let file = crate::test_support::i16_wav_file(
+                "",
+                1,
+                8_000,
+                (0..frames).map(|index| if index + 1 == frames { 24_576 } else { 0 }),
+            );
             let config = DenoiseConfig {
                 mode: DenoiseMode::Off,
                 impulse: ImpulseConfig {

@@ -355,7 +355,9 @@ mod tests {
     /// and check that the tap saw exactly that audio at its output frames.
     fn play(stage: &mut SpeedStage, input: &[f32]) -> Vec<f32> {
         let layout = [Channel::FrontLeft, Channel::FrontRight];
-        let capacity = input.len() * 3 + RATE as usize;
+        // Room for the whole stretched segment, including the final drained frames.
+        let frames = input.len() / layout.len();
+        let capacity = ((frames as f64 / stage.speed().get()).ceil() as usize + 1) * layout.len();
         let (mut output, mut device) =
             crate::output::test_backend_with_capacity(RATE, false, &layout, capacity);
         let mut tapped = Vec::new();
@@ -411,13 +413,14 @@ mod tests {
 
     /// Dominant frequency from rising zero crossings over the settled middle.
     fn frequency(stereo: &[f32]) -> f64 {
-        let left: Vec<f32> = stereo.iter().step_by(2).copied().collect();
-        let middle = &left[left.len() / 4..left.len() * 3 / 4];
-        let rising = middle
-            .windows(2)
-            .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+        let frames = stereo.len() / 2;
+        let middle = &stereo[frames / 4 * 2..frames * 3 / 4 * 2];
+        let left = || middle.iter().step_by(2);
+        let rising = left()
+            .zip(left().skip(1))
+            .filter(|(a, b)| **a < 0.0 && **b >= 0.0)
             .count();
-        rising as f64 * f64::from(RATE) / middle.len() as f64
+        rising as f64 * f64::from(RATE) / (middle.len() / 2) as f64
     }
 
     #[test]
@@ -450,14 +453,9 @@ mod tests {
         let layout = [Channel::FrontLeft, Channel::FrontRight];
         let (mut output, _device) =
             crate::output::test_backend_with_capacity(RATE, false, &layout, 2048);
+        let warmup = tone(1000.0, 4000);
         let mut budget = output.vacant_frames();
-        while stage.push(
-            &mut output,
-            &tone(1000.0, 4000),
-            &mut budget,
-            &mut |_, _| {},
-        ) != 0
-        {}
+        while stage.push(&mut output, &warmup, &mut budget, &mut |_, _| {}) != 0 {}
         assert!(!stage.idle());
         stage.set(PlaybackSpeed::new(1.25).unwrap());
         stage.restart().unwrap();
