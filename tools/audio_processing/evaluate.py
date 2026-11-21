@@ -154,7 +154,7 @@ def main():
         import importlib.metadata
         from pystoi import stoi
         report["metric_packages"]={"pystoi":importlib.metadata.version("pystoi")}
-    for index,(name,source,reference,corpus_checksum,backing,diagnostic,source_identity) in enumerate(records):
+    def score_case(name, source, reference, corpus_checksum, backing, diagnostic, source_identity):
         evaluation_start=time.perf_counter()
         reference_pcm = load_identified(reference, dtype="float32", max_frames=None)
         input_pcm = reference_pcm if source.resolve() == reference.resolve() else load_identified(source, dtype="float32", max_frames=None)
@@ -212,8 +212,12 @@ def main():
                     "input":[float(stoi(reference_audio[:,channel],input_audio[:,channel],rate,extended=extended)) for channel in range(reference_audio.shape[1])],
                     "output":[float(stoi(reference_audio[:,channel],estimate[:,channel],rate,extended=extended)) for channel in range(reference_audio.shape[1])]}
         record["evaluation_wall_seconds"]=time.perf_counter()-evaluation_start
+        return record
+
+    for index, case in enumerate(records):
+        record = score_case(*case)
         report["runs"].append(record)
-        print(json.dumps({"case":name,"completed":index+1,"total":len(records),"si_sdr_gain_db":record["si_sdr_gain_db"]},allow_nan=False),flush=True)
+        print(json.dumps({"case":record["name"],"completed":index+1,"total":len(records),"si_sdr_gain_db":record["si_sdr_gain_db"]},allow_nan=False),flush=True)
     primary=[run for run in report["runs"] if not run["diagnostic_only"] and not run["name"].endswith("-clean")]
     gains=[gain for run in primary for gain in run["si_sdr_gain_db"]]
     gain_summary=score_summary(gains)
