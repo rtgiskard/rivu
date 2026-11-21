@@ -158,7 +158,8 @@ impl Core {
             ConfigMutation::Settings(_) => unreachable!(),
             ConfigMutation::Material(_) => unreachable!(),
         }
-        config.validate()?;
+        // Quick mutations leave the already-admitted processing graph intact.
+        config.validate_settings()?;
         if visualization_changed {
             self.engine.ensure_command_capacity(1)?;
         }
