@@ -239,12 +239,12 @@ impl CoreHandle {
     }
 
     pub(crate) async fn query_async(&self, query: Query) -> QueryResponse {
-        self.query_with_timeout(query, REPLY_TIMEOUT).await
+        self.submit_query(query, None, Some(REPLY_TIMEOUT)).await
     }
 
     /// IPC retained reads keep their physical slot until the owner replies.
     pub(crate) async fn query_retained(&self, query: Query) -> QueryResponse {
-        self.query_retained_with_ticket(query, None).await
+        self.submit_query(query, None, None).await
     }
 
     pub(crate) async fn query_retained_if_current(
@@ -252,13 +252,14 @@ impl CoreHandle {
         query: Query,
         ticket: QueryTicket,
     ) -> QueryResponse {
-        self.query_retained_with_ticket(query, Some(ticket)).await
+        self.submit_query(query, Some(ticket), None).await
     }
 
-    async fn query_retained_with_ticket(
+    async fn submit_query(
         &self,
         query: Query,
         ticket: Option<QueryTicket>,
+        reply_timeout: Option<Duration>,
     ) -> QueryResponse {
         let (tx, rx) = oneshot::channel();
         let request = Request {
@@ -266,9 +267,17 @@ impl CoreHandle {
             reply: Some(tx),
         };
         let response = match self.admit(request).await {
-            Ok(()) => rx
-                .await
-                .map_err(|error| format!("Core response unavailable: {error}")),
+            Ok(()) => match reply_timeout {
+                Some(duration) => match rivu_protocol::transport::timeout(duration, rx).await {
+                    Ok(result) => {
+                        result.map_err(|error| format!("Core response unavailable: {error}"))
+                    }
+                    Err(error) => Err(format!("Core response unavailable: {error}")),
+                },
+                None => rx
+                    .await
+                    .map_err(|error| format!("Core response unavailable: {error}")),
+            },
             Err(error) => Err(format!("Core unavailable: {error}")),
         };
         match response {
@@ -284,32 +293,6 @@ impl CoreHandle {
     /// Drive the runtime-neutral query port for synchronous test owners.
     pub fn query(&self, query: Query) -> QueryResponse {
         futures::executor::block_on(self.query_async(query))
-    }
-
-    async fn query_with_timeout(&self, query: Query, duration: Duration) -> QueryResponse {
-        let (tx, rx) = oneshot::channel();
-        let request = Request {
-            operation: Operation::Query {
-                query,
-                ticket: None,
-            },
-            reply: Some(tx),
-        };
-        let response = match self.admit(request).await {
-            Err(error) => Err(format!("Core unavailable: {error}")),
-            Ok(()) => match rivu_protocol::transport::timeout(duration, rx).await {
-                Ok(result) => result.map_err(|error| format!("Core response unavailable: {error}")),
-                Err(error) => Err(format!("Core response unavailable: {error}")),
-            },
-        };
-        match response {
-            Ok(CoreResponse::Query(response)) => response,
-            Ok(CoreResponse::Ack(_)) => unreachable!("query request returned Ack"),
-            Err(error) => QueryResponse {
-                revisions: self.state.read().query_revisions(),
-                result: Err(QueryError::Message(error)),
-            },
-        }
     }
 
     async fn admit(&self, request: Request) -> Result<()> {

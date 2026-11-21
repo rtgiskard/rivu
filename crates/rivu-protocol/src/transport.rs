@@ -209,6 +209,23 @@ async fn read_decoded_frame<S: AsyncRead + Unpin, T>(
     decode: impl FnOnce(&[u8]) -> Result<T>,
 ) -> Result<Result<T>> {
     let length = fill_frame(stream, limit, pending).await?;
+    Ok(consume_frame(pending, length, decode))
+}
+
+/// Decode and consume a frame whose complete body is already buffered.
+pub fn consume_request_frame(pending: &mut BytesMut, length: usize) -> Result<WireRequest> {
+    ensure!(
+        length <= MAX_REQUEST && pending.len().saturating_sub(4) >= length && pending.len() >= 4,
+        "Incomplete or oversized buffered IPC request"
+    );
+    consume_frame(pending, length, decode_request_frame)
+}
+
+fn consume_frame<T>(
+    pending: &mut BytesMut,
+    length: usize,
+    decode: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
     let consumed = 4 + length;
     let result = decode(&pending[4..consumed]);
     if pending.len() == consumed {
@@ -223,7 +240,7 @@ async fn read_decoded_frame<S: AsyncRead + Unpin, T>(
     } else {
         pending.advance(consumed);
     }
-    Ok(result)
+    result
 }
 
 async fn fill_frame<S: AsyncRead + Unpin>(
@@ -240,7 +257,7 @@ async fn fill_frame<S: AsyncRead + Unpin>(
             bail!("IPC connection closed while reading frame");
         }
     }
-    let length = crate::framing::decode_length(pending[..4].try_into().unwrap(), limit)?;
+    let length = decode_frame_length(pending[..4].try_into().unwrap(), limit)?;
     pending.reserve((4 + length).saturating_sub(pending.len()));
     while pending.len() < 4 + length {
         let need = 4 + length - pending.len();
@@ -254,7 +271,12 @@ async fn fill_frame<S: AsyncRead + Unpin>(
     Ok(length)
 }
 
-async fn read_into_pending<S: AsyncRead + Unpin>(
+pub fn decode_frame_length(prefix: [u8; 4], limit: usize) -> Result<usize> {
+    crate::framing::decode_length(prefix, limit).context("Reading IPC frame length")
+}
+
+/// Append at most `need` bytes, only after the socket read completes.
+pub async fn read_into_pending<S: AsyncRead + Unpin>(
     stream: &mut S,
     pending: &mut BytesMut,
     need: usize,
