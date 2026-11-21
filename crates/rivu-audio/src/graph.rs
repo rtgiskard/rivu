@@ -108,10 +108,10 @@ impl GraphSnapshot {
     }
 }
 
-struct PlannedNode {
+struct PlannedNode<'a> {
     port: GraphPort,
     inputs: Vec<Input>,
-    source: bool,
+    native: Option<NativeNodePlan<'a>>,
     needs_sum: bool,
     latency: usize,
     input_latency: usize,
@@ -127,7 +127,7 @@ pub struct GraphPlan<'a> {
     boundary: Option<GraphPort>,
     sample_rate: u32,
     channels: usize,
-    nodes: Vec<PlannedNode>,
+    nodes: Vec<PlannedNode<'a>>,
     state_bytes: usize,
     work_per_frame: u64,
 }
@@ -142,18 +142,10 @@ impl GraphPlan<'_> {
         let needs_sum = self.nodes.iter().any(|node| node.needs_sum);
         let mut nodes: Vec<Node> = Vec::with_capacity(self.nodes.len());
         for mut planned in self.nodes {
-            let processor = if planned.source {
-                None
-            } else {
-                Some(
-                    NativeNodePlan::new(
-                        &graph.node(planned.port.node)?.kind,
-                        self.sample_rate,
-                        self.channels,
-                    )?
-                    .prepare(None, GRAPH_BLOCK_FRAMES)?,
-                )
-            };
+            let processor = planned
+                .native
+                .map(|native| native.prepare(None, GRAPH_BLOCK_FRAMES))
+                .transpose()?;
             for input in &mut planned.inputs {
                 input.delay = DelayLine::new(
                     planned.input_latency - nodes[input.node].latency,
@@ -327,7 +319,7 @@ impl GraphRunner {
         let mut ordered = Vec::new();
         visit(graph, target, boundary, &mut BTreeSet::new(), &mut ordered)?;
         let mut indices: BTreeMap<GraphPort, usize> = BTreeMap::new();
-        let mut nodes: Vec<PlannedNode> = Vec::with_capacity(ordered.len());
+        let mut nodes: Vec<PlannedNode<'a>> = Vec::with_capacity(ordered.len());
         let mut state_bytes = 0usize;
         let mut work_per_frame = 0u64;
         let mut has_sum = false;
@@ -440,7 +432,7 @@ impl GraphRunner {
             nodes.push(PlannedNode {
                 port,
                 inputs,
-                source: is_source,
+                native,
                 needs_sum,
                 latency,
                 input_latency: upstream_latency,
