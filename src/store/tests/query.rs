@@ -337,6 +337,21 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
         )
         .unwrap();
     assert_eq!(lookup, [queue_matches[0].clone(), queue_matches[4].clone()]);
+    for row in &queue_matches {
+        assert_eq!(
+            store
+                .queue_entries(Some("needle"), &[row.id])
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(row)
+        );
+    }
+    assert!(
+        store
+            .queue_entries(Some("needle"), &[hidden_queue])
+            .unwrap()
+            .is_empty()
+    );
     let original_entries = store.playlist_entries_page(playlist, None, 0, 20).unwrap();
     let hidden_entry = original_entries.rows[0].id;
     let lookup = store
@@ -360,6 +375,24 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
             (entry_matches[0].id, 1, 0, 6),
             (entry_matches[3].id, 5, 3, 6)
         ]
+    );
+    for row in &entry_matches {
+        let single = store
+            .playlist_entry_locations(playlist, Some("needle"), &[row.id])
+            .unwrap();
+        let [located] = single.as_slice() else {
+            panic!("Expected exactly one matching playlist entry");
+        };
+        assert_eq!(
+            (located.id, located.position, located.offset, located.total),
+            (row.id, row.position, row.offset, 6)
+        );
+    }
+    assert!(
+        store
+            .playlist_entry_locations(playlist, Some("needle"), &[hidden_entry])
+            .unwrap()
+            .is_empty()
     );
     assert!(
         store

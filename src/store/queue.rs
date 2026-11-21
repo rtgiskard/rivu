@@ -282,8 +282,29 @@ impl Store {
         let query = search_query(query);
         // A target's rank only depends on the prefix through its position.
         // Read the bounded ID set by rowid, not by scanning playlist_order.
-        let sql = if query.is_some() {
-            format!(
+        let encoded;
+        let single_id;
+        let (sql, identity): (_, &dyn rusqlite::ToSql) = if let (Some(_), [id]) = (&query, ids) {
+            let Ok(id) = i64::try_from(*id) else {
+                return Ok(Vec::new());
+            };
+            single_id = id;
+            let filter = search_filter!("t", "?2");
+            (
+                format!(
+                    "SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},
+                    (SELECT COUNT(*) FROM playlist_entries p JOIN tracks t ON t.id=p.track_id
+                     WHERE p.playlist_id=0 AND p.position<=q.position
+                       AND (p.position,p.id)<(q.position,q.id) AND {filter}) AS match_offset
+                 FROM playlist_entries q JOIN tracks t ON t.id=q.track_id
+                 WHERE q.id=?1 AND q.playlist_id=0 AND {filter}"
+                ),
+                &single_id,
+            )
+        } else {
+            encoded = serde_json::to_string(ids)?;
+            let sql = if query.is_some() {
+                format!(
                 "WITH matched AS (
                     SELECT q.id,q.track_id,q.position,row_number() OVER (ORDER BY q.position,q.id)-1 AS match_offset
                     FROM playlist_entries q JOIN tracks t ON t.id=q.track_id
@@ -296,14 +317,16 @@ impl Store {
                  WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id",
                 search_filter!("t", "?2")
             )
-        } else {
-            format!(
-                "SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q NOT INDEXED JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
-            )
+            } else {
+                format!(
+                    "SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q NOT INDEXED JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
+                )
+            };
+            (sql, &encoded)
         };
         let mut statement = self.conn.prepare_cached(&sql)?;
         Ok(statement
-            .query_map(params![serde_json::to_string(ids)?, query], |row| {
+            .query_map(params![identity, query], |row| {
                 let mut result = queue_row(row)?;
                 result.offset = row.get::<_, i64>("match_offset")? as usize;
                 Ok(result)

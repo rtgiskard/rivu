@@ -692,7 +692,16 @@ impl Store {
             }
         });
         let sql = format!(
-            "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}), children AS {DIRECTORY_CHILDREN}, ranked AS (SELECT kind,child,track_id,row_number() OVER (ORDER BY kind,child,track_id)-1 AS position,COUNT(*) OVER () AS total FROM children) SELECT position,total FROM ranked WHERE (?5 IS NOT NULL AND kind=0 AND child=?5) OR (?5 IS NULL AND kind=1 AND track_id=?6)"
+            "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}),
+             children AS {DIRECTORY_CHILDREN},
+             target AS (SELECT CASE WHEN ?5 IS NULL THEN 1 ELSE 0 END AS kind,
+                               COALESCE(?5,(SELECT path FROM tracks WHERE id=?6)) AS child)
+             SELECT COUNT(*) FILTER (WHERE (c.kind,c.child)<(t.kind,t.child)
+                       OR (c.kind=t.kind AND c.child=t.child AND t.kind=1 AND c.track_id<?6)),
+                    COUNT(*)
+             FROM target t CROSS JOIN children c
+             HAVING COUNT(*) FILTER (WHERE c.kind=t.kind AND c.child=t.child
+                                      AND (t.kind=0 OR c.track_id=?6))>0"
         );
         let target = child.as_deref().and_then(Path::to_str);
         let location = self

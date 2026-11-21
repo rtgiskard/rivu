@@ -79,11 +79,29 @@ impl Store {
         }
         let query = search_query(query);
         let total = self.playlist_match_count(playlist_id, query.as_deref())?;
-        let ids = serde_json::to_string(entry_ids)?;
-        // Include the full ranking prefix, but nothing after the last requested
-        // position. Fetch that bound by rowid rather than scanning playlist_order.
-        let sql = if query.is_some() {
-            concat!(
+        let encoded;
+        let (sql, identity): (_, &dyn rusqlite::ToSql) = if let (Some(_), [id]) =
+            (&query, entry_ids)
+        {
+            (
+                concat!(
+                    "SELECT e.id,e.track_id,e.position,
+                    (SELECT COUNT(*) FROM playlist_entries p JOIN tracks t ON t.id=p.track_id
+                     WHERE p.playlist_id=?1 AND p.position<=e.position
+                       AND (p.position,p.id)<(e.position,e.id) AND ",
+                    search_filter!("t", "?3"),
+                    ")
+                 FROM playlist_entries e JOIN tracks t ON t.id=e.track_id
+                 WHERE e.id=?2 AND e.playlist_id=?1 AND ",
+                    search_filter!("t", "?3"),
+                ),
+                id,
+            )
+        } else {
+            encoded = serde_json::to_string(entry_ids)?;
+            // Share the prefix through the last requested position across targets.
+            let sql = if query.is_some() {
+                concat!(
                 "WITH matched AS (
                     SELECT e.id,e.track_id,e.position,row_number() OVER (ORDER BY e.position,e.id)-1 AS offset
                     FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id
@@ -95,12 +113,14 @@ impl Store {
                 ") SELECT id,track_id,position,offset FROM matched
                  WHERE id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
             )
-        } else {
-            "SELECT id,track_id,position,position AS offset FROM playlist_entries NOT INDEXED WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND ?3 IS NULL ORDER BY position,id"
+            } else {
+                "SELECT id,track_id,position,position AS offset FROM playlist_entries NOT INDEXED WHERE playlist_id=?1 AND id IN (SELECT value FROM json_each(?2)) AND ?3 IS NULL ORDER BY position,id"
+            };
+            (sql, &encoded)
         };
         let mut statement = self.conn.prepare_cached(sql)?;
         Ok(statement
-            .query_map(params![playlist_id, ids, query], |row| {
+            .query_map(params![playlist_id, identity, query], |row| {
                 Ok(PlaylistEntryLocation {
                     id: row.get(0)?,
                     playlist_id,
