@@ -1,10 +1,11 @@
 use super::AppHandle;
 use anyhow::{Context, Result};
 use futures::{FutureExt, channel::oneshot};
+use rivu_gui::ActivationOutcome;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// One service-owned launcher, with one queued intent and one owned child.
-/// Child exit and desktop registration are event-driven; no PID polling.
+/// Child exit and desktop invalidation are event-driven; no PID polling.
 pub(crate) struct DesktopLauncher {
     stop: Option<oneshot::Sender<()>>,
     worker: Option<async_executor::Task<()>>,
@@ -14,7 +15,7 @@ enum Event {
     Stop,
     Exited(std::io::Result<std::process::ExitStatus>),
     Timeout,
-    Registered,
+    DesktopChanged,
     Activate,
 }
 
@@ -28,7 +29,7 @@ impl DesktopLauncher {
         let (stop, stopped) = oneshot::channel();
         let worker = executor.spawn(async move {
             let mut stopped = stopped.fuse();
-            let changes = app.subscribe_desktop();
+            let changes = app.subscribe_desktop_changes();
             let mut child: Option<async_process::Child> = None;
             let mut pending = false;
             let mut deadline = None;
@@ -51,7 +52,7 @@ impl DesktopLauncher {
                         _ = stopped => Event::Stop,
                         result = exited => Event::Exited(result),
                         _ = timeout => Event::Timeout,
-                        event = changes.recv().fuse() => if event.is_ok() { Event::Registered } else { Event::Stop },
+                        event = changes.recv().fuse() => if event.is_ok() { Event::DesktopChanged } else { Event::Stop },
                         intent = app.activation_requests.recv().fuse() => if intent.is_ok() { Event::Activate } else { Event::Stop },
                     }
                 };
@@ -76,8 +77,8 @@ impl DesktopLauncher {
                         pending = false;
                         tracing::warn!("desktop_startup_timed_out");
                     },
-                    Event::Registered | Event::Activate => {
-                        if matches!(event, Event::Registered) && !pending { continue; }
+                    Event::DesktopChanged | Event::Activate => {
+                        if matches!(event, Event::DesktopChanged) && !pending { continue; }
                         if app.is_shutting_down() { break; }
                         let raised = rivu_gui::raise_async(&app.data_dir, instance_id, deadline).fuse();
                         futures::pin_mut!(raised);
@@ -86,11 +87,21 @@ impl DesktopLauncher {
                             result = raised => result,
                         };
                         if app.is_shutting_down() { break; }
-                        if matches!(result, Ok(true)) {
-                            pending = false;
-                            deadline = None;
-                            child = None;
-                            continue;
+                        match result {
+                            Ok(ActivationOutcome::Raised) => {
+                                pending = false;
+                                deadline = None;
+                                child = None;
+                                continue;
+                            }
+                            Ok(ActivationOutcome::Absent | ActivationOutcome::Retired) => {}
+                            Err(error) => {
+                                if child.is_none() {
+                                    pending = false;
+                                    tracing::warn!(%error, "desktop_activation_failed");
+                                }
+                                continue;
+                            }
                         }
                         pending = true;
                         if child.is_none() {

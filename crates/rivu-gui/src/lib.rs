@@ -7,7 +7,7 @@ mod projection;
 mod test_support;
 mod transport;
 
-pub use desktop::raise_async;
+pub use desktop::{ActivationOutcome, raise_async};
 
 /// Executable build metadata displayed by the standalone desktop.
 #[derive(Clone, Copy, Debug)]
