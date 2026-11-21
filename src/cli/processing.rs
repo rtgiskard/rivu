@@ -456,6 +456,33 @@ mod tests {
     }
 
     #[test]
+    fn verbose_processing_source_shows_localized_graph_mode() {
+        let cli = Localizer::for_cli("zh-CN");
+        for (mode, key) in [
+            (GraphExecutionMode::Auto, "processing-graph-auto-short"),
+            (GraphExecutionMode::Offline, "processing-graph-offline"),
+            (GraphExecutionMode::Realtime, "processing-graph-realtime"),
+            (GraphExecutionMode::Hybrid, "processing-graph-hybrid"),
+        ] {
+            let mut output = Vec::new();
+            write_processing_source(
+                &mut output,
+                &cli,
+                "core-processing-active-source",
+                8,
+                Some(rivu_protocol::model::ProcessingAudition {
+                    id: 91,
+                    output: None,
+                    mode: Some(mode),
+                }),
+            )
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert_eq!(output.trim_end().rsplit(" · ").next(), Some(cli.text(key)));
+        }
+    }
+
+    #[test]
     fn retained_graph_outputs_preserve_instance_reference_and_client_path() {
         let ProcessingGraphAction::Audition { id, node, port } =
             parse_graph_action(&["audition", "8:91", "7", "--port", "1"])
