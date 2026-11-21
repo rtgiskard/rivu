@@ -29,10 +29,10 @@ import sys
 sys.dont_write_bytecode = True
 if __package__:
     from . import models
-    from .common import RUNTIME_FILES, check_packages, hash_bundle_files, read_json, require, validate_artifacts, write_bundle_manifest
+    from .common import RUNTIME_FILES, check_packages, hash_bundle_files, read_json, require, validate_artifact_manifest, validate_artifacts, write_bundle_manifest
 else:
     import models
-    from common import RUNTIME_FILES, check_packages, hash_bundle_files, read_json, require, validate_artifacts, write_bundle_manifest
+    from common import RUNTIME_FILES, check_packages, hash_bundle_files, read_json, require, validate_artifact_manifest, validate_artifacts, write_bundle_manifest
 
 ENVIRONMENTS = {
     "default": ("3.12", ["torch>=2.13", "torchaudio>=2.11"], [
@@ -171,17 +171,18 @@ def reprovision(original, target, manifest):
 def provision(args, parser):
     original = args.manifest.resolve()
     raw = read_json(original)
-    manifest = validate_artifacts(original, raw["operation"])
     target = args.directory.resolve()
-    native = manifest.get("backend") == "onnx"
-    if not native:
-        interpreter = args.interpreter or Path(manifest.get("runtime", {}).get("interpreter", sys.executable))
+    native = raw.get("backend") == "onnx"
+    if not native and not args.populate_new and not args.provision_in_process:
+        interpreter = args.interpreter or Path(raw.get("runtime", {}).get("interpreter", sys.executable))
         if not interpreter.is_absolute() or not interpreter.is_file():
             parser.error("provisioning requires an existing absolute Python interpreter")
-        if not args.populate_new and not args.provision_in_process and os.path.abspath(sys.executable) != str(interpreter):
+        if os.path.abspath(sys.executable) != str(interpreter):
             return json.loads(subprocess.check_output([
                 str(interpreter), str(Path(__file__).resolve()), "--manifest", str(original),
                 "--directory", str(target), "--provision-in-process"], text=True))
+    manifest = validate_artifact_manifest(original, raw, raw["operation"])
+    if not native:
         check_packages(manifest)
     if args.populate_new:
         if native or target != original.parent or (target / "runtime").exists():

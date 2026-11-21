@@ -100,7 +100,7 @@ def _artifact_path(base, name):
     return candidate
 
 
-def _validate_artifacts(path, manifest, operation):
+def validate_artifact_manifest(path, manifest, operation):
     _validate_artifact_metadata(manifest, operation)
     base = path.parent.resolve()
     for name, checksum in manifest["files"].items():
@@ -111,7 +111,7 @@ def _validate_artifacts(path, manifest, operation):
 
 def validate_artifacts(path, operation):
     """Validate model construction inputs, never authorize inference."""
-    return _validate_artifacts(path, read_json(path), operation)
+    return validate_artifact_manifest(path, read_json(path), operation)
 
 
 def _validate_runtime_metadata(path, manifest):
@@ -147,7 +147,7 @@ def _validate_runtime_metadata(path, manifest):
 
 
 def _validate_manifest(path, manifest, operation):
-    _validate_artifacts(path, manifest, operation)
+    validate_artifact_manifest(path, manifest, operation)
     interpreter = _validate_runtime_metadata(path, manifest)
     require(manifest["runtime"].get("interpreter_sha256") == digest(interpreter), "model_runtime", "provisioned interpreter SHA256 mismatch")
     return manifest
