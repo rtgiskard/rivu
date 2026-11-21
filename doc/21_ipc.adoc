@@ -175,10 +175,9 @@ while the wait is pending is rejected instead of queued. A framing failure drops
 the pending query reply receiver and revokes the read through
 <<retained-read-cancellation,cooperative cancellation>>, never replaying SQL.
 
-Query waits share a cooperative budget of 32 read-ahead or cancellation steps,
-including runs of already-buffered `CancelRead` frames. They yield when that
-budget is exhausted and check query completion and shutdown between batches, so
-continuously ready cancellation traffic cannot monopolize the shared executor.
+Query waits share a cooperative budget of 32 read-ahead or cancellation steps.
+They yield when that budget is exhausted and check completion and shutdown
+between batches, so continuously ready traffic cannot monopolize the shared executor.
 Cancellation still revokes only the matching retained read and keeps its physical
 reply slot until that read retires; yielding does not admit a replacement query.
 
@@ -221,9 +220,10 @@ frames directly into owned messages.
 
 Send buffers above 256 KiB are released after write/flush; receive buffers above
 that capacity are released once pending bytes drain. Smaller buffers are reused.
-Pipelined tails and cancelled partial reads keep their bytes until consumed or
-disconnected. These are framing-storage bounds, not decoded-message or RSS limits;
-bulk transfers can allocate again and allocator pages may remain resident.
+The main request reader does not read past the current frame. An interrupted
+partial read keeps its bytes and deadline. These bounds apply to framing storage,
+not decoded messages or RSS; bulk transfers may allocate again, and allocator
+pages may remain resident.
 
 [[session-handshake]]
 === Session handshake
