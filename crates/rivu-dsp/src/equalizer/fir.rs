@@ -33,10 +33,8 @@ pub struct FirEqualizer {
     kernels: Vec<Complex<f32>>,
     channel_kernels: Vec<usize>,
     histories: Vec<Complex<f32>>,
-    input: Vec<f32>,
     output: Vec<f32>,
     overlap: Vec<f32>,
-    work: Vec<Complex<f32>>,
     sum: Vec<Complex<f32>>,
     scratch: Vec<Complex<f32>>,
     forward: Option<Arc<dyn Fft<f32>>>,
@@ -71,7 +69,7 @@ impl FirEqualizer {
         let partitions = if bypass { 0 } else { taps.div_ceil(PARTITION) };
         let spectra_len = channels * partitions * FFT_SIZE;
         // Share immutable spectra only for identical ordered effective filters.
-        // Histories, input, overlap, and output remain channel-local.
+        // Histories, overlap, and output remain channel-local.
         let mut representatives = [0; MAX_CHANNELS];
         let mut banks = 0;
         let mut channel_kernels = Vec::with_capacity(if bypass { 0 } else { channels });
@@ -99,10 +97,8 @@ impl FirEqualizer {
             kernels: vec![Complex::default(); banks * partitions * FFT_SIZE],
             channel_kernels,
             histories: vec![Complex::default(); spectra_len],
-            input: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
             output: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
             overlap: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
-            work: vec![Complex::default(); if bypass { 0 } else { FFT_SIZE }],
             sum: vec![Complex::default(); if bypass { 0 } else { FFT_SIZE }],
             scratch: vec![Complex::default(); scratch_len],
             forward,
@@ -112,23 +108,25 @@ impl FirEqualizer {
             KernelDesigner::with_cached(sample_rate, taps, |designer| -> Result<()> {
                 for (bank, &channel) in representatives[..banks].iter().enumerate() {
                     let impulse = designer.design(config, sample_rate, channels, channel)?;
-                    for partition in 0..partitions {
-                        equalizer.work.fill(Complex::default());
-                        for (bin, &value) in equalizer
-                            .work
-                            .iter_mut()
-                            .zip(impulse[partition * PARTITION..].iter().take(PARTITION))
-                        {
+                    let bank_start = bank * partitions * FFT_SIZE;
+                    let kernels =
+                        &mut equalizer.kernels[bank_start..bank_start + partitions * FFT_SIZE];
+                    for (kernel, coefficients) in kernels
+                        .as_chunks_mut::<FFT_SIZE>()
+                        .0
+                        .iter_mut()
+                        .zip(impulse.chunks(PARTITION))
+                    {
+                        // Each kernel starts zeroed, including its FFT padding.
+                        for (bin, &value) in kernel.iter_mut().zip(coefficients) {
                             bin.re = value;
                         }
                         equalizer
                             .forward
                             .as_ref()
                             .expect("active FIR has FFT plans")
-                            .process_with_scratch(&mut equalizer.work, &mut equalizer.scratch);
-                        ensure!(finite_complex(&equalizer.work), "FIR kernel FFT overflow");
-                        let start = (bank * partitions + partition) * FFT_SIZE;
-                        equalizer.kernels[start..start + FFT_SIZE].copy_from_slice(&equalizer.work);
+                            .process_with_scratch(kernel, &mut equalizer.scratch);
+                        ensure!(finite_complex(kernel), "FIR kernel FFT overflow");
                     }
                 }
                 Ok(())
@@ -217,7 +215,6 @@ impl FirEqualizer {
         self.position = 0;
         self.history_position = 0;
         self.histories.fill(Complex::default());
-        self.input.fill(0.0);
         self.output.fill(0.0);
         self.overlap.fill(0.0);
     }
@@ -241,9 +238,10 @@ impl FirEqualizer {
         );
         for frame in samples.chunks_exact_mut(self.channels) {
             for (channel, value) in frame.iter_mut().enumerate() {
-                let index = channel * PARTITION + self.position;
-                self.input[index] = *value;
-                *value = self.output[index];
+                // The next write slot holds the partition that just aged out.
+                let start = (channel * self.partitions + self.history_position) * FFT_SIZE;
+                self.histories[start + self.position] = Complex::new(*value, 0.0);
+                *value = self.output[channel * PARTITION + self.position];
             }
             self.position += 1;
             if self.position == PARTITION {
@@ -259,20 +257,14 @@ impl FirEqualizer {
 
     fn convolve_partition(&mut self) -> Result<()> {
         for channel in 0..self.channels {
-            for (bin, &sample) in self.work[..PARTITION]
-                .iter_mut()
-                .zip(&self.input[channel * PARTITION..(channel + 1) * PARTITION])
-            {
-                *bin = Complex::new(sample, 0.0);
-            }
-            self.work[PARTITION..].fill(Complex::default());
+            let start = (channel * self.partitions + self.history_position) * FFT_SIZE;
+            let slot = &mut self.histories[start..start + FFT_SIZE];
+            slot[PARTITION..].fill(Complex::default());
             self.forward
                 .as_ref()
                 .expect("active FIR has FFT plans")
-                .process_with_scratch(&mut self.work, &mut self.scratch);
-            ensure!(finite_complex(&self.work), "FIR input FFT overflow");
-            let start = (channel * self.partitions + self.history_position) * FFT_SIZE;
-            self.histories[start..start + FFT_SIZE].copy_from_slice(&self.work);
+                .process_with_scratch(slot, &mut self.scratch);
+            ensure!(finite_complex(slot), "FIR input FFT overflow");
             self.sum.fill(Complex::default());
             for partition in 0..self.partitions {
                 let history =
@@ -666,16 +658,18 @@ mod tests {
         };
         let mut fir = FirEqualizer::new(&config, 48_000, 2, 513).unwrap();
         let delay = fir.latency_frames();
-        let mut input = vec![0.0; (fir.tail_frames() + 4) * 2];
-        input[0] = 0.75;
-        input[1] = -0.5;
+        // Cross ring wraps with different channel data and leave a partial
+        // partition staged when resetting.
+        let source = |frame: usize| {
+            [
+                if frame.is_multiple_of(509) { 0.75 } else { 0.0 },
+                if frame.is_multiple_of(257) { -0.5 } else { 0.0 },
+            ]
+        };
+        let mut input: Vec<_> = (0..(8 * PARTITION + 17)).flat_map(source).collect();
         fir.process_interleaved(&mut input).unwrap();
         for (frame, pair) in input.as_chunks::<2>().0.iter().enumerate() {
-            let expected = if frame == delay {
-                [0.75, -0.5]
-            } else {
-                [0.0, 0.0]
-            };
+            let expected = frame.checked_sub(delay).map_or([0.0; 2], source);
             assert!((pair[0] - expected[0]).abs() < 2e-6);
             assert!((pair[1] - expected[1]).abs() < 2e-6);
         }
@@ -934,10 +928,8 @@ mod tests {
         assert!(fir.forward.is_none() && fir.inverse.is_none());
         let capacity = fir.kernels.capacity()
             + fir.histories.capacity()
-            + fir.input.capacity()
             + fir.output.capacity()
             + fir.overlap.capacity()
-            + fir.work.capacity()
             + fir.sum.capacity()
             + fir.scratch.capacity();
         assert_eq!(capacity, 0);
