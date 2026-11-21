@@ -1009,13 +1009,48 @@ mod tests {
         assert_eq!(output.buffer(), b"[]\n");
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
-    fn queue_listing_rejects_a_changed_initial_current_snapshot() {
+    fn queue_listing_rejects_a_content_edit_before_the_first_batch() {
+        use rivu::test_support::{
+            catalog::seed_playlist_targets, frontend::FrontendFixture, ipc::socket_test_directory,
+        };
+        use rivu_protocol::model::{Command, Query};
+
+        let directory = socket_test_directory();
+        let path = directory.path();
+        seed_playlist_targets(path, 0).unwrap();
+        let _service = FrontendFixture::start(path, &path.join("config.toml")).unwrap();
         let i18n = rivu_presentation::i18n::Localizer::for_cli("en-US");
-        super::validate_queue_listing(&i18n, 7, 7).unwrap();
-        // Current-occurrence changes advance the queue token even if the row
-        // order is unchanged, so the first batch must honor the initial token.
-        let error = super::validate_queue_listing(&i18n, 7, 8).unwrap_err();
+        super::list_queue(&i18n, path, false).unwrap();
+        let mut session = rivu_client::client_session(path);
+        let initial = session
+            .get_state(super::StateSections {
+                queue: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .queue
+            .unwrap()
+            .revision;
+        let reply = session
+            .request_command(Command::Enqueue { track_ids: vec![1] })
+            .unwrap();
+        assert!(reply.is_success());
+        let response = session
+            .query(Query::QueueBatch {
+                query: None,
+                after: None,
+                limit: 1,
+                expected: None,
+            })
+            .unwrap();
+        let super::ViewResponse::QueueBatch(batch) = response.result.unwrap() else {
+            panic!("expected a queue batch");
+        };
+        assert_eq!(batch.rows[0].track.id, 1);
+        let error =
+            super::validate_queue_listing(&i18n, initial, response.revisions.queue).unwrap_err();
         assert_eq!(error.to_string(), i18n.text("core-listing-changed"));
     }
 
