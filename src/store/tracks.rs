@@ -1390,15 +1390,7 @@ impl Store {
         let removed = removal.ids.len();
         let tracks =
             (removed <= rivu_protocol::model::MAX_METADATA_SCOPES).then(|| removal.ids.to_vec());
-        let history = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) AND last_played IS NOT NULL)",
-            [&removal.encoded], |row| row.get(0),
-        )?;
-        let duplicate_groups = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
-            [&removal.encoded], |row| row.get(0),
-        )?;
-        let albums = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE id IN (SELECT value FROM json_each(?1)) AND {})", super::albums::eligible_member("t")), [&removal.encoded], |row| row.get(0))?;
+        let (history, duplicate_groups, albums) = removal_domains(&tx, Some(&removal.encoded))?;
         let (playlists, queue) = self.remove_track_rows(&tx, removal)?;
         tx.commit()?;
         Ok(TrackRemovalImpact {
@@ -1434,24 +1426,20 @@ impl Store {
     pub fn remove_missing_tracks(&self) -> Result<TrackRemovalImpact> {
         let tx = self.conn.unchecked_transaction()?;
         let tracks = bounded_metadata_ids(&tx, "SELECT id FROM tracks WHERE missing=1", [])?;
-        let history = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tracks WHERE missing=1 AND last_played IS NOT NULL)",
-            [],
-            |row| row.get(0),
-        )?;
-        let duplicate_groups = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tracks WHERE missing=1 AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
-            [], |row| row.get(0),
-        )?;
-        let albums = tx.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE missing=1 AND {})",
-                super::albums::eligible_member("t")
-            ),
-            [],
-            |row| row.get(0),
-        )?;
-        let (removed, playlists, queue) = remove_track_references(&tx, None)?;
+        if tracks.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(TrackRemovalImpact {
+                removed: 0,
+                queue: false,
+                albums: false,
+                history: false,
+                tracks,
+                playlists: Vec::new(),
+                duplicate_groups: false,
+            });
+        }
+        let encoded = tracks.as_ref().map(serde_json::to_string).transpose()?;
+        let (history, duplicate_groups, albums) = removal_domains(&tx, encoded.as_deref())?;
+        let (removed, playlists, queue) = remove_track_references(&tx, encoded.as_deref())?;
         tx.commit()?;
         let mut cache = self.track_cache.borrow_mut();
         if let Some(ids) = &tracks {
@@ -1617,6 +1605,49 @@ pub(super) fn validate_encoded_track_ids(conn: &Connection, ids: &str) -> Result
         bail!("Track {id} does not exist");
     }
     Ok(())
+}
+
+fn removal_domains(tx: &Transaction<'_>, encoded_ids: Option<&str>) -> Result<(bool, bool, bool)> {
+    macro_rules! queries {
+        ($selection:literal) => {
+            (
+                concat!(
+                    "SELECT EXISTS(SELECT 1 FROM tracks WHERE ",
+                    $selection,
+                    " AND last_played IS NOT NULL)"
+                ),
+                concat!(
+                    "SELECT EXISTS(SELECT 1 FROM tracks WHERE ",
+                    $selection,
+                    " AND cue_sheet IS NULL AND fingerprint IS NOT NULL)"
+                ),
+                format!(
+                    concat!(
+                        "SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE ",
+                        $selection,
+                        " AND {})"
+                    ),
+                    super::albums::eligible_member("t")
+                ),
+            )
+        };
+    }
+    let (history, duplicates, albums) = if encoded_ids.is_some() {
+        queries!("id IN (SELECT value FROM json_each(?1))")
+    } else {
+        queries!("missing=1")
+    };
+    let parameters = params![encoded_ids];
+    let parameters = if encoded_ids.is_some() {
+        parameters
+    } else {
+        &[]
+    };
+    Ok((
+        tx.query_row(history, parameters, |row| row.get(0))?,
+        tx.query_row(duplicates, parameters, |row| row.get(0))?,
+        tx.query_row(&albums, parameters, |row| row.get(0))?,
+    ))
 }
 
 /// Select IDs in SQL so missing cleanup never materializes the catalog in Rust.
