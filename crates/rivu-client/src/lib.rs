@@ -525,8 +525,12 @@ mod tests {
     use super::*;
     use rivu_protocol::{
         model::Command,
-        transport::{decode_request_frame, encode_response_frame_into},
-        wire::{HelloResponse, MAX_REQUEST, wire_state},
+        test_support::{
+            complete_test_handshake, complete_test_handshake_for_instance, read_test_command,
+            read_test_request, reply_test_ack, write_test_response,
+        },
+        transport::encode_response_frame_into,
+        wire::{HelloResponse, wire_state},
     };
     use std::sync::{Condvar, Mutex};
 
@@ -594,64 +598,6 @@ mod tests {
             std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(".cache");
         std::fs::create_dir_all(&cache).unwrap();
         tempfile::tempdir_in(cache).unwrap()
-    }
-
-    fn read_test_request(stream: &mut std::os::unix::net::UnixStream) -> WireRequest {
-        use std::io::Read;
-        let mut prefix = [0; 4];
-        stream.read_exact(&mut prefix).unwrap();
-        let length = u32::from_le_bytes(prefix) as usize;
-        assert!(length <= MAX_REQUEST);
-        let mut body = vec![0; length];
-        stream.read_exact(&mut body).unwrap();
-        decode_request_frame(&body).unwrap()
-    }
-
-    fn write_test_response(stream: &mut std::os::unix::net::UnixStream, response: WireResponse) {
-        use std::io::Write;
-        let mut frame = Vec::new();
-        encode_response_frame_into(&response, &mut frame).unwrap();
-        stream.write_all(&frame).unwrap();
-    }
-
-    fn complete_test_handshake(stream: &mut std::os::unix::net::UnixStream) {
-        complete_test_handshake_for_instance(stream, 1);
-    }
-
-    fn complete_test_handshake_for_instance(
-        stream: &mut std::os::unix::net::UnixStream,
-        instance_id: u32,
-    ) {
-        let timeout = Some(std::time::Duration::from_secs(5));
-        stream.set_read_timeout(timeout).unwrap();
-        stream.set_write_timeout(timeout).unwrap();
-        assert!(matches!(read_test_request(stream), WireRequest::Hello(_)));
-        write_test_response(
-            stream,
-            WireResponse::Hello(HelloResponse {
-                instance_id: instance_id.to_le_bytes(),
-                state: wire_state(StateResponse {
-                    revisions: StateRevisions::default(),
-                    playback: None,
-                    queue: None,
-                    library: None,
-                    system: None,
-                    configuration: None,
-                    processing: None,
-                }),
-            }),
-        );
-    }
-
-    fn read_test_command(stream: &mut std::os::unix::net::UnixStream) -> Command {
-        let WireRequest::Command(command) = read_test_request(stream) else {
-            panic!("expected command")
-        };
-        Command::try_from(command).unwrap()
-    }
-
-    fn reply_test_ack(stream: &mut std::os::unix::net::UnixStream, ack: Ack) {
-        write_test_response(stream, WireResponse::Ack(ack));
     }
 
     #[test]
@@ -773,24 +719,68 @@ mod tests {
 
     #[test]
     fn session_cancellation_wakes_all_waiters_and_remains_cancelled() {
-        use std::{future::Future, task::Context};
+        use std::{
+            future::Future,
+            sync::atomic::AtomicUsize,
+            task::{Context, Wake, Waker},
+        };
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
 
         let stop = SessionCancellation::default();
         let clone = stop.clone();
         let mut first = Box::pin(stop.cancelled());
         let mut second = Box::pin(clone.cancelled());
-        let mut context = Context::from_waker(std::task::Waker::noop());
-        assert!(first.as_mut().poll(&mut context).is_pending());
-        assert!(second.as_mut().poll(&mut context).is_pending());
+        let first_wakes = Arc::new(WakeCount::default());
+        let second_wakes = Arc::new(WakeCount::default());
+        let first_waker = Waker::from(first_wakes.clone());
+        let second_waker = Waker::from(second_wakes.clone());
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&first_waker))
+                .is_pending()
+        );
+        assert!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&second_waker))
+                .is_pending()
+        );
+        assert_eq!(first_wakes.0.load(Ordering::SeqCst), 0);
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 0);
 
         clone.cancel();
         clone.cancel();
         assert!(stop.is_cancelled());
-        assert!(first.as_mut().poll(&mut context).is_ready());
-        assert!(second.as_mut().poll(&mut context).is_ready());
+        // Each registered observer is woken by cancel, not merely ready on a repoll.
+        assert_ne!(first_wakes.0.load(Ordering::SeqCst), 0);
+        assert_ne!(second_wakes.0.load(Ordering::SeqCst), 0);
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&first_waker))
+                .is_ready()
+        );
+        assert!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&second_waker))
+                .is_ready()
+        );
 
         // A waiter first polled after cancellation must not need another notify.
         let mut late = Box::pin(stop.cancelled());
+        let mut context = Context::from_waker(Waker::noop());
         assert!(late.as_mut().poll(&mut context).is_ready());
     }
 

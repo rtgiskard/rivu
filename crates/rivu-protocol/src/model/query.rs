@@ -542,8 +542,38 @@ mod tests {
                 offset: 0,
                 limit: 2,
             },
-            Query::QueuePage {
+            Query::TrackBatch {
                 query: None,
+                favorite: None,
+                missing: None,
+                after: None,
+                limit: 2,
+                expected: None,
+            },
+            Query::Track { track_id: 3 },
+            album_tracks(),
+            Query::DirectoryPage {
+                path: "/music".into(),
+                query: None,
+                favorite: None,
+                missing: None,
+                offset: 0,
+                limit: 2,
+            },
+            Query::OtherTracksPage {
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 2,
+            },
+            Query::LibraryRootPage {
+                path: "/music".into(),
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
                 offset: 0,
                 limit: 2,
             },
@@ -553,47 +583,113 @@ mod tests {
                 offset: 0,
                 limit: 2,
             },
-            Query::Track { track_id: 3 },
-            album_tracks(),
+            Query::PlaylistEntryBatch {
+                playlist_id: 7,
+                query: None,
+                after: None,
+                limit: 2,
+                expected: None,
+            },
+            Query::QueuePage {
+                query: None,
+                offset: 0,
+                limit: 2,
+            },
+            Query::QueueBatch {
+                query: None,
+                after: None,
+                limit: 2,
+                expected: None,
+            },
+            Query::QueueEntries {
+                query: None,
+                queue_ids: vec![1],
+            },
             Query::DuplicateMembers {
                 fingerprint: "hash".into(),
                 offset: 0,
                 limit: 2,
             },
+            Query::DuplicateMemberSelection {
+                fingerprint: "hash".into(),
+                track_ids: vec![1],
+            },
         ] {
+            assert_ne!(query.stamp(previous), query.stamp(next), "{query:?}");
             let change = impact(&query, previous, next);
             assert!(change.rows_changed() && change.payload_changed, "{query:?}");
             assert!(
                 !change.identity_changed && !change.coordinates_changed,
                 "{query:?}"
             );
-            assert_eq!(change, impact(&query, next, previous));
+            assert_eq!(change, impact(&query, next, previous), "{query:?}");
         }
         for query in [
-            Query::OtherTracksCount,
-            Query::LibraryRootCounts { roots: Vec::new() },
-            Query::LibraryStats,
             Query::Albums {
                 query: None,
                 sort: AlbumSort::default(),
                 offset: 0,
                 limit: 2,
             },
+            Query::LibraryStats,
+            Query::OtherTracksCount,
+            Query::LibraryRootCounts {
+                roots: vec!["/music".into()],
+            },
+            Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 2,
+            },
+            Query::PlaylistSummaryBatch {
+                query: None,
+                after: None,
+                limit: 2,
+                expected: None,
+            },
+            Query::PlaylistEntry { entry_id: 1 },
             Query::PlaylistEntryLocations {
                 playlist_id: 7,
                 query: None,
                 entry_ids: vec![1],
             },
+            Query::PlaylistEntryLocations {
+                playlist_id: 7,
+                query: Some("needle".into()),
+                entry_ids: vec![1],
+            },
+            Query::LibraryLocate {
+                track_id: 1,
+                path: "/music".into(),
+                tree: true,
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+            },
+            Query::OtherTracksLocate {
+                track_id: 1,
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+            },
             Query::DuplicateGroups {
                 offset: 0,
                 limit: 2,
             },
+            Query::ScanTask { id: 1 },
+            Query::RelocationTask { id: 1 },
+            Query::ProcessingTask { id: 1 },
         ] {
-            assert_eq!(
-                impact(&query, previous, next),
-                QueryImpact::default(),
-                "{query:?}"
-            );
+            assert_eq!(query.stamp(previous), query.stamp(next), "{query:?}");
+            for (from, to) in [(previous, next), (next, previous)] {
+                assert_eq!(
+                    impact(&query, from, to),
+                    QueryImpact::default(),
+                    "{query:?}"
+                );
+            }
         }
     }
 

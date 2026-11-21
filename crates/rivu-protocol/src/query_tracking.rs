@@ -266,20 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_or_dropping_an_epoch_invalidates_its_tickets() {
-        let mut epoch = QueryEpoch::default();
-        epoch.advance();
-        let first = epoch.ticket();
-        assert!(first.is_current());
-        epoch.cancel();
-        assert!(!first.is_current());
-        let next = epoch.ticket();
-        assert!(next.is_current());
-        drop(epoch);
-        assert!(!next.is_current());
-    }
-
-    #[test]
     fn cancellation_wakes_all_ticket_waiters_but_not_another_owner() {
         use std::sync::atomic::AtomicUsize;
         use std::task::{Context, Poll};
@@ -294,8 +280,11 @@ mod tests {
 
         let mut owner = QueryEpoch::default();
         let mut independent = QueryEpoch::default();
+        // A ticket issued after an advance but before sharing still tracks that generation.
+        owner.advance();
         let ticket = owner.ticket();
         let independent_ticket = independent.ticket();
+        assert!(ticket.is_current());
         let wakes = Arc::new(WakeCount::default());
         let untouched = Arc::new(WakeCount::default());
         let waker = futures::task::waker(Arc::clone(&wakes));
@@ -309,6 +298,8 @@ mod tests {
         assert!(second.as_mut().poll(&mut context).is_pending());
         assert!(other.as_mut().poll(&mut other_context).is_pending());
         owner.cancel();
+        assert!(!ticket.is_current());
+        assert!(independent_ticket.is_current());
         assert!(wakes.0.load(Ordering::Relaxed) >= 2);
         assert_eq!(untouched.0.load(Ordering::Relaxed), 0);
         assert_eq!(first.as_mut().poll(&mut context), Poll::Ready(()));
@@ -323,9 +314,11 @@ mod tests {
                 .is_ready()
         );
         let replacement = owner.ticket();
+        assert!(replacement.is_current());
         let mut next = Box::pin(replacement.cancelled());
         assert!(next.as_mut().poll(&mut context).is_pending());
         drop(owner);
+        assert!(!replacement.is_current());
         assert!(next.as_mut().poll(&mut context).is_ready());
     }
 

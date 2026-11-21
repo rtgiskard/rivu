@@ -3,22 +3,38 @@ use crate::{transport::*, wire::*};
 
 #[test]
 fn incompatible_versions_are_rejected_before_any_body_decode_including_hello() {
+    fn assert_version_rejected(error: anyhow::Error) {
+        // Each body is invalid, so a body decode before the version check fails differently.
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported IPC protocol version"),
+            "{error:#}"
+        );
+    }
     async_io::block_on(async {
         for version in [PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1] {
             for message_type in [RequestTag::Hello, RequestTag::Command] {
-                let error = decode_request_frame(&[version, message_type as u8, 0xff])
-                    .err()
-                    .unwrap();
-                assert!(error.downcast_ref::<postcard::Error>().is_none());
+                assert_version_rejected(
+                    decode_request_frame(&[version, message_type as u8, 0xff])
+                        .err()
+                        .unwrap(),
+                );
             }
             for message_type in [ResponseTag::Hello, ResponseTag::Error] {
+                assert_version_rejected(
+                    decode_response_frame(&[version, message_type as u8, 0xff])
+                        .err()
+                        .unwrap(),
+                );
                 let encoded = [3, 0, 0, 0, version, message_type as u8, 0xff];
                 let mut stream = encoded.as_slice();
                 let mut pending = bytes::BytesMut::new();
-                let error = read_response_frame(&mut stream, &mut pending)
-                    .await
-                    .unwrap_err();
-                assert!(error.downcast_ref::<postcard::Error>().is_none());
+                assert_version_rejected(
+                    read_response_frame(&mut stream, &mut pending)
+                        .await
+                        .unwrap_err(),
+                );
             }
         }
     });
@@ -46,33 +62,6 @@ fn oversized_frame_is_rejected_before_consuming_or_reserving_its_body() {
                 assert_eq!(pending.len(), 4);
                 assert!(pending.capacity() < limit);
             }
-        }
-    });
-}
-
-#[test]
-fn response_frame_boundary_preserves_the_next_message() {
-    async_io::block_on(async {
-        let mut encoded = Vec::new();
-        let mut second = Vec::new();
-        encode_response_frame_into(&WireResponse::Error("first".into()), &mut encoded).unwrap();
-        encode_response_frame_into(&WireResponse::Error("second".into()), &mut second).unwrap();
-        encoded.extend_from_slice(&second);
-        for buffered in [false, true] {
-            let mut pending = bytes::BytesMut::new();
-            let mut stream = encoded.as_slice();
-            if buffered {
-                pending.extend_from_slice(stream);
-                stream = &[];
-            }
-            for expected in ["first", "second"] {
-                assert!(matches!(
-                    read_response_frame(&mut stream, &mut pending).await.unwrap(),
-                    WireResponse::Error(error) if error == expected
-                ));
-            }
-            assert!(stream.is_empty());
-            assert!(pending.is_empty());
         }
     });
 }

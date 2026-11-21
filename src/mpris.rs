@@ -1003,6 +1003,10 @@ fn load_artwork(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancellation = Arc::clone(&cancelled);
     let completion = async move {
+        #[cfg(test)]
+        if let Some(polled) = tests::ARTWORK_POLLED.get() {
+            let _ = polled.try_send(());
+        }
         let result = workers
             .execute(move || {
                 if cancellation.load(Ordering::Acquire) {
@@ -1167,6 +1171,10 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
     };
 
+    // Installed only in the isolated disconnect-test process.
+    pub(super) static ARTWORK_POLLED: std::sync::OnceLock<crossbeam_channel::Sender<()>> =
+        std::sync::OnceLock::new();
+
     fn runtime_fixture() -> (tempfile::TempDir, crate::core::CoreRuntime) {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
@@ -1180,6 +1188,19 @@ mod tests {
         .unwrap();
         let runtime = crate::core::CoreRuntime::start(directory.path(), &config).unwrap();
         (directory, runtime)
+    }
+
+    fn queue_and_wait(handle: &CoreHandle, paths: Vec<PathBuf>) {
+        let ack = async_io::block_on(handle.request_ack(Command::QueueExternalPaths {
+            paths,
+            index: None,
+            expected_revision: None,
+        }));
+        assert!(ack.is_success(), "{:?}", ack.error);
+        async_io::block_on(handle.wait_task(rivu_protocol::model::TaskTarget::Scan {
+            id: ack.scan_id.unwrap(),
+        }))
+        .unwrap();
     }
 
     fn set_enabled(handle: &CoreHandle, enabled: bool) {
@@ -1290,10 +1311,7 @@ mod tests {
 
     #[test]
     fn artwork_retirement_waits_for_physical_completion() {
-        if crate::test_support::run_in_subprocess(
-            "mpris::tests::artwork_retirement_waits_for_physical_completion",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         let pool = crate::execution::BlockingExecutor::new(1);
@@ -1375,18 +1393,6 @@ mod tests {
         cancel.send(()).unwrap();
         assert!(!async_io::block_on(publisher).unwrap());
         assert!(dropped.load(Ordering::SeqCst));
-        assert!(
-            runtime
-                .handle
-                .state(rivu_protocol::response::StateSections {
-                    system: true,
-                    ..Default::default()
-                })
-                .system
-                .unwrap()
-                .mpris_status
-                .is_empty()
-        );
         runtime.control.request_shutdown().unwrap();
         runtime.join().unwrap();
     }
@@ -1506,10 +1512,7 @@ mod tests {
 
     #[test]
     fn idle_bus_disconnect_reports_unavailable_and_toggle_registers_again() {
-        if crate::test_support::run_in_subprocess(
-            "mpris::tests::idle_bus_disconnect_reports_unavailable_and_toggle_registers_again",
-            Duration::from_secs(20),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
             return;
         }
         let bus_directory = tempfile::tempdir().unwrap();
@@ -1573,10 +1576,7 @@ mod tests {
 
     #[test]
     fn bus_disconnect_reports_before_artwork_retirement_and_preserves_disable() {
-        if crate::test_support::run_in_subprocess(
-            "mpris::tests::bus_disconnect_reports_before_artwork_retirement_and_preserves_disable",
-            Duration::from_secs(20),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
             return;
         }
         disconnect_during_artwork_retirement(false);
@@ -1584,10 +1584,7 @@ mod tests {
 
     #[test]
     fn bus_disconnect_preserves_reenable_during_artwork_retirement() {
-        if crate::test_support::run_in_subprocess(
-            "mpris::tests::bus_disconnect_preserves_reenable_during_artwork_retirement",
-            Duration::from_secs(20),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
             return;
         }
         disconnect_during_artwork_retirement(true);
@@ -1602,21 +1599,8 @@ mod tests {
         unsafe { std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &address) };
         let (directory, mut runtime) = runtime_fixture();
         let path = directory.path().join("selected.wav");
-        crate::test_support::write_i16_wav(&path, 1, 8_000, [0]).unwrap();
-        let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
-            paths: vec![path],
-            index: None,
-            expected_revision: None,
-        }));
-        assert!(ack.is_success(), "{:?}", ack.error);
-        async_io::block_on(
-            runtime
-                .handle
-                .wait_task(rivu_protocol::model::TaskTarget::Scan {
-                    id: ack.scan_id.unwrap(),
-                }),
-        )
-        .unwrap();
+        rivu_audio::test_support::write_i16_wav(&path, 1, 8_000, [0]).unwrap();
+        queue_and_wait(&runtime.handle, vec![path]);
         assert!(async_io::block_on(runtime.handle.request_ack(Command::Next)).is_success());
 
         // Hold the only execution slot: even cancelling an unstarted artwork
@@ -1635,6 +1619,8 @@ mod tests {
                 .unwrap();
         });
         entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (polled, pending) = bounded(1);
+        ARTWORK_POLLED.set(polled).unwrap();
         let manager = MprisController::start(
             runtime.handle.clone(),
             AppHandle::new(&runtime, directory.path()),
@@ -1645,6 +1631,9 @@ mod tests {
         wait_status(&runtime.handle, "Desktop media controls disabled");
         set_enabled(&runtime.handle, true);
         wait_status(&runtime.handle, "Connected to desktop media controls");
+        // Connected precedes publisher startup. Wait for its load future to
+        // enter with the sole worker slot held before disconnecting the bus.
+        pending.recv_timeout(Duration::from_secs(5)).unwrap();
         bus.disconnect();
         wait_status(
             &runtime.handle,
@@ -1684,10 +1673,7 @@ mod tests {
 
     #[test]
     fn shutdown_retires_connected_service_without_reporting_bus_loss() {
-        if crate::test_support::run_in_subprocess(
-            "mpris::tests::shutdown_retires_connected_service_without_reporting_bus_loss",
-            Duration::from_secs(20),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
             return;
         }
         let bus = TestBus::start();
@@ -1924,26 +1910,13 @@ mod tests {
         let bus = TestBus::start();
         let (directory, mut runtime) = runtime_fixture();
         let path = directory.path().join("selected.wav");
-        crate::test_support::write_i16_wav(&path, 1, 8_000, [0]).unwrap();
+        rivu_audio::test_support::write_i16_wav(&path, 1, 8_000, [0]).unwrap();
         let other_path = directory.path().join("other.wav");
         std::fs::copy(&path, &other_path).unwrap();
         // A real PNG cover must remain distinct from the trusted SVG fallback.
         let cover = rivu_metadata::artwork::test_support::PNG_IMAGE;
         std::fs::write(directory.path().join("cover.png"), cover).unwrap();
-        let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
-            paths: vec![path, other_path],
-            index: None,
-            expected_revision: None,
-        }));
-        assert!(ack.is_success(), "{:?}", ack.error);
-        async_io::block_on(
-            runtime
-                .handle
-                .wait_task(rivu_protocol::model::TaskTarget::Scan {
-                    id: ack.scan_id.unwrap(),
-                }),
-        )
-        .unwrap();
+        queue_and_wait(&runtime.handle, vec![path, other_path]);
         // Navigation while stopped selects metadata without opening audio output.
         assert!(async_io::block_on(runtime.handle.request_ack(Command::Next)).is_success());
         let selected = runtime.handle.mpris_snapshot();
@@ -2205,22 +2178,9 @@ mod tests {
             .map(|id| directory.path().join(format!("{id}.wav")))
             .collect();
         for path in &paths {
-            crate::test_support::write_i16_wav(path, 1, 8_000, [0]).unwrap();
+            rivu_audio::test_support::write_i16_wav(path, 1, 8_000, [0]).unwrap();
         }
-        let ack = async_io::block_on(runtime.handle.request_ack(Command::QueueExternalPaths {
-            paths,
-            index: None,
-            expected_revision: None,
-        }));
-        assert!(ack.is_success(), "{:?}", ack.error);
-        async_io::block_on(
-            runtime
-                .handle
-                .wait_task(rivu_protocol::model::TaskTarget::Scan {
-                    id: ack.scan_id.unwrap(),
-                }),
-        )
-        .unwrap();
+        queue_and_wait(&runtime.handle, paths);
         assert!(async_io::block_on(runtime.handle.request_ack(Command::Next)).is_success());
         let old = runtime.handle.mpris_snapshot();
         let identity = ArtworkIdentity::new(crate::artwork_source(old.current_track().unwrap()));

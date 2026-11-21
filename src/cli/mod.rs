@@ -317,16 +317,16 @@ mod tests {
     #[test]
     fn client_paths_are_anchored_without_expansion_or_requiring_destination() -> Result<()> {
         let cwd = std::env::current_dir()?;
-        let directory = tempfile::tempdir_in(&cwd)?;
-        let relative = directory.path().strip_prefix(&cwd)?.join("new.m3u8");
+        let relative =
+            std::path::Path::new(&format!("rivu-absent-{}", std::process::id())).join("new.m3u8");
         assert!(!relative.exists());
-        assert_eq!(client_path(relative.clone())?, cwd.join(relative));
+        assert_eq!(client_path(relative.clone())?, cwd.join(&relative));
         assert_eq!(client_path("~/disc.cue".into())?, cwd.join("~/disc.cue"));
         assert_eq!(
             client_path("music/../song.wav".into())?,
             cwd.join("music/../song.wav")
         );
-        let absolute = directory.path().join("absent.wav");
+        let absolute = tempfile::tempdir()?.path().join("absent.wav");
         assert_eq!(client_path(absolute.clone())?, absolute);
         Ok(())
     }

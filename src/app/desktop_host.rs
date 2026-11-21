@@ -44,42 +44,39 @@ pub(super) fn open(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>)
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{sync::atomic::Ordering, time::Duration};
+
     #[test]
     fn service_originated_gui_never_bootstraps_a_replacement() {
-        const CHILD_DIRECTORY: &str = "RIVU_TEST_NO_BOOTSTRAP_DIRECTORY";
-        if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
-            let directory = PathBuf::from(directory);
-            assert!(
-                crate::app::App::open_gui(
-                    directory.clone(),
-                    directory.join("config.toml"),
-                    Vec::new()
-                )
-                .is_err()
-            );
-            assert!(crate::ipc::SocketOwner::acquire(&directory).is_ok());
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
-        let directory = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "app::desktop_host::tests::service_originated_gui_never_bootstraps_a_replacement",
-            ])
-            .env(CHILD_DIRECTORY, directory.path())
-            .env("RIVU_DESKTOP_INSTANCE", "7")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+        // Only this exact test runs in the child, before any service thread
+        // reads the environment.
+        unsafe { std::env::set_var("RIVU_DESKTOP_INSTANCE", "7") };
+        let directory = crate::test_support::ipc::socket_test_directory();
+        let error = crate::app::App::open_gui(
+            directory.path().to_owned(),
+            directory.path().join("config.toml"),
+            Vec::new(),
+        )
+        .unwrap_err();
+        // The original owner's absence is the failure, and no replacement was launched.
+        assert!(rivu_client::is_no_instance(&error), "{error:#}");
+        assert_eq!(
+            super::super::frontend_host::BOOTSTRAP_LAUNCHES.load(Ordering::Relaxed),
+            0
         );
+        assert!(crate::ipc::SocketOwner::acquire(directory.path()).is_ok());
     }
 
     #[test]
     fn service_can_activate_after_desktop_disconnect() {
+        // Retirement is observed from the client's drop-driven EOF; isolation
+        // keeps a sibling test's fork from holding that descriptor open.
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+            return;
+        }
         let directory = crate::test_support::ipc::socket_test_directory();
         let owner = crate::ipc::SocketOwner::acquire(directory.path()).unwrap();
         let mut runtime = crate::core::CoreRuntime::start(
@@ -95,19 +92,27 @@ mod tests {
             runtime.test_executor(),
         )
         .unwrap();
-        assert!(app.can_raise());
+        let presence = app.subscribe_desktop();
+        presence.try_recv().unwrap();
         let mut registration = rivu_client::client_session(directory.path());
         assert!(registration.register_desktop().unwrap().is_success());
-        assert!(app.can_raise());
+        assert!(!registration.register_desktop().unwrap().is_success());
+        presence.try_recv().unwrap();
         drop(registration);
-        assert!(app.can_raise());
+        async_io::block_on(rivu_protocol::transport::timeout(
+            Duration::from_secs(5),
+            presence.recv(),
+        ))
+        .expect("server did not retire the disconnected desktop registration")
+        .unwrap();
+        let mut client = rivu_client::client_session(directory.path());
         assert!(
-            rivu_client::get_state(
-                directory.path(),
-                rivu_protocol::response::StateSections::ALL
-            )
-            .is_ok()
+            client
+                .request_ack(rivu_protocol::AppCommand::ShowWindow)
+                .unwrap()
+                .is_success()
         );
+        assert_eq!(app.activation_requests.try_recv(), Ok(()));
         app.request_shutdown().unwrap();
         assert!(!app.can_raise());
         runtime.join().unwrap();

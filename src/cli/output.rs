@@ -673,8 +673,6 @@ pub(super) fn show_scan(
 #[cfg(test)]
 mod tests {
     use super::{show_history, write_error};
-    use rivu_utils::terminal::TerminalEscaped;
-    use std::path::Path;
 
     #[test]
     fn buffered_error_output_propagates_real_broken_pipe_on_flush() {
@@ -717,20 +715,6 @@ mod tests {
         // order is unchanged, so the first batch must honor the initial token.
         let error = super::validate_queue_listing(&i18n, 7, 8).unwrap_err();
         assert_eq!(error.to_string(), i18n.text("core-listing-changed"));
-    }
-
-    #[test]
-    fn terminal_display_preserves_unicode_and_program_separators() {
-        let title = "音楽 café e\u{301} 🎵\\literal\tline\nnext\x1b[31m";
-        let path = Path::new("音楽/\x1bsong\n.flac");
-        assert_eq!(
-            format!(
-                "7\t{}\t{}\n",
-                TerminalEscaped(title),
-                TerminalEscaped(path.display())
-            ),
-            "7\t音楽 café e\u{301} 🎵\\literal\\tline\\nnext\\x1b[31m\t音楽/\\x1bsong\\n.flac\n"
-        );
     }
 
     #[test]

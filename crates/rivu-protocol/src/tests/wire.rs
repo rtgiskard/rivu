@@ -50,13 +50,11 @@ fn assert_configuration_round_trip(
     let WireResponse::State(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
         panic!("expected state response");
     };
+    let configuration = state_response(decoded).configuration.unwrap();
+    assert_eq!(configuration.config.as_ref(), config.as_ref());
     assert_eq!(
-        state_response(decoded)
-            .configuration
-            .unwrap()
-            .config
-            .as_ref(),
-        config.as_ref()
+        configuration.config_path,
+        PathBuf::from("/test/config.toml")
     );
 }
 
@@ -436,22 +434,14 @@ fn playlist_catalog_move_requests_round_trip_ids_anchors_and_revision_boundaries
         for before_playlist_id in [None, Some(1), Some(i64::MAX)] {
             for after in [false, true] {
                 for expected_revision in [0, u64::MAX] {
-                    let command = Command::MovePlaylist {
-                        playlist_id,
-                        before_playlist_id,
-                        after,
-                        expected_revision,
-                    };
-                    let expected = serde_json::to_value(&command).unwrap();
-                    encode_request_frame_into(&WireRequest::Command(command.into()), &mut encoded)
-                        .unwrap();
-                    let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap()
-                    else {
-                        panic!("expected catalog move command");
-                    };
-                    assert_eq!(
-                        serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
-                        expected
+                    assert_command_round_trip(
+                        &mut encoded,
+                        Command::MovePlaylist {
+                            playlist_id,
+                            before_playlist_id,
+                            after,
+                            expected_revision,
+                        },
                     );
                 }
             }
@@ -651,7 +641,6 @@ fn current_page_schema_has_contiguous_query_and_response_tags() {
 
 #[test]
 fn directory_query_wire_round_trip_preserves_filter_and_page() {
-    use std::path::Path;
     let mut encoded = Vec::new();
     for (favorite, missing) in [None, Some(true), Some(false)]
         .into_iter()
@@ -662,7 +651,7 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
         })
     {
         for query in [None, Some(""), Some("Été_100%")] {
-            let decoded = query_round_trip(
+            assert_query_round_trip(
                 &mut encoded,
                 Query::DirectoryPage {
                     path: "/music".into(),
@@ -673,22 +662,6 @@ fn directory_query_wire_round_trip_preserves_filter_and_page() {
                     limit: 11,
                 },
             );
-            let Query::DirectoryPage {
-                path,
-                query: decoded_query,
-                favorite: decoded_favorite,
-                missing: decoded_missing,
-                offset,
-                limit,
-            } = decoded
-            else {
-                panic!("expected directory query");
-            };
-            assert_eq!(path, Path::new("/music"));
-            assert_eq!(decoded_query.as_deref(), query);
-            assert_eq!(decoded_favorite, favorite);
-            assert_eq!(decoded_missing, missing);
-            assert_eq!((offset, limit), (7, 11));
         }
     }
 }
@@ -937,10 +910,10 @@ fn ack_wire_round_trip_has_explicit_response_type() {
     let WireResponse::Ack(decoded) = response else {
         panic!("expected ack")
     };
-    assert_eq!(decoded.revision, ack.revision);
-    assert_eq!(decoded.error, ack.error);
-    assert_eq!(decoded.scan_id, ack.scan_id);
-    assert_eq!(decoded.database_optimization, ack.database_optimization);
+    assert_eq!(
+        serde_json::to_value(&decoded).unwrap(),
+        serde_json::to_value(&ack).unwrap()
+    );
 }
 
 #[test]
@@ -980,23 +953,6 @@ fn retry_source_tag_sync_round_trips_the_track_and_verified_values() {
 }
 
 #[test]
-fn query_wire_response_has_no_state_queue_payload() {
-    let response = QueryResponse {
-        revisions: rivu_protocol::response::QueryRevisions::default(),
-        result: Err(rivu_protocol::response::QueryError::Message(
-            "query failed".into(),
-        )),
-    };
-    let mut encoded = Vec::new();
-    encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
-    let response = decode_response_frame(&encoded[4..]).unwrap();
-    assert!(matches!(
-        response,
-        WireResponse::Query(QueryResponse { result: Err(_), .. })
-    ));
-}
-
-#[test]
 fn partial_state_wire_round_trip_omits_unrequested_sections() {
     let response = StateResponse {
         revisions: StateRevisions {
@@ -1014,6 +970,7 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
         configuration: None,
         processing: None,
     };
+    let revisions = response.revisions;
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::State(wire_state(response)), &mut encoded).unwrap();
     let response = decode_response_frame(&encoded[4..]).unwrap();
@@ -1021,12 +978,14 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
         panic!("expected state")
     };
     let state = state_response(state);
-    assert_eq!(state.revisions.library, 3);
-    assert!(state.library.is_some());
-    assert!(state.playback.is_none());
-    assert!(state.queue.is_none());
-    assert!(state.system.is_none());
-    assert!(state.configuration.is_none());
+    assert_eq!(state.revisions, revisions);
+    assert_eq!(
+        state.sections(),
+        StateSections {
+            library: true,
+            ..Default::default()
+        }
+    );
 }
 
 #[test]
@@ -1479,19 +1438,7 @@ fn relative_playback_intents_round_trip() {
         },
         Command::Seek { seconds: 42.0 },
     ] {
-        let expected = serde_json::to_value(&command).unwrap();
-        encode_request_frame_into(
-            &WireRequest::Command(WireCommand::from(command)),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected playback intent");
-        };
-        assert_eq!(
-            serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
-            expected
-        );
+        assert_command_round_trip(&mut encoded, command);
     }
 }
 
@@ -1548,11 +1495,7 @@ fn response_decode_rejects_malicious_postcard_string_length_without_payload() {
 
 #[test]
 fn command_decode_rejects_malicious_postcard_collection_length() {
-    // Raw varints for MAX_REQUEST + 1 and u64::MAX.
-    for length in [
-        &[0x81, 0x80, 0x04][..],
-        &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01][..],
-    ] {
+    for length in [MAX_REQUEST as u64 + 1, u64::MAX] {
         let mut encoded = Vec::new();
         encode_request_frame_into(
             &WireRequest::Command(WireCommand::Enqueue {
@@ -1563,7 +1506,7 @@ fn command_decode_rejects_malicious_postcard_collection_length() {
         .unwrap();
         // Replace the empty vector length and append one real element.
         assert_eq!(encoded.pop(), Some(0));
-        encoded.extend_from_slice(length);
+        encoded.extend(postcard::to_allocvec(&length).unwrap());
         encoded.push(2); // Postcard's zigzag encoding of 1i64.
         assert!(decode_request_frame(&encoded[4..]).is_err());
     }
@@ -1701,6 +1644,7 @@ fn album_queries_and_commands_round_trip_exact_keys() {
         directory: "/音楽/album".into(),
         title: String::new(),
     };
+    let mut encoded = Vec::new();
     for query in [
         Query::Albums {
             query: Some("artist 音楽".into()),
@@ -1721,31 +1665,13 @@ fn album_queries_and_commands_round_trip_exact_keys() {
             limit: 256,
         },
     ] {
-        let expected = serde_json::to_value(&query).unwrap();
-        let mut encoded = Vec::new();
-        encode_request_frame_into(&WireRequest::Query(query.into()), &mut encoded).unwrap();
-        let WireRequest::Query(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("wrong request");
-        };
-        assert_eq!(
-            serde_json::to_value(Query::try_from(decoded).unwrap()).unwrap(),
-            expected
-        );
+        assert_query_round_trip(&mut encoded, query);
     }
     for command in [
         Command::PlayAlbum { key: key.clone() },
         Command::EnqueueAlbum { key },
     ] {
-        let expected = serde_json::to_value(&command).unwrap();
-        let mut encoded = Vec::new();
-        encode_request_frame_into(&WireRequest::Command(command.into()), &mut encoded).unwrap();
-        let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("wrong request");
-        };
-        assert_eq!(
-            serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
-            expected
-        );
+        assert_command_round_trip(&mut encoded, command);
     }
 }
 
@@ -1807,6 +1733,7 @@ fn collection_commands_round_trip_source_and_destination_versions() {
 #[test]
 fn queue_queries_and_full_queue_playlist_commands_round_trip() {
     use rivu_protocol::model::QueueCursor;
+    let mut encoded = Vec::new();
     for query in [
         Query::QueuePage {
             query: None,
@@ -1848,30 +1775,12 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
             queue_ids: vec![1, 3, 3],
         },
     ] {
-        let expected = serde_json::to_value(&query).unwrap();
-        let mut encoded = Vec::new();
-        encode_request_frame_into(&WireRequest::Query(query.into()), &mut encoded).unwrap();
-        let WireRequest::Query(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("wrong response");
-        };
-        assert_eq!(
-            serde_json::to_value(Query::try_from(decoded).unwrap()).unwrap(),
-            expected
-        );
+        assert_query_round_trip(&mut encoded, query);
     }
     let command = Command::CreatePlaylistFromQueue {
         name: "All occurrences".into(),
     };
-    let expected = serde_json::to_value(&command).unwrap();
-    let mut encoded = Vec::new();
-    encode_request_frame_into(&WireRequest::Command(command.into()), &mut encoded).unwrap();
-    let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
-        panic!("wrong response");
-    };
-    assert_eq!(
-        serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
-        expected
-    );
+    assert_command_round_trip(&mut encoded, command);
 }
 
 #[test]
@@ -2421,7 +2330,7 @@ fn public_playback_and_scan_ownership_round_trip_to_client_snapshot() {
 }
 
 #[test]
-fn quick_config_mutations_round_trip_without_full_config_payloads() {
+fn quick_config_mutations_round_trip_as_typed_intents() {
     use crate::model::ConfigMutation;
     use rivu_format::config::LibraryColumn;
     let mut changes = vec![

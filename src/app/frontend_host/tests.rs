@@ -126,8 +126,15 @@ fn probe_rejects_invalid_handshakes_without_losing_the_protocol_error() {
         &mut wrong_response,
     )
     .unwrap();
-    for reply in [incompatible, malformed, wrong_response, hello_frame(0)] {
+    for (reply, reason) in [
+        (incompatible, "Unsupported IPC protocol version"),
+        (malformed, "Decoding IPC Hello response"),
+        (wrong_response, "not a Hello response"),
+        (hello_frame(0), "IPC Hello returned instance 0"),
+    ] {
         let error = probe_with_reply(&reply, Duration::from_secs(2)).unwrap_err();
+        assert!(format!("{error:#}").contains(reason), "{error:#}");
+        assert!(!rivu_client::is_no_instance(&error), "{error:#}");
         assert!(
             error.downcast_ref::<Elapsed>().is_none(),
             "invalid handshake waited for the deadline instead of being rejected: {error:#}"
@@ -137,10 +144,7 @@ fn probe_rejects_invalid_handshakes_without_losing_the_protocol_error() {
 
 #[test]
 fn cancelling_startup_closes_pending_hello_but_preserves_the_existing_owner() {
-    if crate::test_support::run_in_subprocess(
-        "app::frontend_host::tests::cancelling_startup_closes_pending_hello_but_preserves_the_existing_owner",
-        Duration::from_secs(20),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
     }
     let directory = socket_test_directory();

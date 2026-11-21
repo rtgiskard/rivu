@@ -23,6 +23,11 @@ impl BlockingExecutor {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn concurrency_limit(&self) -> usize {
+        self.concurrency_limit
+    }
+
     /// The physical closure owns its lease, even if its async waiter disappears.
     pub(crate) async fn execute<T: Send + 'static>(
         &self,

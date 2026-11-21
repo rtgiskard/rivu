@@ -387,11 +387,7 @@ mod tests {
     // exec. An isolated harness process makes reacquisition test App's cleanup,
     // not that transient foreign ownership. Keep the pinned socket fixture too.
     fn run_socket_retirement_test_in_child() -> bool {
-        let current = thread::current();
-        let name = current
-            .name()
-            .expect("test harness must name the test thread");
-        crate::test_support::run_in_subprocess(name, std::time::Duration::from_secs(20))
+        rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(20))
     }
 
     fn runtime_fixture() -> (crate::test_support::ipc::SocketTestDirectory, CoreRuntime) {
@@ -438,11 +434,10 @@ mod tests {
         assert!(app.raise().is_err());
     }
 
-    #[test]
-    fn ipc_shutdown_ack_survives_app_teardown_before_socket_retirement() {
-        if run_socket_retirement_test_in_child() {
-            return;
-        }
+    fn running_service() -> (
+        crate::test_support::ipc::SocketTestDirectory,
+        thread::JoinHandle<Result<()>>,
+    ) {
         let directory = crate::test_support::ipc::socket_test_directory();
         let data_dir = directory.path().to_path_buf();
         let config_path = data_dir.join("config.toml");
@@ -471,6 +466,15 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(15))
             .unwrap()
             .unwrap();
+        (directory, worker)
+    }
+
+    #[test]
+    fn ipc_shutdown_ack_survives_app_teardown_before_socket_retirement() {
+        if run_socket_retirement_test_in_child() {
+            return;
+        }
+        let (directory, worker) = running_service();
         let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
         worker.join().unwrap().unwrap();
@@ -483,35 +487,8 @@ mod tests {
         if run_socket_retirement_test_in_child() {
             return;
         }
-        let directory = crate::test_support::ipc::socket_test_directory();
+        let (directory, worker) = running_service();
         let config_path = directory.path().join("config.toml");
-        crate::config::Config {
-            media_read_buffer_mib: 1,
-            ffmpeg_enabled: false,
-            mpris_enabled: false,
-            tray_enabled: false,
-            ..Default::default()
-        }
-        .save(&config_path)
-        .unwrap();
-        let data_dir = directory.path().to_owned();
-        let config = config_path.clone();
-        let (ready, started) = bounded(1);
-        let worker = thread::spawn(move || {
-            let app = App::start(data_dir, config, Vec::new());
-            ready
-                .send(
-                    app.as_ref()
-                        .map(|_| ())
-                        .map_err(|error| format!("{error:#}")),
-                )
-                .unwrap();
-            app?.run()
-        });
-        started
-            .recv_timeout(Duration::from_secs(15))
-            .unwrap()
-            .unwrap();
         // An externally edited invalid file must not be overwritten. A quick
         // control changes desired config, guaranteeing a final save attempt.
         let invalid = "[playback]\nvolume_percent = 101\n";
@@ -523,7 +500,11 @@ mod tests {
         );
         let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
-        worker.join().unwrap().unwrap_err();
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Saving configuration"),
+            "{error:#}"
+        );
         assert_eq!(std::fs::read_to_string(config_path).unwrap(), invalid);
         // App's error is observable only after transport/core teardown, including
         // the accepted IPC reply. Ownership can immediately be reacquired.
@@ -586,9 +567,10 @@ mod tests {
             runtime.test_executor(),
         )
         .unwrap();
-        let (started, running) = bounded(4);
+        let capacity = runtime.test_workers().concurrency_limit();
+        let (started, running) = bounded(capacity);
         let (release, released) = bounded::<()>(0);
-        let workers: Vec<_> = (0..4)
+        let workers: Vec<_> = (0..capacity)
             .map(|_| {
                 let started = started.clone();
                 let released = released.clone();
@@ -603,7 +585,7 @@ mod tests {
                 })
             })
             .collect();
-        for _ in 0..4 {
+        for _ in 0..capacity {
             running.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         assert!(

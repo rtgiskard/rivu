@@ -51,12 +51,33 @@ fn command_service(
     (owner, runtime, app, server)
 }
 
+#[track_caller]
+fn assert_ack(session: &mut rivu_client::ClientSession, command: Command, success: bool) {
+    let ack = session.request_ack(command).unwrap();
+    assert_eq!(ack.is_success(), success, "{ack:?}");
+}
+
+// A raw client stream, so tests control every frame after the Hello.
+fn connect_hello(
+    directory: &std::path::Path,
+    timeout: std::time::Duration,
+    sections: StateSections,
+) -> std::os::unix::net::UnixStream {
+    use std::io::Write;
+    let address = rivu_protocol::wire::address(directory).unwrap();
+    let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    stream.set_write_timeout(Some(timeout)).unwrap();
+    let mut frame = Vec::new();
+    encode_request_frame_into(&WireRequest::Hello(sections), &mut frame).unwrap();
+    stream.write_all(&frame).unwrap();
+    assert!(matches!(read_response(&mut stream), WireResponse::Hello(_)));
+    stream
+}
+
 #[test]
 fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_slots() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::tests::pending_query_preserves_pipelined_responses_and_disconnected_clients_release_slots",
-        std::time::Duration::from_secs(20),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(20)) {
         return;
     }
     use std::io::{Read, Write};
@@ -67,21 +88,7 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     let (handle, queries) = crate::core::CoreHandle::test_query_port();
     let (_owner, mut runtime, _app, server) =
         command_service(directory.path(), &config_path, Some(handle.clone()));
-    let address = rivu_protocol::wire::address(directory.path()).unwrap();
-    let connect = || {
-        let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut frame = Vec::new();
-        encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut frame).unwrap();
-        stream.write_all(&frame).unwrap();
-        assert!(matches!(read_response(&mut stream), WireResponse::Hello(_)));
-        stream
-    };
+    let connect = || connect_hello(directory.path(), Duration::from_secs(2), StateSections::ALL);
     let receive_query =
         || async_io::block_on(timeout(Duration::from_secs(2), queries.receive())).unwrap();
     let response = || QueryResponse {
@@ -209,10 +216,7 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
 
 #[test]
 fn app_commands_route_over_ipc_without_changing_business_state() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::tests::app_commands_route_over_ipc_without_changing_business_state",
-        std::time::Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(15)) {
         return;
     }
     let directory = socket_test_directory();
@@ -281,18 +285,12 @@ fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
     let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut control = client_session(directory.path());
     control.query(Query::ScanTask { id: 0 }).unwrap();
-    let address = rivu_protocol::wire::address(directory.path()).unwrap();
-    let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    let mut stream = connect_hello(
+        directory.path(),
+        Duration::from_secs(5),
+        StateSections::default(),
+    );
     let mut encoded = Vec::new();
-    encode_request_frame_into(&WireRequest::Hello(StateSections::default()), &mut encoded).unwrap();
-    stream.write_all(&encoded).unwrap();
-    assert!(matches!(read_response(&mut stream), WireResponse::Hello(_)));
     let mut baseline = runtime.handle.state_revisions();
     baseline.processing = baseline.processing.wrapping_add(1);
     encode_request_frame_into(
@@ -325,10 +323,7 @@ fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
 
 #[test]
 fn malformed_request_during_watch_receives_invalid_request_response() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::tests::malformed_request_during_watch_receives_invalid_request_response",
-        std::time::Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(15)) {
         return;
     }
     use std::io::{Read, Write};
@@ -338,15 +333,12 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut control = client_session(directory.path());
     control.query(Query::ScanTask { id: 0 }).unwrap();
-    let address = rivu_protocol::wire::address(directory.path()).unwrap();
-    let mut stream = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
-    let timeout = Some(std::time::Duration::from_secs(5));
-    stream.set_read_timeout(timeout).unwrap();
-    stream.set_write_timeout(timeout).unwrap();
+    let mut stream = connect_hello(
+        directory.path(),
+        std::time::Duration::from_secs(5),
+        StateSections::ALL,
+    );
     let mut encoded = Vec::new();
-    encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
-    stream.write_all(&encoded).unwrap();
-    assert!(matches!(read_response(&mut stream), WireResponse::Hello(_)));
 
     encode_request_frame_into(
         &WireRequest::Watch(runtime.handle.state_revisions().into()),
@@ -377,10 +369,7 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
 
 #[test]
 fn library_root_queries_run_through_real_owner_and_ipc_session() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::tests::library_root_queries_run_through_real_owner_and_ipc_session",
-        std::time::Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(15)) {
         return;
     }
     use crate::{config::Config, store::Store};
@@ -564,17 +553,16 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
             .unwrap_err(),
         QueryError::RevisionChanged
     );
-    assert!(
-        session
-            .request_ack(Command::MovePlaylistEntries {
-                playlist_id: 10,
-                entry_ids: vec![101],
-                before_entry_id: None,
-                after: false,
-                expected_revision: first.revisions.playlist_entries.unwrap().revision,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::MovePlaylistEntries {
+            playlist_id: 10,
+            entry_ids: vec![101],
+            before_entry_id: None,
+            after: false,
+            expected_revision: first.revisions.playlist_entries.unwrap().revision,
+        },
+        true,
     );
     let after = session.get_state(sections).unwrap();
     assert_ne!(before.revisions.library, after.revisions.library);
@@ -637,25 +625,23 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     assert!(
         matches!(locations.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.len() == 1 && rows[0].id == 101 && rows[0].position == 1)
     );
-    assert!(
-        !session
-            .request_ack(Command::RemovePlaylistEntries {
-                playlist_id: 10,
-                entry_ids: vec![101],
-                expected_revision: first.revisions.playlist_entries.unwrap().revision,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RemovePlaylistEntries {
+            playlist_id: 10,
+            entry_ids: vec![101],
+            expected_revision: first.revisions.playlist_entries.unwrap().revision,
+        },
+        false,
     );
-    assert!(
-        session
-            .request_ack(Command::RemovePlaylistEntries {
-                playlist_id: 10,
-                entry_ids: vec![101],
-                expected_revision: moved_token,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RemovePlaylistEntries {
+            playlist_id: 10,
+            entry_ids: vec![101],
+            expected_revision: moved_token,
+        },
+        true,
     );
     let removed = session
         .query(Query::PlaylistEntryLocations {
@@ -672,14 +658,13 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         selected.revisions.playlist_entries
     );
     let expected = removed.revisions;
-    assert!(
-        session
-            .request_ack(Command::RenamePlaylist {
-                playlist_id: 10,
-                name: "renamed".into()
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RenamePlaylist {
+            playlist_id: 10,
+            name: "renamed".into(),
+        },
+        true,
     );
     let library = session.get_state(sections).unwrap().library.unwrap();
     assert_ne!(library.playlist_revision, expected.playlist);
@@ -700,23 +685,21 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
             .is_ok()
     );
     // Renames and membership changes elsewhere preserve a real continuation.
-    assert!(
-        session
-            .request_ack(Command::RenamePlaylist {
-                playlist_id: 20,
-                name: "other renamed".into(),
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RenamePlaylist {
+            playlist_id: 20,
+            name: "other renamed".into(),
+        },
+        true,
     );
-    assert!(
-        session
-            .request_ack(Command::AddPlaylist {
-                playlist_id: 10,
-                track_ids: vec![3],
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::AddPlaylist {
+            playlist_id: 10,
+            track_ids: vec![3],
+        },
+        true,
     );
     let member_change = session.query(batch(10, None)).unwrap();
     assert_ne!(
@@ -726,15 +709,14 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     assert_ne!(member_change.revisions.playlist, expected.playlist);
     assert_eq!(member_change.revisions.library, expected.library);
     assert!(member_change.result.is_ok());
-    assert!(
-        !session
-            .request_ack(Command::RemovePlaylistEntries {
-                playlist_id: 10,
-                entry_ids: vec![],
-                expected_revision: expected.playlist_entries.unwrap().revision,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RemovePlaylistEntries {
+            playlist_id: 10,
+            entry_ids: vec![],
+            expected_revision: expected.playlist_entries.unwrap().revision,
+        },
+        false,
     );
     let continuation = session
         .query(Query::PlaylistEntryBatch {
@@ -780,17 +762,16 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         QueryError::RevisionChanged
     );
     // The current scalar token stays usable across every catalog-only change.
-    assert!(
-        session
-            .request_ack(Command::MovePlaylistEntries {
-                playlist_id: 20,
-                entry_ids: vec![201],
-                before_entry_id: None,
-                after: false,
-                expected_revision: other.revisions.playlist_entries.unwrap().revision,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::MovePlaylistEntries {
+            playlist_id: 20,
+            entry_ids: vec![201],
+            before_entry_id: None,
+            after: false,
+            expected_revision: other.revisions.playlist_entries.unwrap().revision,
+        },
+        true,
     );
     let current = session.query(batch(20, None)).unwrap();
     assert_ne!(
@@ -811,37 +792,34 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
             .unwrap_err(),
         QueryError::RevisionChanged
     );
-    assert!(
-        !session
-            .request_ack(Command::RemovePlaylistEntries {
-                playlist_id: 20,
-                entry_ids: vec![201],
-                expected_revision: other.revisions.playlist_entries.unwrap().revision,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RemovePlaylistEntries {
+            playlist_id: 20,
+            entry_ids: vec![201],
+            expected_revision: other.revisions.playlist_entries.unwrap().revision,
+        },
+        false,
     );
     let before_noop = session.get_state(sections).unwrap().library.unwrap();
-    assert!(
-        session
-            .request_ack(Command::AddPlaylist {
-                playlist_id: 20,
-                track_ids: vec![],
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::AddPlaylist {
+            playlist_id: 20,
+            track_ids: vec![],
+        },
+        true,
     );
-    assert!(
-        session
-            .request_ack(Command::MovePlaylistEntries {
-                playlist_id: 20,
-                entry_ids: vec![201],
-                before_entry_id: None,
-                after: false,
-                expected_revision: current.revisions.playlist_entries.unwrap().revision,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::MovePlaylistEntries {
+            playlist_id: 20,
+            entry_ids: vec![201],
+            before_entry_id: None,
+            after: false,
+            expected_revision: current.revisions.playlist_entries.unwrap().revision,
+        },
+        true,
     );
     let after_noop = session.get_state(sections).unwrap().library.unwrap();
     assert_eq!(
@@ -854,11 +832,10 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         after_noop.duplicate_members_revision
     );
     // Deletion removes the lifetime, rather than falling back to the catalog token.
-    assert!(
-        session
-            .request_ack(Command::DeletePlaylist { playlist_id: 20 })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::DeletePlaylist { playlist_id: 20 },
+        true,
     );
     let deleted = session.get_state(sections).unwrap().library.unwrap();
     assert_eq!(deleted.playlist_entry_revisions.len(), 1);
@@ -879,36 +856,33 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
     assert!(missing.result.is_err());
     assert!(missing.revisions.playlist_entries.is_none());
     for playlist_id in [20, i64::MAX] {
-        assert!(
-            !session
-                .request_ack(Command::RemovePlaylistEntries {
-                    playlist_id,
-                    entry_ids: vec![],
-                    expected_revision: current.revisions.playlist_entries.unwrap().revision,
-                })
-                .unwrap()
-                .is_success()
+        assert_ack(
+            &mut session,
+            Command::RemovePlaylistEntries {
+                playlist_id,
+                entry_ids: vec![],
+                expected_revision: current.revisions.playlist_entries.unwrap().revision,
+            },
+            false,
         );
-        assert!(
-            !session
-                .request_ack(Command::MovePlaylistEntries {
-                    playlist_id,
-                    entry_ids: vec![],
-                    before_entry_id: None,
-                    after: false,
-                    expected_revision: current.revisions.playlist_entries.unwrap().revision,
-                })
-                .unwrap()
-                .is_success()
+        assert_ack(
+            &mut session,
+            Command::MovePlaylistEntries {
+                playlist_id,
+                entry_ids: vec![],
+                before_entry_id: None,
+                after: false,
+                expected_revision: current.revisions.playlist_entries.unwrap().revision,
+            },
+            false,
         );
     }
-    assert!(
-        session
-            .request_ack(Command::CreatePlaylist {
-                name: "replacement".into()
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::CreatePlaylist {
+            name: "replacement".into(),
+        },
+        true,
     );
     let recreated = session.get_state(sections).unwrap().library.unwrap();
     assert_eq!(recreated.playlist_entry_revisions.len(), 2);
@@ -929,46 +903,42 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         new_revision,
         first.revisions.playlist_entries.unwrap().revision
     );
-    assert!(
-        !session
-            .request_ack(Command::RemovePlaylistEntries {
-                playlist_id: new_id,
-                entry_ids: vec![],
-                expected_revision: current.revisions.playlist_entries.unwrap().revision,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RemovePlaylistEntries {
+            playlist_id: new_id,
+            entry_ids: vec![],
+            expected_revision: current.revisions.playlist_entries.unwrap().revision,
+        },
+        false,
     );
-    assert!(
-        session
-            .request_ack(Command::RemovePlaylistEntries {
-                playlist_id: new_id,
-                entry_ids: vec![],
-                expected_revision: new_revision,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RemovePlaylistEntries {
+            playlist_id: new_id,
+            entry_ids: vec![],
+            expected_revision: new_revision,
+        },
+        true,
     );
-    assert!(
-        session
-            .request_ack(Command::AddPlaylist {
-                playlist_id: new_id,
-                track_ids: vec![1],
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::AddPlaylist {
+            playlist_id: new_id,
+            track_ids: vec![1],
+        },
+        true,
     );
     let populated = session.query(batch(new_id, None)).unwrap();
     let ViewResponse::PlaylistEntryBatch(page) = populated.result.unwrap() else {
         panic!("expected populated playlist batch")
     };
-    assert!(
-        session
-            .request_ack(Command::RemovePlaylistEntry {
-                entry_id: page.rows[0].id,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::RemovePlaylistEntry {
+            entry_id: page.rows[0].id,
+        },
+        true,
     );
     let emptied = session.query(batch(new_id, None)).unwrap();
     assert_ne!(
@@ -987,10 +957,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
 
 #[test]
 fn instance_acquisition_creates_directory_without_socket_or_lock_files() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::tests::instance_acquisition_creates_directory_without_socket_or_lock_files",
-        std::time::Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(15)) {
         return;
     }
     let directory = socket_test_directory();
@@ -1010,10 +977,7 @@ fn instance_acquisition_creates_directory_without_socket_or_lock_files() {
 
 #[test]
 fn directory_aliases_share_instance_ownership_and_transport() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::tests::directory_aliases_share_instance_ownership_and_transport",
-        std::time::Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(15)) {
         return;
     }
     let directory = socket_test_directory();
@@ -1048,10 +1012,7 @@ fn directory_aliases_share_instance_ownership_and_transport() {
 
 #[test]
 fn distinct_data_directories_acquire_independent_instances() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::tests::distinct_data_directories_acquire_independent_instances",
-        std::time::Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(15)) {
         return;
     }
     let directory = socket_test_directory();
@@ -1076,10 +1037,7 @@ fn distinct_data_directories_acquire_independent_instances() {
 
 #[test]
 fn simultaneous_starters_acquire_one_real_listener() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::tests::simultaneous_starters_acquire_one_real_listener",
-        std::time::Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(15)) {
         return;
     }
     let directory = socket_test_directory();
@@ -1211,18 +1169,17 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
             .unwrap_err(),
         QueryError::RevisionChanged
     );
-    assert!(
-        session
-            .request_ack(Command::EditTrack {
-                track_id: 2,
-                title: Some("other".into()),
-                artist: None,
-                album: None,
-                decoder_hint: None,
-                release_date: None,
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::EditTrack {
+            track_id: 2,
+            title: Some("other".into()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+            release_date: None,
+        },
+        true,
     );
     assert_eq!(
         session
@@ -1271,28 +1228,21 @@ fn remote_config_patch_merges_live_controls_and_keeps_quick_changes_unpersisted(
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
     let patch = ConfigPatch::between(&baseline, &draft);
-    assert!(
-        session
-            .request_ack(Command::Volume { value: 0.2 })
-            .unwrap()
-            .is_success()
-    );
-    assert!(
-        session
-            .request_ack(Command::MutateConfig {
-                change: ConfigMutation::ToggleWaveformSeek
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(&mut session, Command::Volume { value: 0.2 }, true);
+    assert_ack(
+        &mut session,
+        Command::MutateConfig {
+            change: ConfigMutation::ToggleWaveformSeek,
+        },
+        true,
     );
     assert_eq!(std::fs::read(&config_path).unwrap(), saved);
-    assert!(
-        session
-            .request_ack(Command::MutateConfig {
-                change: ConfigMutation::Settings(Box::new(patch))
-            })
-            .unwrap()
-            .is_success()
+    assert_ack(
+        &mut session,
+        Command::MutateConfig {
+            change: ConfigMutation::Settings(Box::new(patch)),
+        },
+        true,
     );
     let state = session.get_state(StateSections::ALL).unwrap();
     let config = state.configuration.unwrap().config;
@@ -1304,8 +1254,6 @@ fn remote_config_patch_merges_live_controls_and_keeps_quick_changes_unpersisted(
     );
     assert_eq!(crate::config::Config::load(&config_path).unwrap(), *config);
     assert_eq!(state.playback.unwrap().playback.volume, 0.2);
-    assert!(session.register_desktop().unwrap().is_success());
-    assert!(!session.register_desktop().unwrap().is_success());
     drop(session);
     drop(server);
     app.request_shutdown().unwrap();

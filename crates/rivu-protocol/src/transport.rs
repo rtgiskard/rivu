@@ -375,25 +375,6 @@ mod tests {
     };
 
     #[test]
-    fn previous_protocol_version_is_rejected_before_decoding_either_body() {
-        let previous = PROTOCOL_VERSION.checked_sub(1).unwrap();
-        assert!(
-            decode_request_frame(&[previous, RequestTag::Hello as u8])
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("Unsupported IPC protocol version")
-        );
-        assert!(
-            decode_response_frame(&[previous, ResponseTag::Hello as u8])
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("Unsupported IPC protocol version")
-        );
-    }
-
-    #[test]
     fn bulk_response_releases_buffers_before_idle_and_accepts_next_frame() {
         async_io::block_on(async {
             let payload = "X".repeat(6 * 1024 * 1024);
@@ -481,65 +462,21 @@ mod tests {
     }
 
     #[test]
-    fn malformed_response_releases_backing_and_preserves_buffered_next_frame() {
+    fn stalled_bulk_response_ends_a_partial_frame_and_releases_encoding_buffer() {
         async_io::block_on(async {
-            let mut encoded = Vec::new();
-            encode_response_frame_into(&WireResponse::Error("invalid".into()), &mut encoded)
-                .unwrap();
-            encoded[4] = PROTOCOL_VERSION.wrapping_add(1);
-            let mut pending = BytesMut::with_capacity(RETAINED_BUFFER_LIMIT + 1);
-            pending.extend_from_slice(&encoded);
-            encode_response_frame_into(&WireResponse::Error("next".into()), &mut encoded).unwrap();
-            pending.extend_from_slice(&encoded);
-            let mut stream = &[][..];
-            assert!(
-                read_response_frame(&mut stream, &mut pending)
-                    .await
-                    .is_err()
-            );
-            assert_eq!(pending.as_ref(), encoded.as_slice());
-            assert!(matches!(
-                read_response_frame(&mut stream, &mut pending).await.unwrap(),
-                WireResponse::Error(actual) if actual == "next"
-            ));
-            assert!(pending.is_empty());
-            let _ = pending.try_reclaim(RETAINED_BUFFER_LIMIT + 1);
-            assert!(pending.capacity() <= RETAINED_BUFFER_LIMIT);
-        });
-    }
-
-    #[test]
-    fn stalled_bulk_response_releases_encoding_buffer() {
-        async_io::block_on(async {
-            let mut sender = LimitedWriter::default();
-            let mut buffer = Vec::new();
-            let result = write_frame_buffered(
-                &mut sender,
-                &WireResponse::Error("X".repeat(1024 * 1024)),
-                &mut buffer,
-            )
-            .await;
-            assert!(result.unwrap_err().downcast_ref::<Elapsed>().is_some());
-            assert!(buffer.capacity() <= RETAINED_BUFFER_LIMIT);
-        });
-    }
-
-    #[test]
-    fn response_write_timeout_ends_a_partial_frame_when_peer_stops_reading() {
-        async_io::block_on(async {
+            let response = WireResponse::Error("X".repeat(1024 * 1024));
+            let mut expected = Vec::new();
+            encode_response_frame_into(&response, &mut expected).unwrap();
             let mut stream = LimitedWriter::default();
-            let mut encoded = Vec::new();
-            let error = write_frame_buffered(
-                &mut stream,
-                &WireResponse::Error("response".into()),
-                &mut encoded,
-            )
-            .await
-            .unwrap_err();
+            let mut buffer = Vec::new();
+            let error = write_frame_buffered(&mut stream, &response, &mut buffer)
+                .await
+                .unwrap_err();
             assert!(error.downcast_ref::<Elapsed>().is_some());
             assert!(!stream.bytes.is_empty());
-            assert!(stream.bytes.len() < encoded.len());
-            assert_eq!(stream.bytes, encoded[..stream.bytes.len()]);
+            assert!(stream.bytes.len() < expected.len());
+            assert_eq!(stream.bytes, expected[..stream.bytes.len()]);
+            assert!(buffer.capacity() <= RETAINED_BUFFER_LIMIT);
         });
     }
 

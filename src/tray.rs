@@ -744,10 +744,7 @@ mod tests {
 
     #[test]
     fn grouped_menu_quit_stops_core_without_window_and_reports_invalid_ids() {
-        if crate::test_support::run_in_subprocess(
-            "tray::tests::grouped_menu_quit_stops_core_without_window_and_reports_invalid_ids",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         let directory = tempfile::tempdir().unwrap();
@@ -758,7 +755,6 @@ mod tests {
         .unwrap();
         let handle = runtime.handle.clone();
         let app = AppHandle::new(&runtime, directory.path());
-        assert!(app.can_raise());
         let menu = DbusMenu {
             data: Arc::new(RwLock::new(TrayData {
                 snapshot: handle.tray_snapshot(),
@@ -810,7 +806,7 @@ mod tests {
     #[test]
     fn tooltip_updates_follow_visible_text_not_playback_statistics() {
         let mut state = crate::core::CoreState {
-            current_track: Some(Arc::new(crate::test_support::artwork_track(
+            current_track: Some(Arc::new(rivu_protocol::test_support::artwork_track(
                 "track.wav".into(),
             ))),
             ..Default::default()

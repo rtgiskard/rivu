@@ -19,6 +19,10 @@ use std::{
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const DIAGNOSTIC_LIMIT: usize = 64 * 1024;
 const BOOTSTRAP_ENV: &str = "RIVU_FRONTEND_BOOTSTRAP";
+/// Bootstrap launch attempts, so tests can prove a path never tried one.
+#[cfg(test)]
+pub(super) static BOOTSTRAP_LAUNCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 pub(super) fn absolute(path: PathBuf) -> Result<PathBuf> {
     if path.is_absolute() {
@@ -133,6 +137,8 @@ pub(super) async fn ensure_service(data_dir: &Path, config_path: &Path) -> Resul
         return Err(rivu_protocol::transport::Elapsed).context("Rivu service startup timed out");
     }
 
+    #[cfg(test)]
+    BOOTSTRAP_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let diagnostics = StartupDiagnostics::new()?;
     let mut command = std::process::Command::new(
         std::env::current_exe().context("Locating Rivu service executable")?,

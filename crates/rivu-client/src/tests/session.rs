@@ -177,7 +177,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
 }
 
 #[test]
-fn cancelling_client_session_closes_pending_watch_with_partial_response() {
+fn cancelling_client_session_closes_pending_watch_with_partial_response_offered() {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixListener,
@@ -201,15 +201,18 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
         read_test_request(&mut stream),
         WireRequest::Watch(_)
     ));
-    // Cancellation discards a partial response, not just an idle watch socket.
+    // Cancellation with a partial frame offered, whether or not the client has
+    // read it yet; buffer release on cancel is
+    // `cancelled_exchange_releases_partial_bulk_buffers`.
     stream.write_all(&[10, 0, 0, 0, PROTOCOL_VERSION]).unwrap();
     stop.cancel();
-    assert!(client.join().unwrap().unwrap().is_none());
+    // The handshake's read timeout bounds this if cancellation never closes the socket.
     let closed = stream.read(&mut [0]);
     assert!(
         matches!(closed, Ok(0))
             || matches!(closed, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset)
     );
+    assert!(client.join().unwrap().unwrap().is_none());
 }
 
 #[test]
@@ -357,17 +360,16 @@ fn retained_query_uses_physical_request_and_returns_actual_reply() {
     let directory = socket_test_directory();
     let listener =
         UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
-    let (admitted, waiting) = std::sync::mpsc::sync_channel(1);
-    let (release, continue_reply) = std::sync::mpsc::sync_channel(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         complete_test_handshake(&mut stream);
         let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
             panic!("expected physical retained query");
         };
         assert_eq!(Query::try_from(query.query).unwrap(), Query::LibraryStats);
-        admitted.send(()).unwrap();
-        continue_reply.recv().unwrap();
         write_test_response(
             &mut stream,
             WireResponse::Query(QueryResponse {
@@ -379,23 +381,10 @@ fn retained_query_uses_physical_request_and_returns_actual_reply() {
         );
     });
     let mut session = client_session(directory.path());
-    let (complete, completed) = std::sync::mpsc::sync_channel(1);
-    let client = std::thread::spawn(move || {
-        complete
-            .send(session.query_retained(Query::LibraryStats))
-            .unwrap()
-    });
-    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(matches!(
-        completed.recv_timeout(Duration::from_millis(20)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-    ));
-    release.send(()).unwrap();
     assert!(
-        matches!(completed.recv_timeout(Duration::from_secs(2)).unwrap().unwrap().result,
+        matches!(session.query_retained(Query::LibraryStats).unwrap().result,
         Err(rivu_protocol::response::QueryError::Message(message)) if message == "actual owner result")
     );
-    client.join().unwrap();
     server.join().unwrap();
 }
 
@@ -509,21 +498,29 @@ fn session_shutdown_disconnects_even_when_retained_query_owner_is_cancelled() {
 }
 
 #[test]
-fn owner_cancel_sends_identified_control_and_keeps_reply_order_until_physical_completion() {
+fn owner_cancel_sends_identified_control_and_returns_the_physical_reply_before_the_next_request() {
     use rivu_protocol::{
         query_tracking::QueryEpoch,
-        response::{QueryError, ViewResponse},
+        response::{QueryError, QueryRevisions, ViewResponse},
     };
     use std::os::unix::net::UnixListener;
 
+    // The peer accepts a follow-up keyed by its terminal reply. An early local
+    // cancellation cannot supply that revision, even if the next request is
+    // buffered and the server doesn't read it until after sending the reply.
+    let rolled_back = QueryRevisions {
+        library: 7,
+        ..Default::default()
+    };
     let directory = socket_test_directory();
     let listener =
         UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
     let (admitted, active) = std::sync::mpsc::sync_channel(1);
-    let (cancel_seen, cancelled) = std::sync::mpsc::sync_channel(1);
-    let (release, released) = std::sync::mpsc::sync_channel(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         complete_test_handshake(&mut stream);
         let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
             panic!("expected retained query");
@@ -533,18 +530,16 @@ fn owner_cancel_sends_identified_control_and_keeps_reply_order_until_physical_co
         assert!(
             matches!(read_test_request(&mut stream), WireRequest::QueryCancel(id) if id == query.id)
         );
-        cancel_seen.send(()).unwrap();
-        released.recv_timeout(Duration::from_secs(2)).unwrap();
         write_test_response(
             &mut stream,
             WireResponse::Query(QueryResponse {
-                revisions: Default::default(),
+                revisions: rolled_back,
                 result: Err(QueryError::Cancelled),
             }),
         );
         assert!(matches!(
             read_test_request(&mut stream),
-            WireRequest::Query(WireQuery::Track { track_id: 42 })
+            WireRequest::Query(WireQuery::Track { track_id }) if track_id == rolled_back.library as i64
         ));
         write_test_response(
             &mut stream,
@@ -557,25 +552,22 @@ fn owner_cancel_sends_identified_control_and_keeps_reply_order_until_physical_co
     let mut owner = QueryEpoch::default();
     let ticket = owner.ticket();
     let mut session = client_session(directory.path());
-    let (finished, completion) = std::sync::mpsc::sync_channel(1);
     let client = std::thread::spawn(move || {
         let first = session
             .query_retained_until(Query::LibraryStats, ticket.cancelled())
             .unwrap();
-        let next = session.query(Query::Track { track_id: 42 }).unwrap();
-        finished.send((first, next)).unwrap();
+        let next = session
+            .query(Query::Track {
+                track_id: i64::try_from(first.revisions.library).unwrap(),
+            })
+            .unwrap();
+        (first, next)
     });
     active.recv_timeout(Duration::from_secs(2)).unwrap();
     owner.cancel();
-    cancelled.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(matches!(
-        completion.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Empty)
-    ));
-    release.send(()).unwrap();
-    let (first, next) = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (first, next) = client.join().unwrap();
     assert!(matches!(first.result, Err(QueryError::Cancelled)));
+    assert_eq!(first.revisions, rolled_back);
     assert!(matches!(next.result, Ok(ViewResponse::Track(None))));
-    client.join().unwrap();
     server.join().unwrap();
 }

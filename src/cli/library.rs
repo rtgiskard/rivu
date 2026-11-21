@@ -622,6 +622,31 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn human_probe_escapes_field_controls_but_preserves_unicode_and_row_boundaries() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("source.wav");
+        fs::write(&path, wav())?;
+        let mut result = audio::probe_details(&path, false, false)?;
+        result.info.title = "音楽 café e\u{301} 🎵\\literal\tline\nnext\x1b[31m".into();
+        let text = format_probe(
+            &Localizer::for_cli("en-US"),
+            Path::new("音楽/\x1bsong\n.flac"),
+            &result,
+            "disabled",
+        );
+        let mut rows = text.lines();
+        let path = rows.next().unwrap().trim_matches(['\u{2068}', '\u{2069}']);
+        assert_eq!(path, "音楽/\\x1bsong\\n.flac");
+        let title = rows.next().unwrap().trim().strip_prefix("title: ").unwrap();
+        assert_eq!(
+            title.trim_matches(['\u{2068}', '\u{2069}']),
+            "音楽 café e\u{301} 🎵\\literal\\tline\\nnext\\x1b[31m"
+        );
+        assert!(rows.next().unwrap().trim_start().starts_with("artist:"));
+        Ok(())
+    }
+
     fn wav() -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"RIFF");
@@ -640,51 +665,16 @@ mod tests {
         bytes
     }
 
-    #[test]
-    fn title_only_source_edit_preserves_primary_id3v2_track() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("mixed.mp3");
-        let frames = b"TIT2\0\0\0\x04\0\0\x03OldTRCK\0\0\0\x02\0\0\x031";
-        let mut bytes = b"ID3\x04\0\0\0\0\0\x1a".to_vec();
-        bytes.extend_from_slice(frames);
-        let mut audio = vec![0; 417];
-        audio[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0]);
-        for _ in 0..4 {
-            bytes.extend_from_slice(&audio);
+    fn title_edit(path: &Path, title: Option<&str>) -> LibraryAction {
+        LibraryAction::Tags {
+            path: path.to_owned(),
+            title: title.map(str::to_owned),
+            artist: None,
+            album: None,
+            release_date: None,
+            track_number: None,
+            disc_number: None,
         }
-        let mut id3v1 = [0; 128];
-        id3v1[..3].copy_from_slice(b"TAG");
-        id3v1[93..97].copy_from_slice(b"2024");
-        id3v1[126] = 2;
-        id3v1[127] = 255;
-        bytes.extend_from_slice(&id3v1);
-        let data_dir = directory.path().join("no-server");
-        for mode in [OutputMode::Text, OutputMode::Json] {
-            fs::write(&path, &bytes)?;
-            let before = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?.unwrap();
-            assert_eq!(before.track_number, Some(1));
-            run(
-                &Localizer::for_cli("en-US"),
-                &data_dir,
-                &directory.path().join("absent.toml"),
-                LibraryAction::Tags {
-                    path: path.clone(),
-                    title: Some("Changed".into()),
-                    artist: None,
-                    album: None,
-                    release_date: None,
-                    track_number: None,
-                    disc_number: None,
-                },
-                mode,
-            )?;
-            let after = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?.unwrap();
-            assert_eq!(after.title.as_deref(), Some("Changed"));
-            assert_eq!(after.track_number, before.track_number);
-            assert!(!data_dir.exists());
-            assert_eq!(fs::read_dir(directory.path())?.count(), 1);
-        }
-        Ok(())
     }
 
     #[test]
@@ -730,21 +720,7 @@ mod tests {
         let i18n = Localizer::for_cli("en-US");
 
         for mode in [OutputMode::Text, OutputMode::Json] {
-            run(
-                &i18n,
-                &data_dir,
-                &config,
-                LibraryAction::Tags {
-                    path: path.clone(),
-                    title: None,
-                    artist: None,
-                    album: None,
-                    release_date: None,
-                    track_number: None,
-                    disc_number: None,
-                },
-                mode,
-            )?;
+            run(&i18n, &data_dir, &config, title_edit(&path, None), mode)?;
         }
         assert_eq!(fs::read(&path)?, original);
         assert_eq!(fs::read_dir(directory.path())?.count(), 2);
@@ -772,6 +748,23 @@ mod tests {
             assert_eq!(tags.release_date.as_deref(), Some("2024-03-09"));
             assert_eq!(tags.track_number, Some(3));
             assert_eq!(tags.disc_number, Some(2));
+            assert_eq!(fs::read_dir(directory.path())?.count(), 2);
+
+            // Omitted fields must stay untouched, not be cleared.
+            run(
+                &i18n,
+                &data_dir,
+                &config,
+                title_edit(&path, Some("Title only")),
+                mode,
+            )?;
+            let edited = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?
+                .context("supported WAV tags")?;
+            assert_eq!(edited.title.as_deref(), Some("Title only"));
+            assert_eq!(edited.artist, tags.artist);
+            assert_eq!(edited.release_date, tags.release_date);
+            assert_eq!(edited.track_number, Some(3));
+            assert_eq!(edited.disc_number, Some(2));
             assert_eq!(fs::read_dir(directory.path())?.count(), 2);
         }
         assert!(

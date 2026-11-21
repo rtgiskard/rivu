@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsString,
     fs,
     os::unix::ffi::{OsStrExt, OsStringExt},
@@ -29,15 +30,19 @@ fn success_json(output: Output) -> serde_json::Value {
 }
 
 fn assert_json_path(value: &serde_json::Value, path: &Path) {
-    let recovered = if let Some(path) = path.to_str() {
+    if let Some(path) = path.to_str() {
         assert_eq!(value, path);
-        PathBuf::from(value.as_str().unwrap())
     } else {
         let bytes: Vec<u8> = serde_json::from_value(value["unix_bytes"].clone()).unwrap();
         assert_eq!(bytes, path.as_os_str().as_bytes());
-        PathBuf::from(OsString::from_vec(bytes))
-    };
-    assert_eq!(recovered, path);
+    }
+}
+
+fn entries(directory: &Path) -> BTreeSet<PathBuf> {
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect()
 }
 
 #[test]
@@ -73,10 +78,7 @@ fn offline_tag_json_preserves_paths_and_replacement_facts() {
         wav.write_sample(0_i16).unwrap();
         wav.finalize().unwrap();
         let original = fs::read(&path).unwrap();
-        let files_before_save = fs::read_dir(&parent)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect::<std::collections::BTreeSet<_>>();
+        let entries_before_replace = entries(&parent);
 
         let read = success_json(tags(&path, directory.path(), false));
         assert_json_path(&read["path"], &path);
@@ -85,34 +87,19 @@ fn offline_tag_json_preserves_paths_and_replacement_facts() {
         let replaced = success_json(tags(&path, directory.path(), true));
         assert_eq!(replaced["outcome"], "replaced");
         assert_json_path(&replaced["path"], &path);
-        assert_eq!(
-            fs::read_dir(&parent)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .collect::<std::collections::BTreeSet<_>>(),
-            files_before_save
-        );
+        assert_eq!(entries(&parent), entries_before_replace);
         assert!(replaced.get("backup_path").is_none());
         let edited = fs::read(&path).unwrap();
         let read = success_json(tags(&path, directory.path(), false));
         assert_json_path(&read["path"], &path);
         assert_eq!(read["tags"]["title"], "Edited title");
 
-        let files_before_unchanged = fs::read_dir(&parent)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect::<std::collections::BTreeSet<_>>();
+        let entries_before_unchanged = entries(&parent);
         let unchanged = success_json(tags(&path, directory.path(), true));
         assert_eq!(unchanged["outcome"], "unchanged");
         assert_json_path(&unchanged["path"], &path);
         assert_eq!(fs::read(&path).unwrap(), edited);
-        assert_eq!(
-            fs::read_dir(&parent)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .collect::<std::collections::BTreeSet<_>>(),
-            files_before_unchanged
-        );
+        assert_eq!(entries(&parent), entries_before_unchanged);
 
         fs::remove_file(&path).unwrap();
         let failure = tags(&path, directory.path(), true);

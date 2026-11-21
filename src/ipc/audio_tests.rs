@@ -84,7 +84,7 @@ fn track(path: std::path::PathBuf) -> Track {
 fn finite_pcm_preserves_cue_relative_positions_and_lossless_requested_ranges() {
     let directory = crate::test_support::ipc::socket_test_directory();
     let path = directory.path().join("source.wav");
-    crate::test_support::write_float_wav(
+    rivu_audio::test_support::write_float_wav(
         &path,
         2,
         8_000,
@@ -139,8 +139,43 @@ fn finite_pcm_preserves_cue_relative_positions_and_lossless_requested_ranges() {
     drop(service);
 }
 
+/// Proves a fresh connection progressed past admission: the missing track
+/// yields a framed Error reply, not just a successful connect or EOF.
+async fn assert_missing_track_reply(
+    directory: &Path,
+    signal: VisualizationSignal,
+    authority: impl Future<Output = ()>,
+) {
+    let (mut stream, mut bytes) = connect(directory).await;
+    request(
+        &mut stream,
+        &Request::Read {
+            expected: ExpectedSource::from(&track("missing.wav".into())),
+            source: None,
+            signal,
+            range: None,
+        },
+        &mut bytes,
+    )
+    .await;
+    let (response, ()) = futures::join!(read_frame::<Response>(&mut stream, &mut bytes), authority);
+    assert!(matches!(response.unwrap(), Response::Error(_)));
+}
+
+fn missing_track() -> QueryResponse {
+    QueryResponse {
+        revisions: Default::default(),
+        result: Ok(ViewResponse::Track(None)),
+    }
+}
+
+// Both tests below wait for EOF from a session that drops its accepted FD;
+// isolation keeps a concurrently forked sibling from inheriting that FD.
 #[test]
 fn finite_stream_rejects_wrong_authority_and_unbound_connections() {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
     let directory = crate::test_support::ipc::socket_test_directory();
     let (handle, queries) = CoreHandle::test_query_port();
     let (_tasks, service) = audio_service(directory.path(), handle);
@@ -162,27 +197,10 @@ fn finite_stream_rejects_wrong_authority_and_unbound_connections() {
                     .is_err()
             );
         }
-        let (mut stream, mut bytes) = connect(directory.path()).await;
-        request(
-            &mut stream,
-            &Request::Read {
-                expected: ExpectedSource::from(&track("missing.wav".into())),
-                source: None,
-                signal: VisualizationSignal::After,
-                range: None,
-            },
-            &mut bytes,
-        )
+        assert_missing_track_reply(directory.path(), VisualizationSignal::After, async {
+            queries.receive().await.respond(missing_track());
+        })
         .await;
-        let authority = async {
-            queries.receive().await.respond(QueryResponse {
-                revisions: Default::default(),
-                result: Ok(ViewResponse::Track(None)),
-            });
-        };
-        let (result, ()) =
-            futures::join!(read_frame::<Response>(&mut stream, &mut bytes), authority);
-        assert!(matches!(result.unwrap(), Response::Error(_)));
     }))
     .unwrap();
     drop(service);
@@ -190,6 +208,9 @@ fn finite_stream_rejects_wrong_authority_and_unbound_connections() {
 
 #[test]
 fn idle_connections_release_admission_slots_before_hello_and_before_read() {
+    if rivu_utils::test_support::run_in_subprocess(IO_TIMEOUT * 3 + Duration::from_secs(10)) {
+        return;
+    }
     let directory = crate::test_support::ipc::socket_test_directory();
     let (handle, queries) = CoreHandle::test_query_port();
     let (_tasks, service) = audio_service(directory.path(), handle);
@@ -213,27 +234,10 @@ fn idle_connections_release_admission_slots_before_hello_and_before_read() {
             for (mut stream, _) in idle {
                 assert_eq!(stream.read(&mut [0; 1]).await.unwrap(), 0);
             }
-            let (mut stream, mut bytes) = connect(directory.path()).await;
-            request(
-                &mut stream,
-                &Request::Read {
-                    expected: ExpectedSource::from(&track("missing.wav".into())),
-                    source: None,
-                    signal: VisualizationSignal::Before,
-                    range: None,
-                },
-                &mut bytes,
-            )
+            assert_missing_track_reply(directory.path(), VisualizationSignal::Before, async {
+                queries.receive().await.respond(missing_track());
+            })
             .await;
-            let authority = async {
-                queries.receive().await.respond(QueryResponse {
-                    revisions: Default::default(),
-                    result: Ok(ViewResponse::Track(None)),
-                });
-            };
-            let (response, ()) =
-                futures::join!(read_frame::<Response>(&mut stream, &mut bytes), authority);
-            assert!(matches!(response.unwrap(), Response::Error(_)));
         }
     }))
     .unwrap();
@@ -294,10 +298,7 @@ fn ready_pcm(sequence: u64) -> Response {
 
 #[test]
 fn sender_yields_with_ready_io_and_retires_work_on_fast_and_slow_reader_cancellation() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::audio::tests::sender_yields_with_ready_io_and_retires_work_on_fast_and_slow_reader_cancellation",
-        Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
         return;
     }
     for ready in [true, false] {
@@ -372,15 +373,12 @@ fn sender_yields_with_ready_io_and_retires_work_on_fast_and_slow_reader_cancella
 
 #[test]
 fn cancellation_retires_a_backpressured_renderer_before_service_shutdown_returns() {
-    if crate::test_support::run_in_subprocess(
-        "ipc::audio::tests::cancellation_retires_a_backpressured_renderer_before_service_shutdown_returns",
-        Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
         return;
     }
     let directory = crate::test_support::ipc::socket_test_directory();
     let path = directory.path().join("long.wav");
-    crate::test_support::write_float_wav(&path, 1, 8_000, std::iter::repeat_n(0.25, 800_000))
+    rivu_audio::test_support::write_float_wav(&path, 1, 8_000, std::iter::repeat_n(0.25, 800_000))
         .unwrap();
     let mut track = track(path);
     track.cue = None;

@@ -311,10 +311,7 @@ mod tests {
 
     #[test]
     fn malformed_hello_is_rejected_before_registration_or_welcome() {
-        if crate::test_support::run_in_subprocess(
-            "ipc::pcm::tests::malformed_hello_is_rejected_before_registration_or_welcome",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         for index in 1..8 {
@@ -508,10 +505,7 @@ mod tests {
 
     #[test]
     fn aggregate_capture_boundaries_reach_disabled_clients_on_updates_and_disconnect() {
-        if crate::test_support::run_in_subprocess(
-            "ipc::pcm::tests::aggregate_capture_boundaries_reach_disabled_clients_on_updates_and_disconnect",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         let directory = crate::test_support::ipc::socket_test_directory();
