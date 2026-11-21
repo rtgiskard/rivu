@@ -1668,6 +1668,37 @@ fn all_missing_autoplay_is_bounded_by_occurrence_and_preserves_last_failure() {
 }
 
 #[test]
+fn autoplay_follows_queue_reorder_without_retrying_failed_occurrences() {
+    let (_directory, mut core) = fixture();
+    edit_preferences(&mut core, |config| {
+        config.repeat = RepeatMode::All;
+        config.shuffle = false;
+    });
+    playing(&mut core, 1);
+    let _commands = recording_audio(&mut core);
+    natural_end(&mut core);
+    assert_eq!(core.state.queue.current_id, Some(2));
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    assert_eq!(core.state.queue.current_id, Some(3));
+    // Place the already-failed occurrence 2 immediately after the current one,
+    // ahead of a different untried candidate than before the reorder.
+    core.command(Command::MoveQueue {
+        queue_id: 2,
+        index: 2,
+        expected_revision: core.state.queue.revision,
+    })
+    .unwrap();
+    core.command(Command::MoveQueue {
+        queue_id: 5,
+        index: 3,
+        expected_revision: core.state.queue.revision,
+    })
+    .unwrap();
+    fail_current_source(&mut core, audio::AudioFailureKind::Source);
+    assert_eq!(core.state.queue.current_id, Some(5));
+}
+
+#[test]
 fn real_decoder_autoplay_visits_each_bad_occurrence_once() {
     use rivu_format::decoder_hint::DecoderHint;
 

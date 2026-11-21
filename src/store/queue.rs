@@ -111,6 +111,32 @@ impl Store {
             .optional()?)
     }
 
+    pub(crate) fn first_untried_queue_id(
+        &self,
+        positions: std::ops::Range<usize>,
+        attempted: &HashSet<u64>,
+    ) -> Result<Option<u64>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT position,id FROM playlist_entries WHERE playlist_id=0 AND position>=?1 AND position<?2 ORDER BY position",
+        )?;
+        let mut rows = statement.query(params![
+            i64::try_from(positions.start)?,
+            i64::try_from(positions.end)?
+        ])?;
+        for position in positions {
+            let row = rows.next()?.context("Queue positions are inconsistent")?;
+            ensure!(
+                integer::<usize>(row, 0)? == position,
+                "Queue positions are inconsistent"
+            );
+            let id = integer(row, 1)?;
+            if !attempted.contains(&id) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn queue_location(&self, id: u64) -> Result<Option<(i64, usize)>> {
         let Ok(id) = i64::try_from(id) else {
             return Ok(None);

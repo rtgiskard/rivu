@@ -1159,16 +1159,27 @@ impl Core {
                 .current_position
                 .map_or(0, |index| (index + 1) % total)
         };
-        let autoplay = self.transport.autoplay.as_ref().expect("search is active");
+        let autoplay = self.transport.autoplay.as_mut().expect("search is active");
         let mut candidate = None;
-        for offset in 0..total {
+        if total != 0 {
             let id = self
                 .store
-                .queue_id_at((first + offset) % total)?
+                .queue_id_at(first)?
                 .context("Queue positions are inconsistent")?;
             if !autoplay.attempted.contains(&id) {
                 candidate = Some(id);
-                break;
+            } else {
+                // Stream indexed ranges in wrap order; stop at the first untried ID.
+                for span in [first + 1..total, 0..first] {
+                    if !span.is_empty() {
+                        candidate = self
+                            .store
+                            .first_untried_queue_id(span, &autoplay.attempted)?;
+                        if candidate.is_some() {
+                            break;
+                        }
+                    }
+                }
             }
         }
         let Some(id) = candidate else {
@@ -1178,12 +1189,7 @@ impl Core {
             return Ok(());
         };
         let notice = autoplay.notice(false);
-        self.transport
-            .autoplay
-            .as_mut()
-            .expect("search is active")
-            .attempted
-            .insert(id);
+        autoplay.attempted.insert(id);
         self.start_occurrence(id, QueueHistory::Record, status, false)?;
         // Selection admission clears last_error; keep the aggregate notice.
         if notice.is_some() {
