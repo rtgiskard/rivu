@@ -482,13 +482,17 @@ Do not automatically repeat a mutation; inspect authoritative state or the outpu
 If startup timed out before its task ID arrived and reconciliation is unavailable,
 keep the result unknown rather than guessing that no task started.
 
-The GUI keeps command outcome and post-command observation separate in
-`CommandDelivery {ack, observation}`. Observation is `Refreshed`, `Unavailable` or
-`NotRequested`; an unavailable refresh terminates observation without rewriting
-the owner's Ack or replaying the command. Local publications cannot restore that
-authority. Draft clearing, rebase, field writeback and undo require both fresh
-observation and the original editing identity. Shutdown needs only its admission
-Ack, not a state read from an already retiring instance.
+For commands with an explicit frontend reply, the GUI keeps the owner's Ack and
+post-command observation separate in `CommandDelivery {ack, observation}`.
+It requests `State` even after a failed Ack, since the command may have committed
+some changes. Observation is `Refreshed`, `Unavailable` or `NotRequested`; an
+unavailable refresh does not rewrite the Ack or replay the command. Local
+publications cannot substitute for a fresh observation. Draft clearing, rebase,
+field writeback and undo require both fresh observation and the original editing
+identity. Fire-and-forget commands, including ordinary playback controls, still
+receive the owner's Ack and report failures locally, but rely on the Watch-driven
+state stream rather than requesting post-command `State`. Shutdown needs only its
+admission Ack, not a state read from an already retiring instance.
 
 An acknowledgement's `processing_id` identifies processing work admitted by that
 command, not another active task. Cached graph audition and synchronous audition

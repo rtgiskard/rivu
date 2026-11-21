@@ -532,22 +532,17 @@ fn finish_command(
         shared.error(message, true);
     }
     let shutdown_complete = shutdown && ack.is_success();
-    let delivery = CommandDelivery::observe(ack, shutdown, refresh);
-    if let CommandObservation::Unavailable(message) = &delivery.observation
-        && !shared.stop.is_cancelled()
-    {
-        shared.error(message.clone(), true);
-    }
     if let Some(reply) = reply {
+        let delivery = CommandDelivery::observe(ack, shutdown, refresh);
+        if let CommandObservation::Unavailable(message) = &delivery.observation
+            && !shared.stop.is_cancelled()
+        {
+            shared.error(message.clone(), true);
+        }
         let _ = reply.send(delivery);
-    } else if !delivery.ack.is_success() {
-        shared.error(
-            delivery
-                .ack
-                .error
-                .unwrap_or_else(|| "GUI command failed".into()),
-            false,
-        );
+    } else if !ack.is_success() {
+        let message = ack.error.unwrap_or_else(|| "GUI command failed".into());
+        shared.error(message, false);
     }
     shutdown_complete
 }
@@ -1238,11 +1233,42 @@ mod tests {
     }
 
     #[test]
+    fn fire_and_forget_skips_observation_but_reports_command_failure() {
+        let (_directory, runtime) = fixture();
+        let handle = &runtime.handle;
+        for (status, error) in [
+            (AckStatus::Succeeded, None),
+            (AckStatus::Failed, Some("playback command failed")),
+        ] {
+            assert!(!finish_command(
+                &handle.shared,
+                false,
+                None,
+                Ack::new(status, error.map(str::to_owned), 1),
+                None,
+                || panic!("fire-and-forget commands must not refresh"),
+            ));
+            assert_eq!(handle.shared.published.read().error.as_deref(), error);
+            assert!(handle.is_connected());
+        }
+    }
+
+    #[test]
     fn failed_ack_and_successful_observation_remain_independent() {
         let mut ack = Ack::new(AckStatus::Failed, Some("partially committed".into()), 73);
         ack.scan_id = Some(19);
         let expected = serde_json::to_value(&ack).unwrap();
-        let delivery = CommandDelivery::observe(ack, false, || Ok(()));
+        let (_directory, runtime) = fixture();
+        let (reply, receiver) = oneshot::channel();
+        assert!(!finish_command(
+            &runtime.handle.shared,
+            false,
+            Some(reply),
+            ack,
+            None,
+            || Ok(()),
+        ));
+        let delivery = futures::executor::block_on(receiver).unwrap();
         assert_eq!(delivery.observation, CommandObservation::Refreshed);
         assert_eq!(serde_json::to_value(&delivery.ack).unwrap(), expected);
         assert_eq!(
