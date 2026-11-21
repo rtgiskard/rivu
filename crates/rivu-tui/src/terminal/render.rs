@@ -1,8 +1,8 @@
 use super::{
     paged::PagedList,
     state::{
-        DetailState, Details, LibraryTree, NoticeKind, PlaylistDetail, RecentTracks, SearchState,
-        TopTab, UiState, View,
+        DetailState, Details, LibraryTree, NoticeKind, PlaylistDetail, PlaylistNamePhase,
+        RecentTracks, SearchState, TopTab, UiState, View,
     },
 };
 use crate::projection::TuiSnapshot;
@@ -1026,13 +1026,16 @@ pub(super) fn draw(
     frame.render_widget(Paragraph::new(Line::from(now)), rows[0]);
     let progress = PlaybackProgress::new(frame.area().width, state);
     progress.draw(frame, rows[1], colors);
-    let name_feedback = ui.playlist_name.as_ref().and_then(|draft| {
-        if draft.pending {
+    let name_feedback = match ui.playlist_name.as_ref().map(|draft| &draft.phase) {
+        Some(PlaylistNamePhase::Saving) => {
             Some((i18n.text("terminal-playlist-name-saving"), colors.command))
-        } else {
-            draft.error.as_deref().map(|error| (error, colors.error))
         }
-    });
+        Some(PlaylistNamePhase::Unknown) => {
+            Some((i18n.text("terminal-playlist-name-unknown"), colors.warning))
+        }
+        Some(PlaylistNamePhase::Editing(Some(error))) => Some((error.as_str(), colors.error)),
+        _ => None,
+    };
     if let Some((text, color)) = name_feedback {
         frame.render_widget(
             Paragraph::new(text).style(Style::default().fg(color)),
@@ -1059,7 +1062,10 @@ pub(super) fn draw(
                 .style(Style::default().fg(colors.command).bg(colors.selected)),
             messages,
         );
-        if !draft.pending && messages.height > 0 && label.len() + cursor < width {
+        if matches!(draft.phase, PlaylistNamePhase::Editing(_))
+            && messages.height > 0
+            && label.len() + cursor < width
+        {
             frame.set_cursor_position((messages.x + (label.len() + cursor) as u16, messages.y));
         }
         return Some(progress);
