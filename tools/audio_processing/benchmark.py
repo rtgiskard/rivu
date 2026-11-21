@@ -121,10 +121,6 @@ class PreparedReference:
             results["output_lr_coherence"] = float(product/denominator) if denominator else None
             results["reference_side_rms"] = self.side_rms
             results["output_side_rms"] = float(np.sqrt(side_est/len(reference)))
-        boundaries = range(core_seconds*rate, len(reference), core_seconds*rate)
-        results["outer_boundary_error_jumps"] = [float(np.max(np.abs(
-            (estimate[i].astype("float64")-reference[i]) -
-            (estimate[i-1].astype("float64")-reference[i-1])))) for i in boundaries]
         if len(self.weak_frames):
             residual_energy = product = 0.0
             for index in self.weak_frames:
@@ -141,7 +137,15 @@ class PreparedReference:
         center = count - 1  # Zero lag in full correlation.
         radius = min(rate // 20, center)
         results["estimated_lag_samples"] = int(np.argmax(correlation[center-radius:center+radius+1])) - radius
+        if core_seconds is not None:
+            results["outer_boundary_error_jumps"] = self.boundary_error_jumps(estimate, core_seconds)
         return results
+
+    def boundary_error_jumps(self, estimate, core_seconds):
+        step = core_seconds * self.rate
+        return [float(abs((estimate[i].astype("float64") - self.reference[i]) -
+                          (estimate[i-1].astype("float64") - self.reference[i-1])).max())
+                for i in range(step, len(self.reference), step)]
 
 
 def main():
@@ -169,7 +173,7 @@ def main():
     report["input_sha256"] = input_pcm.identity["sha256"]
     report["reference_sha256"] = reference_pcm.identity["sha256"]
     prepared = PreparedReference(reference, rate)
-    report["input_quality"] = prepared.score(noisy)
+    report["input_quality"] = prepared.score(noisy, core_seconds=None)
     upstream = backing = None
     if args.upstream_reference:
         upstream_pcm = load_identified(args.upstream_reference, dtype="float32", max_frames=None)
@@ -192,6 +196,9 @@ def main():
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         worker_seconds = time.perf_counter()-worker_start
         result = completed_export_report(completed, run_request, report["input_sha256"])
+        if index == 0:
+            report["input_quality"]["outer_boundary_error_jumps"] = prepared.boundary_error_jumps(
+                noisy, result["processing"]["core_seconds"])
         stem = "speech" if request["operation"] == "speech" else "vocals"
         output_pcm = load_audio(result["outputs"][stem], dtype="float32", max_frames=None)
         require_alignment(reference_pcm, output_pcm, "output")
