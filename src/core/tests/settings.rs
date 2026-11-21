@@ -813,7 +813,7 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
     use std::os::unix::fs::MetadataExt;
 
     let (_directory, mut core) = fixture();
-    let audio = recording_audio(&mut core);
+    let _audio = recording_audio(&mut core);
     core.flush_config().unwrap();
     let path = core.state.configuration.config_path.clone();
     let mut original = std::fs::read(&path).unwrap();
@@ -825,10 +825,6 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
         change: ConfigMutation::Settings(Box::default()),
     })
     .unwrap();
-    // Apply enqueues synchronously, but the recorder forwards on another thread.
-    audio
-        .recv_timeout(Duration::from_secs(2))
-        .expect("No-op Apply still validates output settings");
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
     core.command(Command::Volume { value: 0.25 }).unwrap();
@@ -927,10 +923,6 @@ fn replaygain_apply_updates_audio_only_when_changed_even_with_processing_bypasse
                 AudioCommand::ReplayGain { enabled: actual, peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off } if actual == enabled
             ));
         }
-        assert!(matches!(
-            audio.try_recv().unwrap().command,
-            AudioCommand::OutputSettings { .. }
-        ));
         assert!(audio.is_empty());
     }
 }
@@ -957,22 +949,18 @@ fn peak_policy_only_changes_persist_and_hot_apply_while_replaygain_is_off() {
         );
         assert!(matches!(audio.try_recv().unwrap().command,
             AudioCommand::ReplayGain { enabled: false, peak_policy } if peak_policy == policy));
-        assert!(matches!(
-            audio.try_recv().unwrap().command,
-            AudioCommand::OutputSettings { .. }
-        ));
         assert!(audio.is_empty());
     }
 }
 
 #[test]
-fn replaygain_apply_reserves_the_complete_audio_batch_before_committing() {
-    for available in 0..=2 {
+fn replaygain_only_apply_requires_one_audio_slot() {
+    for available in 0..=1 {
         let (_directory, mut core) = fixture();
         core.flush_config().unwrap();
         let baseline = core.preferences.checkpoint();
         let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
-        let (audio, _idle_commands) = prefilled_audio(&mut core, 2, 2 - available);
+        let (audio, _idle_commands) = prefilled_audio(&mut core, 1, 1 - available);
         let mut draft = baseline.clone();
         draft.replaygain_enabled = true;
 
@@ -980,7 +968,7 @@ fn replaygain_apply_reserves_the_complete_audio_batch_before_committing() {
             &baseline, &draft,
         ))));
 
-        if available < 2 {
+        if available == 0 {
             result.unwrap_err();
             assert_eq!(core.preferences.checkpoint(), baseline);
             assert_eq!(core.output_settings_request, 0);
@@ -988,7 +976,7 @@ fn replaygain_apply_reserves_the_complete_audio_batch_before_committing() {
                 std::fs::read(&core.state.configuration.config_path).unwrap(),
                 saved
             );
-            assert_eq!(audio.len(), 2 - available);
+            assert_eq!(audio.len(), 1);
         } else {
             result.unwrap();
             assert_eq!(core.preferences.checkpoint(), draft);
@@ -996,7 +984,7 @@ fn replaygain_apply_reserves_the_complete_audio_batch_before_committing() {
                 Config::load(&core.state.configuration.config_path).unwrap(),
                 draft
             );
-            assert_eq!(core.output_settings_request, 1);
+            assert_eq!(core.output_settings_request, 0);
             assert!(matches!(
                 audio.try_recv().unwrap().command,
                 AudioCommand::ReplayGain {
@@ -1004,17 +992,13 @@ fn replaygain_apply_reserves_the_complete_audio_batch_before_committing() {
                     peak_policy: rivu_format::config::ReplayGainPeakPolicy::Off
                 }
             ));
-            assert!(matches!(
-                audio.try_recv().unwrap().command,
-                AudioCommand::OutputSettings { .. }
-            ));
             assert!(audio.is_empty());
         }
     }
 }
 
 #[test]
-fn display_only_apply_preserves_pcm_identity_and_still_requests_output_validation() {
+fn display_only_apply_preserves_pcm_identity_without_audio_commands() {
     let (_directory, mut core) = fixture();
     let (commands, receive) = async_channel::bounded(4);
     let _idle_commands = core.engine.replace_commands(commands);
@@ -1035,35 +1019,39 @@ fn display_only_apply_preserves_pcm_identity_and_still_requests_output_validatio
         Config::load(&core.state.configuration.config_path).unwrap(),
         config
     );
-    assert!(matches!(
-        receive.try_recv().unwrap().command,
-        AudioCommand::OutputSettings {
-            request: 1,
-            device: None,
-            auto_mix: true
-        }
-    ));
     assert!(
         receive.is_empty(),
         "display Apply must not resend unchanged audio controls"
     );
+}
 
-    // An explicit no-op Apply must still validate the selected output again.
+#[test]
+fn no_op_apply_persists_live_preferences_with_a_full_audio_queue() {
+    let (_directory, mut core) = fixture();
+    core.flush_config().unwrap();
+    let baseline = core.preferences.checkpoint();
+    let (receive, _idle_commands) = prefilled_audio(&mut core, 1, 0);
+    core.command(Command::Device {
+        name: Some("pending-output".into()),
+    })
+    .unwrap();
+    core.mutate_config(ConfigMutation::ToggleWaveformSeek)
+        .unwrap();
+    let before = core.engine.pcm.state();
+
     core.command(Command::MutateConfig {
-        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
-            &core.preferences.checkpoint(),
-            &config,
-        ))),
+        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(&baseline, &baseline))),
     })
     .unwrap();
     assert_eq!(core.engine.pcm.state(), before);
+    assert_eq!(core.output_settings_request, 1);
+    let saved = Config::load(&core.state.configuration.config_path).unwrap();
+    assert_eq!(saved.output_device.as_deref(), Some("pending-output"));
+    assert_ne!(saved.waveform_seek_enabled, baseline.waveform_seek_enabled);
     assert!(matches!(
         receive.try_recv().unwrap().command,
-        AudioCommand::OutputSettings {
-            request: 2,
-            device: None,
-            auto_mix: true
-        }
+        AudioCommand::OutputSettings { request: 1, device: Some(device), .. }
+            if device == "pending-output"
     ));
     assert!(receive.is_empty());
 }
@@ -1109,18 +1097,31 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
 
 #[test]
 fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() {
-    for change_volume in [false, true] {
+    for (change_volume, change_device, change_mix) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+        (true, true, true),
+    ] {
+        let output_changed = change_device || change_mix;
+        let needed = usize::from(change_volume) + usize::from(output_changed);
         for available in 0..=2 {
             let (_directory, mut core) = fixture();
             core.flush_config().unwrap();
             let baseline = core.preferences.settings().clone();
             let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
-            let (_receive, displaced) = prefilled_audio(&mut core, 2, 2 - available);
-            drop(displaced);
+            let (receive, _idle_commands) = prefilled_audio(&mut core, 2, 2 - available);
             let mut config = core.preferences.checkpoint();
             config.query_batch_size = 42;
             if change_volume {
                 config.volume = 0.25;
+            }
+            if change_device {
+                config.output_device = Some("configured-output".into());
+            }
+            if change_mix {
+                config.pipewire_auto_mix = !config.pipewire_auto_mix;
             }
             let result = core.command(Command::MutateConfig {
                 change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
@@ -1128,8 +1129,7 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
                     &config,
                 ))),
             });
-            // Explicit output validation needs one slot; changed volume needs another.
-            if available < 1 + usize::from(change_volume) {
+            if available < needed {
                 result.unwrap_err();
                 assert_eq!(**core.preferences.settings(), *baseline);
                 assert_eq!(core.preferences.live().volume, baseline.volume);
@@ -1138,6 +1138,7 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
                     std::fs::read(&core.state.configuration.config_path).unwrap(),
                     saved
                 );
+                assert_eq!(receive.len(), 2 - available);
             } else {
                 result.unwrap();
                 assert_eq!(**core.preferences.settings(), config);
@@ -1146,7 +1147,27 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
                     Config::load(&core.state.configuration.config_path).unwrap(),
                     config
                 );
-                assert_eq!(core.output_settings_request, 1);
+                assert_eq!(core.output_settings_request, u64::from(output_changed));
+                for _ in 0..2 - available {
+                    assert!(matches!(
+                        receive.try_recv().unwrap().command,
+                        AudioCommand::Volume(0.5)
+                    ));
+                }
+                if change_volume {
+                    assert!(matches!(
+                        receive.try_recv().unwrap().command,
+                        AudioCommand::Volume(0.25)
+                    ));
+                }
+                if output_changed {
+                    assert!(matches!(
+                        receive.try_recv().unwrap().command,
+                        AudioCommand::OutputSettings { request: 1, device, auto_mix }
+                            if device == config.output_device && auto_mix == config.pipewire_auto_mix
+                    ));
+                }
+                assert!(receive.is_empty());
             }
         }
     }

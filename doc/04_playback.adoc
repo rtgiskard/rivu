@@ -528,9 +528,9 @@ be running; there is no direct ALSA output or fallback to a different backend.
 A missing system default does not interrupt a still-valid route. If the current
 route becomes invalid with no replacement default, or a selected route fails to
 open, playback stops without guessing a fallback or changing the setting.
-Select an available output and explicitly restart playback to recover. Reapplying
-unchanged output settings revalidates the device only when no source is playing,
-paused or opening; with an existing source it is a no-op.
+Select an available output and explicitly restart playback to recover. Settings
+Apply does not resend unchanged output preferences. An explicit device selection
+can revalidate the same device while idle without reopening an existing source.
 
 Output and Monitor EQ application failures can still be reported after Stop or
 an audition source change, but cannot restart playback or advance the queue.

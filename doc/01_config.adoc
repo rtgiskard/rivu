@@ -98,11 +98,10 @@ identifies a field; Reset field text restores only that field's accepted value.
 Edits made while Apply is pending await the next Apply, and the editor cannot
 close until completion. Discard then closes it and drops unsubmitted edits.
 
-Apply reserves capacity for changed audio parameters before saving. Unchanged
-audio settings are not resent, except output settings. Every explicit Apply sends
-output settings; an unchanged device and remix configuration is revalidated only
-when no source is playing, paused or opening. With an existing source, unchanged
-output settings are not reapplied. Display-only changes do not reopen audio.
+Apply reserves capacity for changed audio parameters before saving. It sends an
+output command only when the device or PipeWire remix setting differs from the
+current runtime preference. If no audio parameters change, Apply can save even
+when the audio command queue is full. Display-only changes do not reopen audio.
 
 Settings Apply validates and saves editable configuration; processing-graph changes
 use their separate revision-checked commands and cannot be applied here.

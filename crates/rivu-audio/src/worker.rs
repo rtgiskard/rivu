@@ -566,8 +566,8 @@ impl Worker {
             } => {
                 let device_changed = self.device != device;
                 let mix_changed = self.pipewire_auto_mix != auto_mix;
-                // Explicit idle applications must produce a fresh validation result,
-                // even for unchanged settings; request zero is startup initialization.
+                // An explicit device re-selection can retry validation while idle.
+                // Startup initialization (request zero) does not retry unchanged output.
                 let idle_apply = self.playback.is_none() && self.opening.is_none() && request != 0;
                 if device_changed || mix_changed || idle_apply {
                     // Desired settings survive failure; later loads must not use the old sink.

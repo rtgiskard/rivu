@@ -3476,13 +3476,7 @@ fn master_bypass_keeps_eq_edits_silent_and_restores_current_settings() {
     .unwrap();
     assert!(core.preferences.settings().equalizer.enabled);
     assert!(core.preferences.settings().processing_bypassed);
-    loop {
-        let command = commands.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(!matches!(command, AudioCommand::Equalizer(_)));
-        if matches!(command, AudioCommand::OutputSettings { .. }) {
-            break;
-        }
-    }
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
     core.processing_bypass(false).unwrap();
     assert!(
         matches!(commands.recv_timeout(Duration::from_secs(2)).unwrap(),

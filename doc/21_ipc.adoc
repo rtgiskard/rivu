@@ -336,9 +336,9 @@ Core merges it into current preferences: explicit fields win conflicts, edited
 lists replace whole lists, and optional clears differ from omitted fields.
 Full `WireConfig` values are state observations, not writable command payloads.
 Graph and bypass changes require their dedicated commands. Even an empty Settings
-patch saves accepted live controls and revalidates output settings; see
-link:01_config.adoc#apply-and-validation[Apply and validation]. Client upgrade
-requirements are in link:10_upgrading.adoc#settings-protocol-cutover[migration].
+patch saves accepted live controls. Apply only validates output when the device
+or mix settings change; see link:01_config.adoc#apply-and-validation[Apply and validation].
+Client upgrade requirements are in link:10_upgrading.adoc#settings-protocol-cutover[migration].
 
 Library, Queue, album-member, and playlist-entry rows carry source paths, CUE
 track numbers, and cached audio specifications, including bitrate certainty.

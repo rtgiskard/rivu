@@ -202,6 +202,8 @@ impl Core {
         Arc::make_mut(&mut config).library_roots = roots;
         let roots_changed = config.library_roots != self.preferences.settings().library_roots;
         let previous = self.preferences.settings();
+        let output_changed = config.output_device != self.preferences.live().output_device
+            || config.pipewire_auto_mix != previous.pipewire_auto_mix;
         type DeferredCommand = fn(&Config) -> AudioCommand;
         let commands: [Option<DeferredCommand>; _] = [
             (config.visualization_enabled != previous.visualization_enabled)
@@ -223,13 +225,10 @@ impl Core {
                     peak_policy: c.replaygain_peak_policy,
                 }),
         ];
+        let command_count = commands.iter().flatten().count() + usize::from(output_changed);
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
-        // Explicit Apply always validates output, including an unchanged idle sink.
-        // The engine compares admitted output targets, so validation alone does
-        // not revoke the PCM identity or discard a client's partial FFT window.
-        self.engine
-            .ensure_command_capacity(1 + commands.iter().flatten().count())?;
+        self.engine.ensure_command_capacity(command_count)?;
         let ffmpeg_status = if !config.ffmpeg_enabled {
             "disabled".to_owned()
         } else {
@@ -254,21 +253,23 @@ impl Core {
                 self.state.library.structure_revision.wrapping_add(1);
         }
         tracing::info!("configuration_updated");
-        let request = self.output_settings_request.wrapping_add(1);
         let config = self.preferences.settings();
         (|| -> Result<()> {
             for command in commands.into_iter().flatten() {
                 self.engine.send(command(config))?;
             }
-            self.engine.send(AudioCommand::OutputSettings {
-                request,
-                device: config.output_device.clone(),
-                auto_mix: config.pipewire_auto_mix,
-            })
+            if output_changed {
+                let request = self.output_settings_request.wrapping_add(1);
+                self.engine.send(AudioCommand::OutputSettings {
+                    request,
+                    device: config.output_device.clone(),
+                    auto_mix: config.pipewire_auto_mix,
+                })?;
+                self.output_settings_request = request;
+            }
+            Ok(())
         })()
-        .context("Configuration saved, but audio application failed")?;
-        self.output_settings_request = request;
-        Ok(())
+        .context("Configuration saved, but audio application failed")
     }
     pub(in crate::core) fn write_config(&mut self, config: &Arc<Config>) -> Result<bool> {
         self.write_config_with(config, |path, baseline| {
