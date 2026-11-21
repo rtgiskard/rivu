@@ -199,7 +199,7 @@ fn show_processing(
 ) -> Result<()> {
     let response = session.get_state(StateSections {
         processing: true,
-        playback: true,
+        playback: mode == OutputMode::Verbose || (!graph_only && mode == OutputMode::Json),
         configuration: true,
         ..Default::default()
     })?;
@@ -209,7 +209,6 @@ fn show_processing(
         .context("Missing configuration state")?
         .config;
     let instance_id = super::tasks::instance_id(session)?;
-    let playback = response.playback.context("Missing playback state")?;
     let mut output = std::io::stdout().lock();
     if mode == OutputMode::Json {
         let processing = state
@@ -220,6 +219,7 @@ fn show_processing(
         let value = if graph_only {
             serde_json::json!({"graph":config.processing_graph,"latest_task":processing})
         } else {
+            let playback = response.playback.context("Missing playback state")?;
             serde_json::json!({"processing_bypassed":config.processing_bypassed,"processing_selection":playback.processing_selection,"processing_audition":playback.processing_audition,"equalizer":config.equalizer,"presets":config.equalizer_presets,"denoise":config.denoise,"neural":config.neural,"processing_graph":config.processing_graph,"processing":processing})
         };
         writeln!(output, "{}", serde_json::to_string_pretty(&value)?)?;
@@ -237,6 +237,7 @@ fn show_processing(
             )?;
         }
         if mode == OutputMode::Verbose {
+            let playback = response.playback.context("Missing playback state")?;
             write_processing_source(
                 &mut output,
                 i18n,
@@ -369,10 +370,7 @@ fn run_live(
             }
         },
         ProcessingAction::Eq { edit } => {
-            let state = session.get_state(StateSections {
-                configuration: true,
-                ..Default::default()
-            })?;
+            let state = session.get_state(StateSections::default())?;
             equalizer_command(&edit, state.revisions.configuration)?
         }
         ProcessingAction::Denoise { patch } => Command::DenoiseEdit {
