@@ -188,11 +188,7 @@ impl Core {
 
         self.projections.playlist_total = true;
         let prepared = projections::PreparedProjections {
-            playlist_total: Some(
-                self.store
-                    .playlist_summary_page(None, 0, 0)
-                    .map(|page| page.total),
-            ),
+            playlist_total: Some(self.store.playlist_count()),
             ..Default::default()
         };
         self.accept_prepared_projections(prepared)

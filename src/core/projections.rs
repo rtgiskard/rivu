@@ -41,11 +41,7 @@ impl PreparedProjections {
         Self {
             library_total: demand.track_total.then(|| store.track_count()),
             history: demand.history.then(|| store.history(MAX_QUERY_ROWS)),
-            playlist_total: demand.playlist_total.then(|| {
-                store
-                    .playlist_summary_page(None, 0, 0)
-                    .map(|page| page.total)
-            }),
+            playlist_total: demand.playlist_total.then(|| store.playlist_count()),
         }
     }
 }

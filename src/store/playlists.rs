@@ -172,6 +172,15 @@ impl Store {
             .optional()?)
     }
 
+    pub fn playlist_count(&self) -> Result<usize> {
+        self.playlist_count_matching(None)
+    }
+
+    fn playlist_count_matching(&self, query: Option<&str>) -> Result<usize> {
+        Ok(self.conn.prepare_cached("SELECT COUNT(*) FROM playlists WHERE id>0 AND (?1 IS NULL OR instr(lower(name),?1)>0)")?.query_row([query],
+        |row| row.get::<_, i64>(0),)? as usize)
+    }
+
     pub fn playlist_summary_page(
         &self,
         query: Option<&str>,
@@ -179,8 +188,7 @@ impl Store {
         limit: usize,
     ) -> Result<Page<PlaylistSummary>> {
         let query = search_query(query);
-        let total = self.conn.prepare_cached("SELECT COUNT(*) FROM playlists WHERE id>0 AND (?1 IS NULL OR instr(lower(name),?1)>0)")?.query_row([query.as_deref()],
-        |row| row.get::<_, i64>(0),)? as usize;
+        let total = self.playlist_count_matching(query.as_deref())?;
         if limit == 0 {
             return Ok(Page {
                 total,

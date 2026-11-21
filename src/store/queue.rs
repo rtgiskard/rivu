@@ -410,17 +410,22 @@ impl Store {
         Ok(count)
     }
 
+    pub(crate) fn playlist_has_entries(&self, playlist: i64) -> Result<bool> {
+        self.conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1 AND id>0")?
+            .query_row([playlist], |row| row.get(0))
+            .optional()?
+            .context("Playlist not found")
+    }
+
     pub(crate) fn replace_queue_from_playlist(&self, playlist: i64) -> Result<()> {
         ensure!(playlist > 0, "Playlist not found");
         let tx = self.conn.unchecked_transaction()?;
-        let nonempty: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1)",
-            [playlist],
-            |row| row.get(0),
-        )?;
-        ensure!(nonempty, "Playlist is empty or not found");
         delete_queue_rows(&tx)?;
-        super::positions::copy_into_empty_collection(&tx, playlist, 0)?;
+        ensure!(
+            super::positions::copy_into_empty_collection(&tx, playlist, 0)? != 0,
+            "Playlist is empty or not found"
+        );
         tx.commit()?;
         Ok(())
     }

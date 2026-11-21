@@ -1981,6 +1981,31 @@ fn empty_and_singleton_queue_edits_are_valid_and_empty_bulk_requests_are_no_ops(
 }
 
 #[test]
+fn invalid_playlist_play_keeps_the_current_playback_and_queue() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let empty = core.store.create_playlist("Empty").unwrap();
+    let before = core.state.queue.clone();
+    let ids = core.store.queue_ids().unwrap();
+    for (playlist_id, expected) in [
+        (0, "Playlist not found"),
+        (i64::MAX, "Playlist not found"),
+        (empty, "Playlist is empty"),
+    ] {
+        let error = core
+            .command(Command::PlayPlaylist { playlist_id })
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(core.state.queue, before);
+        assert_eq!(core.store.queue_ids().unwrap(), ids);
+    }
+    assert!(core.store.replace_queue_from_playlist(empty).is_err());
+    assert_eq!(core.store.queue_ids().unwrap(), ids);
+    assert_queue_saved(&core);
+}
+
+#[test]
 fn failed_playlist_start_does_not_keep_an_obsolete_queue_selection() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);

@@ -127,11 +127,10 @@ impl Core {
     }
 
     pub(in crate::core) fn play_playlist(&mut self, playlist_id: i64) -> Result<()> {
-        let total = self
-            .store
-            .playlist_entries_page(playlist_id, None, 0, 0)?
-            .total;
-        ensure!(total > 0, "Playlist is empty");
+        ensure!(
+            self.store.playlist_has_entries(playlist_id)?,
+            "Playlist is empty"
+        );
         self.stop()?;
         self.store.replace_queue_from_playlist(playlist_id)?;
         self.queue_replaced(true)?;

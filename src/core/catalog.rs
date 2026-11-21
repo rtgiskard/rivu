@@ -319,11 +319,7 @@ fn save_scan(
         saved.projections.history = Some(store.history(MAX_QUERY_ROWS));
     }
     if saved.commits.playlist.confirmed().is_some() {
-        saved.projections.playlist_total = Some(
-            store
-                .playlist_summary_page(None, 0, 0)
-                .map(|page| page.total),
-        );
+        saved.projections.playlist_total = Some(store.playlist_count());
     }
     tracing::info!(
         id = saved.id,

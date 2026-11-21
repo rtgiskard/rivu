@@ -499,7 +499,7 @@ impl Core {
         };
         self.state.library.track_total = self.store.track_count()?;
         self.projections.track_total = false;
-        self.state.library.playlist_total = self.store.playlist_summary_page(None, 0, 0)?.total;
+        self.state.library.playlist_total = self.store.playlist_count()?;
         self.projections.playlist_total = false;
         self.recover_playlist_tokens()?;
         self.replace_history(self.store.history(MAX_QUERY_ROWS)?);
