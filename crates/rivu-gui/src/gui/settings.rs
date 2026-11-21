@@ -851,7 +851,10 @@ impl Settings {
         self.root_stats.cancel();
         self.schedule_library_stats_expiry(cx);
         self.dropdown.close();
-        self.reset(&self.handle.editable_config_snapshot(), cx);
+        self.artwork_cache_report = None;
+        self.artwork_cache_error = None;
+        self.layout_switch_error = None;
+        self.model.end_session();
         cx.emit(SettingsEvent::Closed);
     }
 
@@ -1379,6 +1382,7 @@ impl Settings {
         true
     }
 
+    #[cfg(test)]
     fn reset(&mut self, config: &Arc<Config>, cx: &mut App) {
         self.model.reset(config);
         self.artwork_cache_report = None;
@@ -2106,7 +2110,7 @@ impl Settings {
     }
 
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
-        if self.model.applying() {
+        if !self.active || self.model.applying() {
             return;
         }
         if matches!(self.model.target(), Target::Artwork(_)) {
@@ -3408,7 +3412,6 @@ mod tests {
             assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
             this.cancel(cx);
             assert!(!this.active);
-            assert_eq!(this.value(Field::ScanMaxDepth, cx), "7");
             assert_eq!(this.handle.config_snapshot().scan_max_depth, 7);
         });
     }
@@ -3439,6 +3442,64 @@ mod tests {
                 this.cancel(cx);
                 assert!(!this.active);
                 assert_eq!(this.model.target(), Target::Global);
+                assert_ne!(this.model.session(), session);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn cancel_leaves_controls_alone_and_both_open_paths_reload(cx: &mut TestAppContext) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let window = open_window(cx, &settings);
+        for (volume, percent, artwork) in [(0.2, "20", false), (0.3, "30", true)] {
+            settings.update(cx, |this, cx| {
+                this.model.draft.volume = 0.9;
+                this.set_value(Field::Volume, "unfinished", None, cx);
+                this.open_setting_dropdown(
+                    vec![ChoiceItem::new(SettingChoice::CustomFont, "Custom")],
+                    0,
+                );
+                let session = this.model.session();
+                this.maintain_artwork_cache(false, cx);
+                this.cancel(cx);
+                assert!(!this.active);
+                assert_ne!(this.model.session(), session);
+                assert!(!this.dropdown.is_open());
+                assert!(this.artwork_cache_busy.is_some());
+                assert_eq!(this.value(Field::Volume, cx), "unfinished");
+            });
+            futures::executor::block_on(
+                runtime
+                    .handle
+                    .request_command(Command::Volume { value: volume }),
+            )
+            .observed_result()
+            .unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                settings.update(cx, |this, cx| {
+                    if artwork {
+                        let options = ArtworkOptions {
+                            period_seconds: 23.0,
+                            ..ArtworkOptions::from(this.handle.config_snapshot().as_ref())
+                        };
+                        this.open_artwork(42, options, window, cx);
+                        assert_eq!(this.model.target(), Target::Artwork(42));
+                        assert_eq!(this.value(Field::ArtworkPeriodSeconds, cx), "23");
+                    } else {
+                        this.open(window, cx);
+                        assert_eq!(this.model.target(), Target::Global);
+                    }
+                    assert!(this.active);
+                    assert_eq!(this.model.baseline().volume, volume);
+                    assert_eq!(this.value(Field::Volume, cx), percent);
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+            settings.read_with(cx, |this, _| {
+                assert!(this.artwork_cache_busy.is_none());
+                assert!(this.artwork_cache_report.is_none());
+                assert!(this.artwork_cache_error.is_none());
             });
         }
     }
