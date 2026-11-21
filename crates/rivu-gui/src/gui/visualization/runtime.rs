@@ -604,7 +604,7 @@ impl VisualizerRuntime {
         self.animation_clock.accept(&self.staging, now);
         let time = self.animation_clock.advance(now);
         if self.frequency_enabled {
-            self.frequency_views.update(&self.staging, time);
+            self.frequency_views.present(&self.staging, time);
         }
         self.style_coordinator.update(&self.staging, time);
         for (id, view) in &self.views {
@@ -1288,6 +1288,7 @@ mod tests {
                     spectrum_db: vec![-12.0, -24.0],
                     ..Default::default()
                 };
+                owner.frequency_views.collect(&owner.staging);
                 owner.presentation_pending = true;
                 owner.present_analysis(start, cx);
                 assert_eq!(owner.animation_clock.latest, Some(Duration::from_secs(1)));
