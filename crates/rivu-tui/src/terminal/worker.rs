@@ -6,7 +6,7 @@ use rivu_protocol::{
     AppCommand,
     model::{ClientSnapshot, LibrarySort, Query, QueryIdentity, QueryStamp},
     query_tracking::QuerySubmission,
-    response::{Ack, ObservedState, QueryError, StateSections, StateWatch, ViewResponse},
+    response::{ObservedState, QueryError, StateSections, StateWatch, ViewResponse},
 };
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -91,39 +91,22 @@ pub(super) fn spawn_watcher(data_dir: &Path, instance_id: u32) -> Watcher {
             return;
         }
         loop {
-            match session.watch_until(StateWatch {
+            match session.wait_state_until(StateWatch {
                 revisions: state.applied(),
                 sections: TERMINAL_SECTIONS,
             }) {
-                Ok(Some(revisions)) => {
-                    let changed = revisions
-                        .changed_since(state.applied())
-                        .intersection(TERMINAL_SECTIONS);
-                    if !changed.is_empty() {
-                        match session.get_state_since(TERMINAL_SECTIONS, state.applied()) {
-                            Ok(response) if response.sections().is_empty() => continue,
-                            Ok(response) => {
-                                state.apply(state.instance_id(), response);
-                                let shutting_down = state.snapshot().system.shutting_down;
-                                *latest_worker.lock() =
-                                    Some(Ok((state.instance_id(), state.snapshot().clone())));
-                                let disconnected = sender.try_send(()).is_err_and(|error| {
-                                    matches!(
-                                        error,
-                                        crossbeam_channel::TrySendError::Disconnected(_)
-                                    )
-                                });
-                                if disconnected || shutting_down {
-                                    break;
-                                }
-                            }
-                            Err(error) => {
-                                *latest_worker.lock() =
-                                    Some(Err(format!("TUI state read failed: {error:#}")));
-                                let _ = sender.try_send(());
-                                break;
-                            }
-                        }
+                Ok(Some(response)) => {
+                    if response.sections().is_empty() {
+                        continue;
+                    }
+                    state.apply(state.instance_id(), response);
+                    let shutting_down = state.snapshot().system.shutting_down;
+                    *latest_worker.lock() =
+                        Some(Ok((state.instance_id(), state.snapshot().clone())));
+                    let disconnected =
+                        matches!(sender.try_send(()), Err(TrySendError::Disconnected(_)));
+                    if disconnected || shutting_down {
+                        break;
                     }
                 }
                 Ok(None) => break, // Only local owner cancellation ends a watch this way.
@@ -204,7 +187,7 @@ pub(super) enum CommandFeedback {
 
 pub(super) struct CommandCompletion {
     pub(super) feedback: CommandFeedback,
-    pub(super) result: Result<Ack, WorkerFailure>,
+    pub(super) result: Result<rivu_protocol::wire::CommandReply, WorkerFailure>,
 }
 
 pub(super) struct CommandWorker {
@@ -279,7 +262,9 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
                 break;
             }
             let result = match &mut session {
-                Ok(session) => session.request_ack(command).map_err(WorkerFailure::from),
+                Ok(session) => session
+                    .request_command(command)
+                    .map_err(WorkerFailure::from),
                 Err(error) => Err(error.clone()),
             };
             let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);

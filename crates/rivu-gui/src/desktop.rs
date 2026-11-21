@@ -380,9 +380,7 @@ impl Desktop {
         ensure!(
             ack.is_success(),
             "{}",
-            ack.error
-                .as_deref()
-                .unwrap_or("Desktop registration failed")
+            ack.error().unwrap_or("Desktop registration failed")
         );
         let mut signals =
             async_signal::Signals::new([async_signal::Signal::Int, async_signal::Signal::Term])?;
@@ -885,7 +883,7 @@ mod tests {
         });
         let _ = wakes.try_recv();
         assert!(
-            rivu_client::request_ack(directory.path(), rivu_protocol::AppCommand::Shutdown)
+            rivu_client::request_command(directory.path(), rivu_protocol::AppCommand::Shutdown)
                 .unwrap()
                 .is_success()
         );

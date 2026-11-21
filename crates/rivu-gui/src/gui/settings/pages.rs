@@ -1698,7 +1698,9 @@ mod tests {
                     "hidden" => settings.active = false,
                     "page" => settings.page = SettingsPage::Interface,
                     "session" => {
-                        settings.model.reset(&runtime.handle.config_snapshot());
+                        settings
+                            .model
+                            .reset(&runtime.handle.editable_config_snapshot());
                         settings.model.draft.library_roots = roots.clone();
                     }
                     _ => unreachable!(),

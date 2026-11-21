@@ -22,7 +22,7 @@ fn fixture() -> Fixture {
             settings: AnalysisSettings {
                 fps: 60,
                 fft_size: 512,
-                ..AnalysisSettings::from(&Config::default())
+                ..AnalysisSettings::from(&ConfigSettings::default())
             },
             ..Desired::default()
         }),
@@ -353,9 +353,9 @@ fn fresh_pcm_publishes_without_gui_permits_and_resumes_after_visibility_changes(
             heard_frame: u64::MAX,
             ..PcmState::default()
         };
-        let config = Config {
+        let config = ConfigSettings {
             analysis_fft_size: 512,
-            ..Config::default()
+            ..ConfigSettings::default()
         };
         f.client.configure(&config);
         stereo(&f.window, header(state, 0), 0.25, 512);
@@ -1096,9 +1096,9 @@ fn hidden_waveform_master_disable_and_shutdown_fence_collection_and_full_scans()
             .unwrap();
         let hidden = summary_after(&f, initial.revision).await;
 
-        f.client.configure(&Config {
+        f.client.configure(&ConfigSettings {
             visualization_enabled: false,
-            ..Config::default()
+            ..ConfigSettings::default()
         });
         assert_eq!(
             f.client.waveform.read().request_epoch,

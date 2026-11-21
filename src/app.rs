@@ -477,7 +477,7 @@ mod tests {
             return;
         }
         let (directory, worker) = running_service();
-        let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
+        let ack = rivu_client::request_command(directory.path(), AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
         worker.join().unwrap().unwrap();
         let _owner = ipc::SocketOwner::acquire(directory.path())
@@ -496,11 +496,11 @@ mod tests {
         let invalid = "[playback]\nvolume_percent = 101\n";
         std::fs::write(&config_path, invalid).unwrap();
         assert!(
-            rivu_client::request_ack(directory.path(), Command::Volume { value: 0.25 })
+            rivu_client::request_command(directory.path(), Command::Volume { value: 0.25 })
                 .unwrap()
                 .is_success()
         );
-        let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
+        let ack = rivu_client::request_command(directory.path(), AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
         let error = worker.join().unwrap().unwrap_err();
         assert!(
@@ -591,7 +591,7 @@ mod tests {
             running.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         assert!(
-            rivu_client::request_ack(directory.path(), Command::Volume { value: 0.4 })
+            rivu_client::request_command(directory.path(), Command::Volume { value: 0.4 })
                 .unwrap()
                 .is_success()
         );
@@ -623,7 +623,7 @@ mod tests {
             futures::executor::block_on(worker).unwrap();
         }
         assert!(
-            rivu_client::request_ack(directory.path(), Command::OptimizeDatabase)
+            rivu_client::request_command(directory.path(), Command::OptimizeDatabase)
                 .unwrap()
                 .is_success()
         );
@@ -696,7 +696,7 @@ mod lifetime_tests {
         assert!(app.activation_requests.is_empty());
         assert!(
             client
-                .request_ack(rivu_protocol::AppCommand::ShowWindow)
+                .request_command(rivu_protocol::AppCommand::ShowWindow)
                 .unwrap()
                 .is_success()
         );

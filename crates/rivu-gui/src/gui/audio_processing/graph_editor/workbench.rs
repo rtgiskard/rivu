@@ -1734,15 +1734,16 @@ mod tests {
             .unwrap()
             .center();
         let revision = runtime.handle.config_snapshot().processing_graph.revision;
-        let response =
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
+        let response = futures::executor::block_on(runtime.handle.request_command(
+            Command::ProcessingGraphEdit {
                 expected_revision: revision,
                 edit: Box::new(GraphEdit::Replace {
                     id: 3,
                     kind: GraphNodeKind::Output,
                 }),
-            }));
-        assert!(response.ack.is_success());
+            },
+        ));
+        assert!(response.is_success());
         click_window(cx, handle, position);
         assert!(owner.read_with(cx, |this, _| this.commands.is_empty()));
         assert!(matches!(

@@ -66,7 +66,7 @@ flowchart LR
     end
     Clients["TUI / CLI / external clients"]
     subgraph Service["Service process: App"]
-        IPC["Instance-bound command / query / Watch IPC"]
+        IPC["Instance-bound command / query / state IPC"]
         Core["Core: authoritative state and admission"]
         Audio["Audio worker and output"]
         PCM["Bounded SHM PCM window"]
@@ -84,7 +84,7 @@ flowchart LR
 The GUI has no normal dependency on the root crate, audio execution or SQLite.
 Desktop activation requires no GPUI event loop in the service.
 
-Commands, queries, configuration mutations and Watch use instance-bound local
+Commands, queries, configuration mutations and state observation use instance-bound local
 IPC sessions. State getters read the GUI's published cache, never a socket.
 Configuration edits merge at Core against current owner state; the GUI does not
 write a stale whole-configuration snapshot. An uncertain mutation result is not

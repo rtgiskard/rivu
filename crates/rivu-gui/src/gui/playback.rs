@@ -217,7 +217,7 @@ impl Playback {
     fn dispatch_volume(&mut self, value: f32, cx: &mut Context<Self>) {
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let delivery = handle.request_ack(Command::Volume { value }).await;
+            let delivery = handle.request_command(Command::Volume { value }).await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(error) = delivery.observed_result() {
                     cx.emit(PlaybackEvent::Error(error));

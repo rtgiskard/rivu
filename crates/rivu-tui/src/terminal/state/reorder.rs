@@ -483,7 +483,7 @@ mod tests {
                     })
                     .into())
                 } else {
-                    Ok(Ack::new(AckStatus::Unknown, None, 0))
+                    Ok(Ack::new(AckStatus::Unknown, None, 0).into())
                 };
                 apply_command_completion(
                     &mut tui.ui,

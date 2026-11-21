@@ -6,17 +6,17 @@ use rivu_protocol::transport::{
     read_response_frame, timeout, unpack_error, unpack_hello, write_request_frame_buffered,
 };
 use rivu_protocol::wire::{
-    SessionState, WireCommand, WireQuery, WireRequest, WireResponse, WireRetainedQuery,
-    state_response,
+    SessionState, WireCommand, WireQuery, WireReadQuery, WireRequest, WireResponse, state_response,
 };
 use rivu_protocol::{
     AppCommand,
     model::Query,
     query_wait_timeout,
     response::{
-        Ack, AckStatus, QueryError, QueryResponse, StateRequest, StateResponse, StateRevisions,
+        AckStatus, QueryError, QueryResponse, StateRequest, StateResponse, StateRevisions,
         StateSections, StateWatch,
     },
+    wire::{CommandRefusal, CommandReply},
 };
 use std::{
     os::unix::net::UnixStream,
@@ -197,13 +197,18 @@ impl ClientSession {
         wait_timeout: Duration,
         write_started: &mut bool,
     ) -> Result<WireResponse> {
-        self.exchange_until(request, wait_timeout, write_started, std::future::pending())
+        self.exchange_until(
+            request,
+            Some(wait_timeout),
+            write_started,
+            std::future::pending(),
+        )
     }
 
     fn exchange_until(
         &mut self,
         request: &WireRequest,
-        wait_timeout: Duration,
+        wait_timeout: Option<Duration>,
         write_started: &mut bool,
         cancelled: impl Future<Output = ()>,
     ) -> Result<WireResponse> {
@@ -211,7 +216,7 @@ impl ClientSession {
         let response_clock = self
             .response_clock
             .as_deref()
-            .filter(|_| matches!(request, WireRequest::Command(_)))
+            .filter(|_| matches!(request, WireRequest::Command(_) | WireRequest::Query(_)))
             .map(|clock| (clock, clock.now()));
         let result = async_io::block_on(async {
             future::or(
@@ -241,42 +246,48 @@ impl ClientSession {
                     )
                     .await?;
                     let response = read_response_frame(stream, &mut self.read_buffer);
-                    let response = if let WireRequest::QueryRetained(query) = request {
-                        match future::or(async { Some(response.await) }, async {
-                            cancelled.await;
-                            None
-                        })
-                        .await
-                        {
-                            Some(response) => response,
-                            None => {
-                                // Cancellation has no response of its own. Keep the
-                                // serial read slot until Core has finished rollback.
-                                write_request_frame_buffered(
-                                    stream,
-                                    &WireRequest::QueryCancel(query.id),
-                                    &mut self.write_buffer,
-                                    &mut false,
-                                )
-                                .await?;
-                                read_response_frame(stream, &mut self.read_buffer).await
+                    let response =
+                        if let (WireRequest::Query(query), None) = (request, wait_timeout) {
+                            match future::or(async { Some(response.await) }, async {
+                                cancelled.await;
+                                None
+                            })
+                            .await
+                            {
+                                Some(response) => response,
+                                None => {
+                                    // Cancellation has no response of its own. Keep the
+                                    // serial read slot until Core has finished rollback.
+                                    write_request_frame_buffered(
+                                        stream,
+                                        &WireRequest::CancelRead(query.id),
+                                        &mut self.write_buffer,
+                                        &mut false,
+                                    )
+                                    .await?;
+                                    read_response_frame(stream, &mut self.read_buffer).await
+                                }
                             }
-                        }
-                    } else if matches!(request, WireRequest::Watch(_) | WireRequest::WaitTask(_)) {
-                        response.await
-                    } else {
-                        let deadline = rivu_protocol::transport::response_timeout(wait_timeout);
-                        #[cfg(test)]
-                        let response = match response_clock {
-                            Some((clock, started)) => {
-                                clock.timeout_at(started + deadline, response).await
-                            }
-                            None => timeout(deadline, response).await,
-                        };
-                        #[cfg(not(test))]
-                        let response = timeout(deadline, response).await;
-                        response.context("Reading IPC response timed out")?
-                    }?;
+                        } else if matches!(
+                            request,
+                            WireRequest::WaitState(_) | WireRequest::WaitTask(_)
+                        ) {
+                            response.await
+                        } else {
+                            let deadline = rivu_protocol::transport::response_timeout(
+                                wait_timeout.expect("only retained queries omit a timeout"),
+                            );
+                            #[cfg(test)]
+                            let response = match response_clock {
+                                Some((clock, started)) => {
+                                    clock.timeout_at(started + deadline, response).await
+                                }
+                                None => timeout(deadline, response).await,
+                            };
+                            #[cfg(not(test))]
+                            let response = timeout(deadline, response).await;
+                            response.context("Reading IPC response timed out")?
+                        }?;
                     if self.stop.is_cancelled() {
                         bail!("IPC request cancelled");
                     }
@@ -333,7 +344,12 @@ impl ClientSession {
                 }
             };
         }
-        match unpack_error(self.exchange(&WireRequest::State(request), query_wait_timeout())?)? {
+        let response = self.exchange(&WireRequest::ReadState(request), query_wait_timeout())?;
+        self.decode_state(response)
+    }
+
+    fn decode_state(&mut self, response: WireResponse) -> Result<StateResponse> {
+        match unpack_error(response)? {
             WireResponse::State(state) => Ok(state_response(state)),
             _ => {
                 self.disconnect();
@@ -344,14 +360,7 @@ impl ClientSession {
 
     pub fn query(&mut self, query: Query) -> Result<QueryResponse> {
         self.ensure_handshake()?;
-        let request = WireRequest::Query(WireQuery::from(query));
-        match unpack_error(self.exchange(&request, query_wait_timeout())?)? {
-            WireResponse::Query(response) => Ok(response),
-            _ => {
-                self.disconnect();
-                bail!("IPC response was not a query response")
-            }
-        }
+        self.exchange_query(query, Some(query_wait_timeout()), std::future::pending())
     }
 
     /// Wait for physical query completion without a transport response deadline.
@@ -377,17 +386,25 @@ impl ClientSession {
                 result: Err(QueryError::Cancelled),
             });
         }
+        self.exchange_query(query, None, cancelled)
+    }
+
+    fn exchange_query(
+        &mut self,
+        query: Query,
+        wait_timeout: Option<Duration>,
+        cancelled: impl Future<Output = ()>,
+    ) -> Result<QueryResponse> {
         self.next_query_id = self.next_query_id.wrapping_add(1);
-        let request = WireRequest::QueryRetained(WireRetainedQuery {
+        let request = WireRequest::Query(WireReadQuery {
             id: self.next_query_id,
             query: WireQuery::from(query),
         });
-        match unpack_error(self.exchange_until(
-            &request,
-            query_wait_timeout(),
-            &mut false,
-            cancelled,
-        )?)? {
+        let response = self.exchange_until(&request, wait_timeout, &mut false, cancelled)?;
+        // A protocol error can be a terminal rejection of the connection.
+        // Typed query failures remain inside QueryResponse and are reusable.
+        let response = unpack_error(response).inspect_err(|_| self.disconnect())?;
+        match response {
             WireResponse::Query(response) => Ok(response),
             _ => {
                 self.disconnect();
@@ -397,13 +414,13 @@ impl ClientSession {
     }
 
     /// Register this session as a desktop host until its socket disconnects.
-    pub fn register_desktop(&mut self) -> Result<Ack> {
+    pub fn register_desktop(&mut self) -> Result<CommandReply> {
         self.ensure_handshake()?;
         match unpack_error(self.exchange(&WireRequest::RegisterDesktop, query_wait_timeout())?)? {
-            WireResponse::Ack(ack) => Ok(ack),
+            WireResponse::Command(reply @ CommandReply::Receipt(_)) => Ok(reply),
             _ => {
                 self.disconnect();
-                bail!("IPC response was not a desktop registration acknowledgement")
+                bail!("IPC response was not a desktop registration receipt")
             }
         }
     }
@@ -458,7 +475,7 @@ impl ClientSession {
         }
     }
 
-    pub fn request_ack(&mut self, command: impl Into<AppCommand>) -> Result<Ack> {
+    pub fn request_command(&mut self, command: impl Into<AppCommand>) -> Result<CommandReply> {
         self.ensure_handshake().context(CommandFailure {
             status: AckStatus::NotAdmitted,
         })?;
@@ -470,10 +487,15 @@ impl ClientSession {
             .exchange_with_write_evidence(&request, wait_timeout, &mut write_started)
             .and_then(unpack_error)
             .and_then(|response| match response {
-                WireResponse::Ack(response) => Ok(response),
-                _ => bail!("IPC response was not an acknowledgement"),
+                WireResponse::Command(reply) => Ok(reply),
+                _ => bail!("IPC response was not a command reply"),
             });
-        if result.is_err() {
+        if result.is_err()
+            || matches!(
+                result,
+                Ok(CommandReply::Refused(CommandRefusal::MalformedCommand(_)))
+            )
+        {
             self.disconnect();
         }
         result.context(CommandFailure {
@@ -485,24 +507,27 @@ impl ClientSession {
         })
     }
 
-    pub fn watch(&mut self, watch: StateWatch) -> Result<StateRevisions> {
-        self.watch_until(watch)?
-            .ok_or_else(|| anyhow::anyhow!("Watcher cancelled"))
+    /// Wait for a selected section to differ from the supplied baseline.
+    pub fn wait_state(&mut self, watch: StateWatch) -> Result<StateResponse> {
+        self.wait_state_until(watch)?
+            .ok_or_else(|| anyhow::anyhow!("State wait cancelled"))
     }
 
-    pub fn watch_until(&mut self, watch: StateWatch) -> Result<Option<StateRevisions>> {
-        self.ensure_handshake()?;
-        let request = WireRequest::Watch(watch);
-        let response = match self.exchange(&request, query_wait_timeout()) {
-            Ok(response) => response,
-            Err(_) if self.stop.is_cancelled() => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        match unpack_error(response)? {
-            WireResponse::Watch(revisions) => Ok(Some(revisions)),
-            _ => {
+    /// Like `wait_state`, returning `None` on local session cancellation.
+    pub fn wait_state_until(&mut self, watch: StateWatch) -> Result<Option<StateResponse>> {
+        let response = self
+            .ensure_handshake()
+            .and_then(|()| self.exchange(&WireRequest::WaitState(watch), query_wait_timeout()))
+            .and_then(|response| self.decode_state(response));
+        match response {
+            Ok(state) => Ok(Some(state)),
+            Err(error) => {
                 self.disconnect();
-                bail!("IPC response was not a watch response")
+                if self.stop.is_cancelled() {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
             }
         }
     }
@@ -516,8 +541,8 @@ pub fn get_state(data_dir: &Path, sections: StateSections) -> Result<StateRespon
     client_session(data_dir).get_state(sections)
 }
 
-pub fn request_ack(data_dir: &Path, command: impl Into<AppCommand>) -> Result<Ack> {
-    client_session(data_dir).request_ack(command)
+pub fn request_command(data_dir: &Path, command: impl Into<AppCommand>) -> Result<CommandReply> {
+    client_session(data_dir).request_command(command)
 }
 
 #[cfg(test)]
@@ -525,9 +550,10 @@ mod tests {
     use super::*;
     use rivu_protocol::{
         model::Command,
+        response::Ack,
         test_support::{
             complete_test_handshake, complete_test_handshake_for_instance, read_test_command,
-            read_test_request, reply_test_ack, write_test_response,
+            read_test_request, reply_test_command, write_test_response,
         },
         transport::encode_response_frame_into,
         wire::{HelloResponse, wire_state},
@@ -631,12 +657,12 @@ mod tests {
             // Advance the response clock, then wait until the client's timeout
             // branch has observed it before making the response readable.
             clock.advance_and_wait_for_poll(Duration::from_secs(121));
-            reply_test_ack(&mut stream, Ack::from_result(Ok(()), 17));
+            reply_test_command(&mut stream, Ack::from_result(Ok(()), 17).into());
         });
 
-        let ack = client.request_ack(Command::OptimizeDatabase).unwrap();
+        let ack = client.request_command(Command::OptimizeDatabase).unwrap();
         assert!(ack.is_success());
-        assert_eq!(ack.revision, 17);
+        assert_eq!(ack.receipt().unwrap().revision, 17);
         server.join().unwrap();
     }
 
@@ -671,12 +697,12 @@ mod tests {
             assert!(
                 matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
             );
-            reply_test_ack(&mut stream, Ack::from_result(Ok(()), 2));
+            reply_test_command(&mut stream, Ack::from_result(Ok(()), 2).into());
         });
         let mut client = client_session(directory.path());
         client.response_clock = Some(clock);
         let error = client
-            .request_ack(Command::CreatePlaylist {
+            .request_command(Command::CreatePlaylist {
                 name: "first".into(),
             })
             .unwrap_err();
@@ -686,7 +712,7 @@ mod tests {
         );
         assert!(
             client
-                .request_ack(Command::CreatePlaylist {
+                .request_command(Command::CreatePlaylist {
                     name: "second".into()
                 })
                 .unwrap()
@@ -717,13 +743,13 @@ mod tests {
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
         let mut client = client_session(directory.path());
-        let error = client.request_ack(Command::Pause).unwrap_err();
+        let error = client.request_command(Command::Pause).unwrap_err();
         assert_eq!(
             error.downcast_ref::<CommandFailure>().unwrap().status,
             AckStatus::NotAdmitted
         );
         let error = client
-            .request_ack(Command::Scan {
+            .request_command(Command::Scan {
                 paths: vec![PathBuf::from("x".repeat(rivu_protocol::wire::MAX_REQUEST))],
                 force: false,
             })
@@ -838,7 +864,7 @@ mod tests {
             client.bind_instance(21).unwrap();
             let error = if cancel {
                 client
-                    .request_ack(Command::CancelScan { id: 7 })
+                    .request_command(Command::CancelScan { id: 7 })
                     .unwrap_err()
             } else {
                 client.query(Query::ScanTask { id: 7 }).unwrap_err()
@@ -876,7 +902,7 @@ mod tests {
             stop.cancel();
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
-        let error = client.request_ack(Command::Pause).unwrap_err();
+        let error = client.request_command(Command::Pause).unwrap_err();
         assert_eq!(
             error.downcast_ref::<CommandFailure>().unwrap().status,
             AckStatus::NotAdmitted
@@ -914,7 +940,7 @@ mod tests {
             listener
         });
         let error = client
-            .request_ack(Command::CreatePlaylist {
+            .request_command(Command::CreatePlaylist {
                 name: "accepted-once".into(),
             })
             .unwrap_err();
@@ -925,7 +951,7 @@ mod tests {
         assert_eq!(client.instance_id(), None);
         let listener = server.join().unwrap();
         // Stopping a session is sticky, even for a later explicit request.
-        let error = client.request_ack(Command::Pause).unwrap_err();
+        let error = client.request_command(Command::Pause).unwrap_err();
         assert_eq!(
             error.downcast_ref::<CommandFailure>().unwrap().status,
             AckStatus::NotAdmitted
@@ -954,7 +980,7 @@ mod tests {
             complete_test_handshake(&mut stream);
             assert!(matches!(
                 read_test_request(&mut stream),
-                WireRequest::Watch(_)
+                WireRequest::WaitState(_)
             ));
             watch_started.send(()).unwrap();
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
@@ -965,11 +991,11 @@ mod tests {
             wait_for_watch.recv().unwrap();
             stop.cancel();
         });
-        assert_eq!(
+        assert!(
             client
-                .watch_until(StateRevisions::default().into())
-                .unwrap(),
-            None
+                .wait_state_until(StateRevisions::default().into())
+                .unwrap()
+                .is_none()
         );
         assert!(client.stream.is_none());
         cancellation.join().unwrap();
@@ -1041,7 +1067,10 @@ mod tests {
                 read_test_request(&mut stream),
                 WireRequest::WaitTask(_)
             ));
-            write_test_response(&mut stream, WireResponse::Watch(StateRevisions::default()));
+            write_test_response(
+                &mut stream,
+                WireResponse::State(wire_state(StateResponse::default())),
+            );
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
         let mut client = client_session(directory.path());
@@ -1066,7 +1095,7 @@ mod tests {
         use rivu_protocol::response::{QueryError, QueryRevisions};
         use std::{io::Read, os::unix::net::UnixListener};
 
-        for kind in 0..3 {
+        for kind in 0..4 {
             let directory = socket_test_directory();
             let listener =
                 UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
@@ -1087,8 +1116,14 @@ mod tests {
                         }),
                     );
                 }
-                let _request = read_test_request(&mut stream);
-                write_test_response(&mut stream, WireResponse::Ack(Ack::from_result(Ok(()), 1)));
+                let request = read_test_request(&mut stream);
+                let response = if kind == 3 {
+                    assert!(matches!(request, WireRequest::WaitState(_)));
+                    WireResponse::Error("Interrupted state wait".into())
+                } else {
+                    WireResponse::Command(Ack::from_result(Ok(()), 1).into())
+                };
+                write_test_response(&mut stream, response);
                 assert_eq!(stream.read(&mut [0]).unwrap(), 0);
                 let mut stream = listener.accept().unwrap().0;
                 complete_test_handshake(&mut stream);
@@ -1109,7 +1144,7 @@ mod tests {
             let failed = match kind {
                 0 => client.get_state(StateSections::default()).is_err(),
                 1 => client.query(Query::LibraryStats).is_err(),
-                _ => client.watch(StateRevisions::default().into()).is_err(),
+                _ => client.wait_state(StateRevisions::default().into()).is_err(),
             };
             assert!(failed);
             assert!(client.stream.is_none());
@@ -1118,6 +1153,49 @@ mod tests {
             assert_eq!(client.instance_id(), Some(1));
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn command_refusal_reuses_only_the_valid_session() {
+        if isolate_socket_test() {
+            return;
+        }
+
+        let directory = socket_test_directory();
+        let listener = std::os::unix::net::UnixListener::bind_addr(
+            &rivu_protocol::wire::address(directory.path()).unwrap(),
+        )
+        .unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            for refusal in [
+                CommandRefusal::InvalidCommand("invalid".into()),
+                CommandRefusal::MalformedCommand("malformed".into()),
+            ] {
+                assert!(matches!(
+                    read_test_request(&mut stream),
+                    WireRequest::Command(_)
+                ));
+                write_test_response(
+                    &mut stream,
+                    WireResponse::Command(CommandReply::Refused(refusal)),
+                );
+            }
+            drop(stream);
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+        });
+        let mut client = client_session(directory.path());
+        let invalid = client.request_command(Command::DismissError).unwrap();
+        assert_eq!(invalid.status(), AckStatus::NotAdmitted);
+        assert_eq!(client.instance_id(), Some(1));
+        let malformed = client.request_command(Command::DismissError).unwrap();
+        assert_eq!(malformed.status(), AckStatus::NotAdmitted);
+        assert_eq!(malformed.error(), Some("malformed"));
+        assert_eq!(client.instance_id(), None);
+        client.get_state(StateSections::default()).unwrap();
+        server.join().unwrap();
     }
 
     #[test]
@@ -1194,7 +1272,7 @@ mod tests {
                 }),
             );
             assert!(
-                matches!(read_test_request(&mut stream), WireRequest::State(request)
+                matches!(read_test_request(&mut stream), WireRequest::ReadState(request)
                 if request == (StateRequest { sections: runtime, since: Some(initial) }))
             );
             write_test_response(
@@ -1202,12 +1280,15 @@ mod tests {
                 WireResponse::State(wire_state(response(current, None, false))),
             );
             assert!(
-                matches!(read_test_request(&mut stream), WireRequest::Watch(revisions)
+                matches!(read_test_request(&mut stream), WireRequest::WaitState(revisions)
                 if revisions == initial.into())
             );
-            write_test_response(&mut stream, WireResponse::Watch(current));
+            write_test_response(
+                &mut stream,
+                WireResponse::State(wire_state(response(current, Some(58), false))),
+            );
             assert!(
-                matches!(read_test_request(&mut stream), WireRequest::State(request)
+                matches!(read_test_request(&mut stream), WireRequest::ReadState(request)
                 if request == (StateRequest {
                     sections: configuration,
                     since: Some(initial),
@@ -1260,13 +1341,10 @@ mod tests {
             &retained,
             &observed.snapshot().configuration.config
         ));
-        assert_eq!(
-            client
-                .watch(observed.applied().into())
-                .unwrap()
-                .changed_since(observed.applied()),
-            configuration
-        );
+        let delta = client.wait_state(observed.applied().into()).unwrap();
+        assert_eq!(delta.revisions, current);
+        assert_eq!(delta.sections(), configuration);
+        assert_eq!(delta.configuration.unwrap().config.query_batch_size, 58);
         assert!(
             client
                 .get_state_since(configuration, observed.applied())

@@ -120,7 +120,7 @@ pub(super) struct EqualizerEditors {
 // Publications also carry transport position. Retain only the last dependency
 // source plus local queue/draft fences, not a cache of editor projections.
 struct EqualizerReconcileInputs {
-    config: Arc<rivu_format::config::Config>,
+    config: Arc<rivu_format::config::ConfigSettings>,
     format: EqFormat,
     pending: usize,
     command_active: bool,
@@ -4132,9 +4132,8 @@ mod tests {
             futures::executor::block_on(
                 runtime
                     .handle
-                    .request_ack(Command::ProcessingBypass { bypassed: true })
+                    .request_command(Command::ProcessingBypass { bypassed: true })
             )
-            .ack
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -4194,13 +4193,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
+            futures::executor::block_on(runtime.handle.request_command(Command::EqualizerEdit {
                 expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
                 edit: EqualizerEdit::Replace {
                     config: config.clone()
                 },
             }))
-            .ack
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -4439,14 +4437,13 @@ mod tests {
                             EqualizerEdit::RemoveBand { index: 0 }
                         };
                         assert!(
-                            futures::executor::block_on(runtime.handle.request_ack(
+                            futures::executor::block_on(runtime.handle.request_command(
                                 Command::EqualizerEdit {
                                     expected_revision:
                                         runtime.handle.gui_snapshot().revisions.configuration,
                                     edit
                                 }
                             ))
-                            .ack
                             .is_success()
                         );
                         owner.update(cx, |owner, cx| {
@@ -4864,14 +4861,14 @@ mod tests {
     ) {
         let submission = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
         let graph_command = matches!(&submission.command, Command::ProcessingGraphEdit { .. });
-        let ack = futures::executor::block_on(runtime.handle.request_ack(submission.command)).ack;
-        assert_eq!(ack.is_success(), success, "{:?}", ack.error);
+        let ack = futures::executor::block_on(runtime.handle.request_command(submission.command));
+        assert_eq!(ack.is_success(), success, "{:?}", ack.error());
         owner.update(cx, |owner, cx| {
             owner.pending = owner.pending.saturating_sub(1);
             owner.finish_equalizer_command(success);
             owner.reconcile(owner.context.snapshot(), cx);
             if graph_command {
-                owner.graph_ack(ack.status, true, cx);
+                owner.graph_ack(ack.status(), true, cx);
             }
             if let Some(field) = submission.equalizer_field {
                 owner.finish_equalizer_field(field, success, cx);
@@ -4909,14 +4906,15 @@ mod tests {
         enter_number(cx, handle, &input, "2.5");
         press(cx, handle, "enter");
         assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), 1);
-        let ack = futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
-            expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
-            edit: EqualizerEdit::BandField {
-                index: 0,
-                field: EqBandEdit::GainDb(4.0),
-            },
-        }));
-        assert!(ack.ack.is_success());
+        let ack =
+            futures::executor::block_on(runtime.handle.request_command(Command::EqualizerEdit {
+                expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
+                edit: EqualizerEdit::BandField {
+                    index: 0,
+                    field: EqBandEdit::GainDb(4.0),
+                },
+            }));
+        assert!(ack.is_success());
         acknowledge_front(cx, &runtime, &owner, false);
         editor.read_with(cx, |editor, cx| {
             let field = &editor.fields[&EqField::Band(0, BandField::Q)];
@@ -4973,21 +4971,21 @@ mod tests {
             press(cx, handle, "enter");
             let issued = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
             assert!(
-                futures::executor::block_on(runtime.handle.request_ack(issued.command))
-                    .ack
+                futures::executor::block_on(runtime.handle.request_command(issued.command))
                     .is_success()
             );
             // Core accepts the local number, then another client updates Core
             // before this editor receives its successful local acknowledgement.
             assert!(
-                futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
-                    expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
-                    edit: EqualizerEdit::BandField {
-                        index: 0,
-                        field: external
-                    },
-                }))
-                .ack
+                futures::executor::block_on(runtime.handle.request_command(
+                    Command::EqualizerEdit {
+                        expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
+                        edit: EqualizerEdit::BandField {
+                            index: 0,
+                            field: external
+                        },
+                    }
+                ))
                 .is_success()
             );
             owner.update(cx, |owner, cx| {
@@ -5034,17 +5032,18 @@ mod tests {
         let snapshot = runtime.handle.gui_snapshot();
         let id = snapshot.system.config.processing_graph.next_id;
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
-                expected_revision: snapshot.system.config.processing_graph.revision,
-                edit: Box::new(GraphEdit::Add {
-                    kind: GraphNodeKind::Equalizer {
-                        config: snapshot.system.config.equalizer.clone(),
-                        implementation: Default::default(),
-                    },
-                    position: [120., 120.],
-                }),
-            }))
-            .ack
+            futures::executor::block_on(runtime.handle.request_command(
+                Command::ProcessingGraphEdit {
+                    expected_revision: snapshot.system.config.processing_graph.revision,
+                    edit: Box::new(GraphEdit::Add {
+                        kind: GraphNodeKind::Equalizer {
+                            config: snapshot.system.config.equalizer.clone(),
+                            implementation: Default::default(),
+                        },
+                        position: [120., 120.],
+                    }),
+                }
+            ))
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -5088,17 +5087,18 @@ mod tests {
         let id = select_node_target(cx, &runtime, &owner, &editor);
         let snapshot = runtime.handle.gui_snapshot();
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
-                expected_revision: snapshot.system.config.processing_graph.revision,
-                edit: Box::new(GraphEdit::Replace {
-                    id,
-                    kind: GraphNodeKind::Equalizer {
-                        config: snapshot.system.config.equalizer.clone(),
-                        implementation: EqImplementation::LinearPhase { taps: 4097 },
-                    },
-                }),
-            }))
-            .ack
+            futures::executor::block_on(runtime.handle.request_command(
+                Command::ProcessingGraphEdit {
+                    expected_revision: snapshot.system.config.processing_graph.revision,
+                    edit: Box::new(GraphEdit::Replace {
+                        id,
+                        kind: GraphNodeKind::Equalizer {
+                            config: snapshot.system.config.equalizer.clone(),
+                            implementation: EqImplementation::LinearPhase { taps: 4097 },
+                        },
+                    }),
+                }
+            ))
             .is_success()
         );
         let before = runtime
@@ -5184,7 +5184,7 @@ mod tests {
                 .processing_graph
                 .revision;
             assert!(
-                futures::executor::block_on(runtime.handle.request_ack(
+                futures::executor::block_on(runtime.handle.request_command(
                     Command::ProcessingGraphEdit {
                         expected_revision: revision,
                         edit: Box::new(GraphEdit::Replace {
@@ -5196,7 +5196,6 @@ mod tests {
                         }),
                     }
                 ))
-                .ack
                 .is_success()
             );
             // The headless fixture has no stream; pin the plotting format and
@@ -5310,14 +5309,15 @@ mod tests {
         });
         enter_number(cx, handle, &input, "3.4");
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
-                expected_revision: 2,
-                edit: Box::new(GraphEdit::Move {
-                    id,
-                    position: [200., 180.]
-                }),
-            }))
-            .ack
+            futures::executor::block_on(runtime.handle.request_command(
+                Command::ProcessingGraphEdit {
+                    expected_revision: 2,
+                    edit: Box::new(GraphEdit::Move {
+                        id,
+                        position: [200., 180.]
+                    }),
+                }
+            ))
             .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -5399,14 +5399,15 @@ mod tests {
         );
         draw(cx, handle);
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
-                expected_revision: 1,
-                edit: Box::new(GraphEdit::Move {
-                    id,
-                    position: [200., 180.]
-                }),
-            }))
-            .ack
+            futures::executor::block_on(runtime.handle.request_command(
+                Command::ProcessingGraphEdit {
+                    expected_revision: 1,
+                    edit: Box::new(GraphEdit::Move {
+                        id,
+                        position: [200., 180.]
+                    }),
+                }
+            ))
             .is_success()
         );
         // Release can see the authoritative snapshot before the view reconciles.
@@ -5807,11 +5808,7 @@ mod tests {
             edit: EqualizerEdit::LoadPreset { name: preset.name },
         };
         owner.update(cx, |owner, _| owner.begin_equalizer_command(&load));
-        assert!(
-            futures::executor::block_on(runtime.handle.request_ack(load))
-                .ack
-                .is_success()
-        );
+        assert!(futures::executor::block_on(runtime.handle.request_command(load)).is_success());
         owner.update(cx, |owner, _| owner.finish_equalizer_command(true));
         let edit = Command::EqualizerEdit {
             expected_revision: owner.read_with(cx, |owner, _| {
@@ -5819,11 +5816,7 @@ mod tests {
             }),
             edit: EqualizerEdit::PreampDb(3.),
         };
-        assert!(
-            futures::executor::block_on(runtime.handle.request_ack(edit))
-                .ack
-                .is_success()
-        );
+        assert!(futures::executor::block_on(runtime.handle.request_command(edit)).is_success());
         owner.update(cx, |owner, cx| {
             owner.reconcile(owner.context.snapshot(), cx);
             owner.command_active = true;
@@ -5868,8 +5861,7 @@ mod tests {
         });
         let issued = owner.update(cx, |owner, _| owner.commands.pop_front().unwrap());
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(issued.command))
-                .ack
+            futures::executor::block_on(runtime.handle.request_command(issued.command))
                 .is_success()
         );
         owner.update(cx, |owner, cx| {
@@ -5920,11 +5912,12 @@ mod tests {
             band.frequency_hz = 333.333_333_333;
             band.kind = kind;
             assert!(
-                futures::executor::block_on(runtime.handle.request_ack(Command::EqualizerEdit {
-                    expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
-                    edit: EqualizerEdit::Band { index: 0, band },
-                }))
-                .ack
+                futures::executor::block_on(runtime.handle.request_command(
+                    Command::EqualizerEdit {
+                        expected_revision: runtime.handle.gui_snapshot().revisions.configuration,
+                        edit: EqualizerEdit::Band { index: 0, band },
+                    }
+                ))
                 .is_success()
             );
             owner.update(cx, |owner, cx| {

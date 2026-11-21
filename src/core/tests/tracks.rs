@@ -984,7 +984,8 @@ fn decoder_hint_intent_refreshes_current_without_invalidating_queue_or_restartin
         assert_eq!(core.state.revisions, before_repeat);
     }
     assert_ne!(core.state.library.revision, revisions.library);
-    assert_ne!(core.state.revisions.playback, sections.playback);
+    assert_ne!(core.state.revisions.current_track, sections.current_track);
+    assert_eq!(core.state.revisions.playback, sections.playback);
     assert_eq!(core.state.revisions.queue, sections.queue);
 }
 

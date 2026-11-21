@@ -646,7 +646,7 @@ impl Metadata {
         }
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let ack = handle.request_ack(command).await;
+            let ack = handle.request_command(command).await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_save(token, submitted, ack, cx);
             });

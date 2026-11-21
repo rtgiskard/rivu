@@ -123,25 +123,32 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
     let independent = enqueue(2, Some(current.ticket()));
     let unconditional = enqueue(1, None);
     cancelled.cancel();
+    let driver = thread::spawn(move || run_until_disconnected(core, requests));
+    // Disconnecting stops the read worker, independently of either query ticket.
+    let replies = futures::executor::block_on(rivu_protocol::transport::timeout(
+        Duration::from_secs(5),
+        futures::future::try_join3(stale, independent, unconditional),
+    ));
     drop(sender);
-    drop(run_until_disconnected(core, requests));
+    driver.join().unwrap();
+    let (stale, independent, unconditional) = replies.unwrap().unwrap();
 
     assert!(matches!(
-        futures::executor::block_on(stale).unwrap(),
+        stale,
         CoreResponse::Query(QueryResponse {
             result: Err(QueryError::Cancelled),
             ..
         })
     ));
-    assert!(matches!(
-        futures::executor::block_on(independent).unwrap(),
-        CoreResponse::Query(QueryResponse {
+    assert!(
+        matches!(&independent, CoreResponse::Query(QueryResponse {
             result: Ok(ViewResponse::Track(Some(track))),
             ..
-        }) if track.id == 2
-    ));
+        }) if track.id == 2),
+        "unexpected independent reply: {independent:?}"
+    );
     assert!(matches!(
-        futures::executor::block_on(unconditional).unwrap(),
+        unconditional,
         CoreResponse::Query(QueryResponse {
             result: Err(QueryError::Message(_)),
             ..

@@ -102,7 +102,7 @@ impl Playlists {
         cx.emit(PlaylistEvent::Focus(None));
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let ack = handle.request_ack(command).await;
+            let ack = handle.request_command(command).await;
             let _ = this.update(cx, |this, cx| {
                 if matches!(
                     ack.observation,

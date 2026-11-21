@@ -9,7 +9,7 @@ mod config;
 pub use config::{ConfigMutation, ConfigPatch};
 mod audio_output;
 pub use audio_output::*;
-pub use rivu_format::config::Config;
+pub use rivu_format::config::{Config, ConfigSettings};
 
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_format::tags::TagValues;
@@ -498,9 +498,10 @@ pub struct RelocationTaskStatus {
 }
 
 /// Cold configuration state, independently requested and invalidated from runtime status.
+/// Read volume, shuffle and repeat from Playback and the selected device from System.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ConfigurationState {
-    pub config: Arc<rivu_format::config::Config>,
+    pub config: Arc<ConfigSettings>,
     pub config_path: PathBuf,
 }
 

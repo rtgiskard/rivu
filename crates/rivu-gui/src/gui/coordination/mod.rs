@@ -17,7 +17,8 @@ impl WindowView {
         self.material_intent(intent, cx);
         // The command worker is FIFO. This ACK follows the real material save,
         // even though its GUI completion cannot run inside this test closure.
-        let delivery = futures::executor::block_on(self.handle.request_ack(Command::DismissError));
+        let delivery =
+            futures::executor::block_on(self.handle.request_command(Command::DismissError));
         assert!(delivery.observed_result().is_ok(), "{delivery:?}");
         let persisted = appearance::material::MaterialSession::from_preferences(
             &self.handle.config_snapshot().material,
@@ -731,7 +732,7 @@ mod tests {
             });
             cx.run_until_parked();
             let ack =
-                futures::executor::block_on(runtime.handle.request_ack(Command::DismissError));
+                futures::executor::block_on(runtime.handle.request_command(Command::DismissError));
             assert!(ack.observed_result().is_ok(), "{ack:?}");
             runtime.handle.gui_snapshot().playback.volume
         };

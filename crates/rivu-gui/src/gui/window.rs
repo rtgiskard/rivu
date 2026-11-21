@@ -914,6 +914,7 @@ impl WindowView {
             _ => false,
         };
         let transport_only = changed.playback
+            && !changed.current_track
             && !changed.library
             && !changed.queue
             && !changed.system

@@ -10,15 +10,16 @@ use rivu_analysis::{AnalysisFrame, AnalysisSettings, DisplayDemand};
 use rivu_client::{
     ClientSession, CommandFailure, InstanceChanged, SessionCancellation, client_session_with_cancel,
 };
-use rivu_format::config::Config;
+use rivu_format::config::{Config, ConfigSettings};
 use rivu_protocol::query_tracking::{QueryEpoch, QueryTicket};
 use rivu_protocol::{
     ADMISSION_TIMEOUT, AppCommand, REPLY_TIMEOUT,
     model::{Command, ConfigMutation, ConfigPatch, Query},
     response::{
-        Ack, AckStatus, ObservedState, QueryError, QueryResponse, QueryRevisionScope,
-        StateResponse, StateSections,
+        AckStatus, ObservedState, QueryError, QueryResponse, QueryRevisionScope, StateResponse,
+        StateRevisions, StateSections,
     },
+    wire::CommandReply,
 };
 use rivu_visuals::WaveformFrame;
 use std::{
@@ -63,8 +64,7 @@ struct Shared {
     data_dir: PathBuf,
     instance_id: u32,
     published: RwLock<Published>,
-    // Serialize the complete read-and-merge, not merely applying its response.
-    // A delayed Watch read can therefore never overwrite an ACK refresh.
+    // Serialize command read-and-merge with application of state wait deltas.
     refresh: Mutex<()>,
     stop: SessionCancellation,
     wakeup: RwLock<Option<Wakeup>>,
@@ -73,10 +73,9 @@ struct Shared {
     shutdown_admitted: Mutex<bool>,
 }
 
-fn analysis_invalidated_by_config(previous: &Config, next: &Config) -> bool {
+fn analysis_invalidated_by_config(previous: &ConfigSettings, next: &ConfigSettings) -> bool {
     !AnalysisSettings::from(previous).signal_compatible_with(AnalysisSettings::from(next))
         || previous.visualization_enabled != next.visualization_enabled
-        || previous.output_device != next.output_device
         || previous.pipewire_auto_mix != next.pipewire_auto_mix
         || (next.visualization_signal == rivu_format::config::VisualizationSignal::After
             && (previous.equalizer != next.equalizer
@@ -157,18 +156,21 @@ impl Shared {
             }
             let previous = published.observed.snapshot();
             let configure_visual = response.configuration.is_some();
-            let (source_changed, playback_invalidated) =
-                response.playback.as_ref().map_or((false, false), |next| {
-                    let generation_changed = next.source_generation != previous.source_generation;
-                    let source_changed = generation_changed
-                        || waveform_source(next.current_track.as_deref())
-                            != waveform_source(previous.current_track.as_deref());
-                    let analysis_invalidated = generation_changed
-                        || next.playback.seek_revision != previous.playback.seek_revision
-                        || next.playback.status != previous.playback.status;
-                    (source_changed, analysis_invalidated)
+            let generation_changed = response
+                .current_track
+                .as_ref()
+                .is_some_and(|next| next.source_generation != previous.source_generation);
+            let source_changed = generation_changed
+                || response.current_track.as_ref().is_some_and(|next| {
+                    waveform_source(next.track.as_deref())
+                        != waveform_source(previous.current_track.as_deref())
                 });
+            let playback_invalidated = response.playback.as_ref().is_some_and(|next| {
+                next.playback.seek_revision != previous.playback.seek_revision
+                    || next.playback.status != previous.playback.status
+            });
             let invalidate_analysis = playback_invalidated
+                || source_changed
                 || response
                     .system
                     .as_ref()
@@ -202,18 +204,26 @@ impl Shared {
         true
     }
 
-    fn refresh_state(
-        &self,
-        session: &mut ClientSession,
-        announced: Option<rivu_protocol::response::StateRevisions>,
-    ) -> Result<()> {
+    fn refresh_state(&self, session: &mut ClientSession) -> Result<()> {
         let _owner = self.refresh.lock();
         let current = self.published.read().observed.applied();
-        if announced.is_some_and(|revisions| revisions.changed_since(current).is_empty()) {
+        let response = session.get_state_since(StateSections::ALL, current)?;
+        self.apply_state_delta(current, response)
+    }
+
+    fn apply_waited_state(&self, baseline: StateRevisions, response: StateResponse) -> Result<()> {
+        let _owner = self.refresh.lock();
+        if self.published.read().observed.applied() != baseline {
+            // The command worker applied newer state while this wait was in flight.
+            // The next wait captures the applied baseline again.
             return Ok(());
         }
-        let response = session.get_state_since(StateSections::ALL, current)?;
-        let expected = response.revisions.changed_since(current);
+        self.apply_state_delta(baseline, response)
+    }
+
+    // The caller holds refresh across the baseline check and the merge.
+    fn apply_state_delta(&self, baseline: StateRevisions, response: StateResponse) -> Result<()> {
+        let expected = response.revisions.changed_since(baseline);
         let received = response.sections();
         let complete = received.intersection(expected) == expected;
         anyhow::ensure!(complete, "Incomplete GUI state refresh");
@@ -241,21 +251,19 @@ impl Shared {
             result: Err(error),
         }
     }
-
-    fn ack_error(&self, status: AckStatus, message: String) -> Ack {
-        Ack::new(
-            status,
-            Some(message),
-            self.published.read().observed.snapshot().system.revision,
-        )
-    }
 }
 
-/// The owner's ACK survives independently of a later observation failure.
+/// A server reply and subsequent observation are independent facts.
 #[derive(Debug)]
 pub(crate) struct CommandDelivery {
-    pub(crate) ack: Ack,
+    pub(crate) result: std::result::Result<CommandReply, DeliveryFailure>,
     pub(crate) observation: CommandObservation,
+}
+
+#[derive(Debug)]
+pub(crate) struct DeliveryFailure {
+    status: AckStatus,
+    message: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -266,28 +274,63 @@ pub(crate) enum CommandObservation {
 }
 
 impl CommandDelivery {
-    fn observe(ack: Ack, shutdown: bool, refresh: impl FnOnce() -> Result<()>) -> Self {
-        let observation = if shutdown {
-            CommandObservation::NotRequested
-        } else {
-            match refresh() {
-                Ok(()) => CommandObservation::Refreshed,
-                Err(error) => CommandObservation::Unavailable(format!(
-                    "Authoritative GUI refresh failed: {error:#}; do not retry"
-                )),
-            }
+    fn not_sent(message: &str) -> Self {
+        Self {
+            result: Err(DeliveryFailure {
+                status: AckStatus::NotAdmitted,
+                message: message.into(),
+            }),
+            observation: CommandObservation::NotRequested,
+        }
+    }
+
+    fn worker_stopped() -> Self {
+        Self {
+            result: Err(DeliveryFailure {
+                status: AckStatus::Unknown,
+                message: "GUI command outcome unknown; do not automatically retry".into(),
+            }),
+            observation: CommandObservation::Unavailable(
+                "GUI command worker stopped before observation".into(),
+            ),
+        }
+    }
+
+    fn observe(&mut self, refresh: impl FnOnce() -> Result<()>) {
+        self.observation = match refresh() {
+            Ok(()) => CommandObservation::Refreshed,
+            Err(error) => CommandObservation::Unavailable(format!(
+                "Authoritative GUI refresh failed: {error:#}; do not retry"
+            )),
         };
-        Self { ack, observation }
+    }
+
+    pub(crate) fn reply(&self) -> Option<&CommandReply> {
+        self.result.as_ref().ok()
+    }
+
+    pub(crate) fn status(&self) -> AckStatus {
+        match &self.result {
+            Ok(reply) => reply.status(),
+            Err(failure) => failure.status,
+        }
+    }
+
+    pub(crate) fn is_success(&self) -> bool {
+        self.status() == AckStatus::Succeeded
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        match &self.result {
+            Ok(reply) => reply.error(),
+            Err(failure) => Some(&failure.message),
+        }
     }
 
     /// Draft rebases/writeback require both owner success and a fresh read.
     pub(crate) fn observed_result(&self) -> std::result::Result<(), String> {
-        if !self.ack.is_success() {
-            return Err(self
-                .ack
-                .error
-                .clone()
-                .unwrap_or_else(|| "Command failed".into()));
+        if !self.is_success() {
+            return Err(self.error().unwrap_or("Command failed").into());
         }
         match &self.observation {
             CommandObservation::Refreshed => Ok(()),
@@ -406,15 +449,15 @@ impl FrontendRuntime {
         runtime.spawn("rivu-gui-watch", move |shared| {
             while !shared.stop.is_cancelled() {
                 let current = shared.published.read().observed.applied();
-                let announced = match watcher.watch_until(current.into()) {
-                    Ok(Some(revisions)) => revisions,
+                let response = match watcher.wait_state_until(current.into()) {
+                    Ok(Some(response)) => response,
                     Ok(None) => break,
                     Err(error) => {
                         shared.error(format!("GUI state watcher disconnected: {error:#}"), true);
                         break;
                     }
                 };
-                if let Err(error) = shared.refresh_state(&mut watcher, Some(announced)) {
+                if let Err(error) = shared.apply_waited_state(current, response) {
                     if !shared.stop.is_cancelled() {
                         shared.error(format!("GUI state refresh failed: {error:#}"), true);
                     }
@@ -482,33 +525,30 @@ fn command_worker(
             shared.dismiss_error();
         }
         let mut instance_error = None;
-        let ack = match session.request_ack(request.command) {
-            Ok(ack) => ack,
-            Err(error) => {
-                let status = error
-                    .downcast_ref::<CommandFailure>()
-                    .map_or(AckStatus::Unknown, |failure| failure.status);
-                if error.downcast_ref::<InstanceChanged>().is_some() {
-                    instance_error = Some(format!("GUI instance changed: {error:#}"));
-                }
-                shared.ack_error(
-                    status,
-                    format!("GUI command failed: {error:#}; do not automatically retry"),
-                )
+        let result = session.request_command(request.command).map_err(|error| {
+            let status = error
+                .downcast_ref::<CommandFailure>()
+                .map_or(AckStatus::Unknown, |failure| failure.status);
+            if error.downcast_ref::<InstanceChanged>().is_some() {
+                instance_error = Some(format!("GUI instance changed: {error:#}"));
             }
-        };
+            DeliveryFailure {
+                status,
+                message: format!("GUI command failed: {error:#}; do not automatically retry"),
+            }
+        });
         let shutdown_complete = finish_command(
             &shared,
             shutdown,
             request.reply,
-            ack,
+            result,
             instance_error,
             || {
                 anyhow::ensure!(
                     !shared.stop.is_cancelled(),
                     "GUI disconnected before authoritative refresh"
                 );
-                shared.refresh_state(&mut session, None)
+                shared.refresh_state(&mut session)
             },
         );
         if shutdown_complete {
@@ -521,28 +561,33 @@ fn finish_command(
     shared: &Shared,
     shutdown: bool,
     reply: Option<oneshot::Sender<CommandDelivery>>,
-    ack: Ack,
+    result: std::result::Result<CommandReply, DeliveryFailure>,
     instance_error: Option<String>,
     refresh: impl FnOnce() -> Result<()>,
 ) -> bool {
-    if shutdown && ack.status == AckStatus::NotAdmitted {
+    let mut delivery = CommandDelivery {
+        result,
+        observation: CommandObservation::NotRequested,
+    };
+    if shutdown && delivery.status() == AckStatus::NotAdmitted {
         *shared.shutdown_admitted.lock() = false;
     }
     if let Some(message) = instance_error {
         shared.error(message, true);
     }
-    let shutdown_complete = shutdown && ack.is_success();
+    let shutdown_complete = shutdown && delivery.is_success();
     if let Some(reply) = reply {
-        let delivery = CommandDelivery::observe(ack, shutdown, refresh);
+        if !shutdown {
+            delivery.observe(refresh);
+        }
         if let CommandObservation::Unavailable(message) = &delivery.observation
             && !shared.stop.is_cancelled()
         {
             shared.error(message.clone(), true);
         }
         let _ = reply.send(delivery);
-    } else if !ack.is_success() {
-        let message = ack.error.unwrap_or_else(|| "GUI command failed".into());
-        shared.error(message, false);
+    } else if let Some(message) = delivery.error() {
+        shared.error(message.to_owned(), false);
     }
     shutdown_complete
 }
@@ -678,35 +723,22 @@ impl FrontendHandle {
                 reply: Some(reply),
             })
             .context("GUI command queue is busy or stopped")?;
-        let shared = Arc::clone(&self.shared);
         Ok(async move {
-            receiver.await.unwrap_or_else(|_| CommandDelivery {
-                ack: shared.ack_error(
-                    AckStatus::Unknown,
-                    "GUI command outcome unknown; do not automatically retry".into(),
-                ),
-                observation: CommandObservation::Unavailable(
-                    "GUI command worker stopped before observation".into(),
-                ),
-            })
+            receiver
+                .await
+                .unwrap_or_else(|_| CommandDelivery::worker_stopped())
         })
     }
     pub(crate) async fn apply_settings(&self, patch: ConfigPatch) -> CommandDelivery {
-        self.request_ack(Command::MutateConfig {
+        self.request_command(Command::MutateConfig {
             change: ConfigMutation::Settings(Box::new(patch)),
         })
         .await
     }
-    pub(crate) async fn request_ack(&self, command: Command) -> CommandDelivery {
+    pub(crate) async fn request_command(&self, command: Command) -> CommandDelivery {
         let (reply, receiver) = oneshot::channel();
         if !self.is_connected() {
-            return CommandDelivery {
-                ack: self.shared.ack_error(
-                    AckStatus::NotAdmitted,
-                    "GUI is disconnected from Core".into(),
-                ),
-                observation: CommandObservation::NotRequested,
-            };
+            return CommandDelivery::not_sent("GUI is disconnected from Core");
         }
         match rivu_protocol::transport::timeout(
             ADMISSION_TIMEOUT,
@@ -719,24 +751,14 @@ impl FrontendHandle {
         {
             Ok(Ok(())) => {}
             _ => {
-                return CommandDelivery {
-                    ack: self.shared.ack_error(
-                        AckStatus::NotAdmitted,
-                        "GUI command queue is busy or stopped; command not sent".into(),
-                    ),
-                    observation: CommandObservation::NotRequested,
-                };
+                return CommandDelivery::not_sent(
+                    "GUI command queue is busy or stopped; command not sent",
+                );
             }
         }
-        receiver.await.unwrap_or_else(|_| CommandDelivery {
-            ack: self.shared.ack_error(
-                AckStatus::Unknown,
-                "GUI command outcome unknown; do not automatically retry".into(),
-            ),
-            observation: CommandObservation::Unavailable(
-                "GUI command worker stopped before observation".into(),
-            ),
-        })
+        receiver
+            .await
+            .unwrap_or_else(|_| CommandDelivery::worker_stopped())
     }
     pub(crate) fn with_query_timeout(
         mut self,
@@ -829,7 +851,7 @@ impl FrontendHandle {
         let state = self.shared.published.read();
         (state.publication != revision).then(|| state.gui_snapshot())
     }
-    pub(crate) fn config_snapshot(&self) -> Arc<Config> {
+    pub(crate) fn config_snapshot(&self) -> Arc<ConfigSettings> {
         Arc::clone(
             &self
                 .shared
@@ -840,6 +862,24 @@ impl FrontendHandle {
                 .configuration
                 .config,
         )
+    }
+
+    pub(crate) fn editable_config_snapshot(&self) -> Arc<Config> {
+        let (config, volume, shuffle, repeat, device) = {
+            let published = self.shared.published.read();
+            let snapshot = published.observed.snapshot();
+            let config = Arc::clone(&snapshot.configuration.config);
+            let playback = &snapshot.playback;
+            let device = snapshot.system.selected_device.clone();
+            (
+                config,
+                playback.volume,
+                playback.shuffle,
+                playback.repeat,
+                device,
+            )
+        };
+        Arc::new(Arc::unwrap_or_clone(config).into_config(volume, shuffle, repeat, device))
     }
     pub(crate) fn library_revision(&self) -> u64 {
         self.shared
@@ -880,6 +920,7 @@ impl FrontendHandle {
 mod tests {
     use super::*;
     use crate::test_support::ConfigFixture;
+    use rivu_protocol::response::Ack;
     use std::time::Duration;
 
     fn fixture() -> (tempfile::TempDir, crate::test_support::CoreRuntime) {
@@ -900,6 +941,42 @@ mod tests {
     }
 
     #[test]
+    fn editable_config_uses_latest_live_controls_without_replacing_cold_settings() {
+        use rivu_protocol::{
+            model::{PlaybackState, RepeatMode, SystemState},
+            response::PlaybackSnapshot,
+        };
+
+        let (_directory, runtime) = fixture();
+        let handle = &runtime.handle;
+        let cold = handle.config_snapshot();
+        assert!(handle.shared.merge(StateResponse {
+            playback: Some(PlaybackSnapshot {
+                playback: PlaybackState {
+                    volume: 0.25,
+                    shuffle: true,
+                    repeat: RepeatMode::All,
+                    ..Default::default()
+                },
+                processing_audition: None,
+                processing_selection: None,
+            }),
+            system: Some(SystemState {
+                selected_device: Some("live output".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        assert!(Arc::ptr_eq(&handle.config_snapshot(), &cold));
+        let editable = handle.editable_config_snapshot();
+        assert!(cold.matches_config(&editable));
+        assert_eq!(editable.volume, 0.25);
+        assert!(editable.shuffle);
+        assert_eq!(editable.repeat, RepeatMode::All);
+        assert_eq!(editable.output_device.as_deref(), Some("live output"));
+    }
+
+    #[test]
     fn playback_merge_preserves_waveform_until_cue_range_changes() {
         let (_directory, runtime) = fixture();
         let handle = &runtime.handle;
@@ -910,26 +987,28 @@ mod tests {
             start_frame: 0,
             end_frame: Some(75),
         });
-        let merge = |track, position| {
+        let merge = |track: Option<rivu_protocol::model::Track>, position: Option<f64>| {
             assert!(handle.shared.merge(StateResponse {
-                playback: Some(rivu_protocol::response::PlaybackSnapshot {
+                playback: position.map(|position| rivu_protocol::response::PlaybackSnapshot {
                     playback: rivu_protocol::model::PlaybackState {
                         position,
                         ..Default::default()
                     },
-                    current_track: Some(Arc::new(track)),
-                    source_generation: 0,
                     processing_audition: None,
                     processing_selection: None,
+                }),
+                current_track: track.map(|track| rivu_protocol::response::CurrentTrackState {
+                    track: Some(Arc::new(track)),
+                    source_generation: 0,
                 }),
                 ..Default::default()
             }));
         };
-        merge(track.clone(), 0.0);
+        merge(Some(track.clone()), Some(0.0));
         let initial_epoch = handle.waveform.read().request_epoch;
         assert_eq!(handle.waveform.read().range.unwrap().start_seconds, 0.0);
 
-        merge(track.clone(), 0.5);
+        merge(None, Some(0.5));
         assert_eq!(handle.gui_snapshot().playback.position, 0.5);
         assert_eq!(handle.waveform.read().request_epoch, initial_epoch);
 
@@ -937,7 +1016,8 @@ mod tests {
         cue.number = 2;
         cue.start_frame = 75;
         cue.end_frame = Some(150);
-        merge(track, 0.0);
+        merge(Some(track), None);
+        assert_eq!(handle.gui_snapshot().playback.position, 0.5);
         let frame = handle.waveform.read();
         assert_ne!(frame.request_epoch, initial_epoch);
         assert_eq!(frame.range.unwrap().start_seconds, 1.0);
@@ -968,7 +1048,10 @@ mod tests {
             &handle.shared,
             matches!(request.command, AppCommand::Shutdown),
             request.reply,
-            Ack::new(AckStatus::NotAdmitted, Some("rejected".into()), 1),
+            Err(DeliveryFailure {
+                status: AckStatus::NotAdmitted,
+                message: "rejected".into()
+            }),
             None,
             || panic!("shutdown must not refresh"),
         ));
@@ -1002,14 +1085,14 @@ mod tests {
                     &handle.shared,
                     matches!(request.command, AppCommand::Shutdown),
                     Some(reply),
-                    Ack::new(status, None, 1),
+                    Ok(Ack::new(status, None, 1).into()),
                     None,
                     || panic!("shutdown must not refresh"),
                 ),
                 status == AckStatus::Succeeded,
             );
             let delivery = futures::executor::block_on(delivery).unwrap();
-            assert_eq!(delivery.ack.status, status);
+            assert_eq!(delivery.status(), status);
             assert_eq!(delivery.observation, CommandObservation::NotRequested);
             assert!(*handle.shared.shutdown_admitted.lock());
             handle.request_shutdown().unwrap();
@@ -1193,17 +1276,16 @@ mod tests {
         let mut session = handle.session().unwrap();
         let stale = session.get_state(StateSections::ALL).unwrap();
         let (reply, receiver) = oneshot::channel();
-        let mut ack = Ack::new(AckStatus::Succeeded, Some("owner warning".into()), 42);
+        let mut ack = Ack::from_result(Ok(()), 42);
         ack.scan_id = Some(11);
-        ack.relocation_id = Some(12);
-        ack.processing_id = Some(13);
-        let expected = serde_json::to_value(&ack).unwrap();
+        let reply_value: CommandReply = ack.into();
+        let expected = serde_json::to_value(&reply_value).unwrap();
         let mut refreshes = 0;
         assert!(!finish_command(
             &handle.shared,
             false,
             Some(reply),
-            ack,
+            Ok(reply_value),
             None,
             || {
                 refreshes += 1;
@@ -1212,7 +1294,10 @@ mod tests {
         ));
         let delivery = futures::executor::block_on(receiver).unwrap();
         assert_eq!(refreshes, 1);
-        assert_eq!(serde_json::to_value(&delivery.ack).unwrap(), expected);
+        assert_eq!(
+            serde_json::to_value(delivery.reply().unwrap()).unwrap(),
+            expected
+        );
         assert!(delivery.observed_result().is_err());
         assert!(matches!(
             delivery.observation,
@@ -1225,9 +1310,10 @@ mod tests {
         assert!(stopped.system.shutting_down);
         assert!(stopped.system.revision > before.system.revision);
         let retry = futures::executor::block_on(
-            handle.request_ack(Command::KeepTrackIndependent { track_id: 2 }),
+            handle.request_command(Command::KeepTrackIndependent { track_id: 2 }),
         );
-        assert_eq!(retry.ack.status, AckStatus::NotAdmitted);
+        assert_eq!(retry.status(), AckStatus::NotAdmitted);
+        assert!(retry.reply().is_none());
         assert_eq!(retry.observation, CommandObservation::NotRequested);
         assert_eq!(refreshes, 1);
     }
@@ -1244,7 +1330,7 @@ mod tests {
                 &handle.shared,
                 false,
                 None,
-                Ack::new(status, error.map(str::to_owned), 1),
+                Ok(Ack::new(status, error.map(str::to_owned), 1).into()),
                 None,
                 || panic!("fire-and-forget commands must not refresh"),
             ));
@@ -1256,21 +1342,25 @@ mod tests {
     #[test]
     fn failed_ack_and_successful_observation_remain_independent() {
         let mut ack = Ack::new(AckStatus::Failed, Some("partially committed".into()), 73);
-        ack.scan_id = Some(19);
-        let expected = serde_json::to_value(&ack).unwrap();
+        ack.source_file_saved = true;
+        let reply_value: CommandReply = ack.into();
+        let expected = serde_json::to_value(&reply_value).unwrap();
         let (_directory, runtime) = fixture();
         let (reply, receiver) = oneshot::channel();
         assert!(!finish_command(
             &runtime.handle.shared,
             false,
             Some(reply),
-            ack,
+            Ok(reply_value),
             None,
             || Ok(()),
         ));
         let delivery = futures::executor::block_on(receiver).unwrap();
         assert_eq!(delivery.observation, CommandObservation::Refreshed);
-        assert_eq!(serde_json::to_value(&delivery.ack).unwrap(), expected);
+        assert_eq!(
+            serde_json::to_value(delivery.reply().unwrap()).unwrap(),
+            expected
+        );
         assert_eq!(
             delivery.observed_result(),
             Err("partially committed".into())
@@ -1278,35 +1368,37 @@ mod tests {
     }
 
     #[test]
-    fn delayed_watch_announcement_cannot_restore_pre_ack_payload() {
+    fn delayed_state_delta_cannot_restore_pre_ack_payload() {
         let (_directory, runtime) = fixture();
         let mut watch = runtime.handle.session().unwrap();
-        let old_announcement = watch.get_state(StateSections::default()).unwrap().revisions;
+        let shared = &runtime.handle.shared;
+        let baseline = shared.published.read().observed.applied();
+        let delayed = watch
+            .get_state(StateSections {
+                playback: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_ne!(delayed.playback.as_ref().unwrap().playback.volume, 0.31);
         let delivery = futures::executor::block_on(
-            runtime.handle.request_ack(Command::Volume { value: 0.31 }),
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.31 }),
         );
         assert!(delivery.observed_result().is_ok());
-        let refreshed = runtime.handle.shared.published.read().observed.applied();
-        let publication = runtime.handle.shared.published.read().publication;
-        runtime
-            .handle
-            .shared
-            .refresh_state(&mut watch, Some(old_announcement))
-            .unwrap();
-        let published = runtime.handle.shared.published.read();
+        let (refreshed, publication) = {
+            let published = shared.published.read();
+            (published.observed.applied(), published.publication)
+        };
+        assert_ne!(baseline.playback, refreshed.playback);
+        shared.apply_waited_state(baseline, delayed).unwrap();
+        let published = shared.published.read();
         assert_eq!(published.observed.snapshot().playback.volume, 0.31);
         assert_eq!(published.observed.applied().playback, refreshed.playback);
         assert_eq!(published.publication, publication);
         drop(published);
-        runtime
-            .handle
-            .shared
-            .refresh_state(&mut watch, None)
-            .unwrap();
-        assert_eq!(
-            runtime.handle.shared.published.read().publication,
-            publication
-        );
+        shared.refresh_state(&mut watch).unwrap();
+        assert_eq!(shared.published.read().publication, publication);
     }
 
     #[test]
@@ -1347,7 +1439,7 @@ mod tests {
                 }),
             );
             assert!(
-                matches!(read_test_request(&mut stream), WireRequest::State(request)
+                matches!(read_test_request(&mut stream), WireRequest::ReadState(request)
                 if request.sections == StateSections::ALL && request.since == Some(baseline))
             );
             write_test_response(
@@ -1364,7 +1456,7 @@ mod tests {
         let mut session = rivu_client::client_session(directory.path());
         session.bind_instance(instance_id).unwrap();
         session.get_state(StateSections::default()).unwrap();
-        let error = shared.refresh_state(&mut session, None).unwrap_err();
+        let error = shared.refresh_state(&mut session).unwrap_err();
         assert!(error.to_string().contains("Incomplete GUI state refresh"));
         assert_eq!(shared.published.read().publication, publication);
         assert_eq!(shared.published.read().observed.applied(), baseline);
@@ -1373,7 +1465,7 @@ mod tests {
 
     #[test]
     fn analysis_config_preserves_presentation_changes_but_fences_signal_changes() {
-        let previous = Config {
+        let previous = ConfigSettings {
             visualization_signal: rivu_format::config::VisualizationSignal::After,
             ..Default::default()
         };
@@ -1383,12 +1475,11 @@ mod tests {
         } else {
             60
         };
-        next.volume = 0.0;
         next.waveform_seek_enabled = !previous.waveform_seek_enabled;
         next.animation_fps = if previous.animation_fps == 60 { 30 } else { 60 };
         assert!(!analysis_invalidated_by_config(&previous, &next));
 
-        for change in 0..6 {
+        for change in 0..5 {
             let mut next = previous.clone();
             match change {
                 0 => {
@@ -1408,7 +1499,6 @@ mod tests {
                 }
                 2 => next.visualization_signal = rivu_format::config::VisualizationSignal::Before,
                 3 => next.visualization_enabled = !previous.visualization_enabled,
-                4 => next.output_device = Some("another-device".into()),
                 _ => next.pipewire_auto_mix = !previous.pipewire_auto_mix,
             }
             assert!(
@@ -1421,7 +1511,7 @@ mod tests {
             rivu_format::config::VisualizationSignal::Before,
             rivu_format::config::VisualizationSignal::After,
         ] {
-            let previous = Config {
+            let previous = ConfigSettings {
                 visualization_signal: signal,
                 ..previous.clone()
             };
@@ -1449,7 +1539,7 @@ mod tests {
         let before = rivu_client::get_state(runtime.handle.data_dir(), StateSections::ALL).unwrap();
         assert!(before.system.as_ref().unwrap().last_error.is_none());
         let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::DismissError)).ack;
+            futures::executor::block_on(runtime.handle.request_command(Command::DismissError));
         assert!(ack.is_success());
         assert!(runtime.handle.gui_snapshot().system.last_error.is_none());
         let after = rivu_client::get_state(runtime.handle.data_dir(), StateSections::ALL).unwrap();
@@ -1681,7 +1771,7 @@ mod tests {
             complete_test_handshake(&mut stream);
             let mut previous_id = None;
             for track_id in 0..3 {
-                let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+                let WireRequest::Query(query) = read_test_request(&mut stream) else {
                     panic!("expected retained GUI query");
                 };
                 assert_ne!(previous_id, Some(query.id));
@@ -1691,7 +1781,7 @@ mod tests {
                     started.send(()).unwrap();
                     assert!(matches!(
                         read_test_request(&mut stream),
-                        WireRequest::QueryCancel(id) if id == query.id
+                        WireRequest::CancelRead(id) if id == query.id
                     ));
                     cancel_seen.send(()).unwrap();
                     resume.recv_timeout(Duration::from_secs(5)).unwrap();

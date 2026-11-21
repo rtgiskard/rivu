@@ -216,7 +216,10 @@ async fn capture(
     signal: rivu_format::config::VisualizationSignal,
     read_range: Option<PlaybackRange>,
     workers: &BlockingExecutor,
-) -> Result<(AudioRenderSnapshot, Arc<rivu_format::config::Config>)> {
+) -> Result<(
+    AudioRenderSnapshot,
+    Arc<rivu_format::config::ConfigSettings>,
+)> {
     if let Some(range) = read_range {
         ensure!(
             range.start_seconds.is_finite()
@@ -228,7 +231,7 @@ async fn capture(
         );
     }
     let current = handle.state(StateSections {
-        playback: true,
+        current_track: source.is_some(),
         configuration: true,
         ..Default::default()
     });
@@ -236,12 +239,12 @@ async fn capture(
         .configuration
         .expect("configuration requested")
         .config;
-    let playback = current.playback.expect("playback requested");
     let captured = if let Some(source) = source {
+        let current_track = current.current_track.expect("current track requested");
         ensure!(
-            source == playback.source_generation
-                && playback
-                    .current_track
+            source == current_track.source_generation
+                && current_track
+                    .track
                     .as_ref()
                     .is_some_and(|track| expected.matches(track)),
             "Audio source changed before capture"
@@ -388,7 +391,7 @@ async fn stream_render(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     snapshot: AudioRenderSnapshot,
-    config: Arc<rivu_format::config::Config>,
+    config: Arc<rivu_format::config::ConfigSettings>,
     source: Option<u64>,
     workers: &BlockingExecutor,
     stopped: &Receiver<()>,

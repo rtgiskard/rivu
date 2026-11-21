@@ -154,17 +154,17 @@ sequenceDiagram
     participant E as Client retained exchange
     participant C as Core query owner
     O->>E: Submit A under projection epoch A
-    E->>C: QueryRetained(A)
+    E->>C: Query(A)
     O->>O: B replaces A, revoke A publication rights
     Note over O,E: Hide or logical timeout also revokes rights, not occupancy
     O->>E: Cancel A, retain latest eligible demand B
-    E->>C: QueryCancel(A)
+    E->>C: CancelRead(A)
     Note over E,C: Same exchange until read retirement or disconnect
     C-->>E: Original A Query response after physical read retirement
     E->>E: Drain response, retire client slot
     E-->>O: Matching retirement, reject obsolete payload
     O->>E: Re-drive B only if still eligible
-    E->>C: QueryRetained(B)
+    E->>C: Query(B)
     Note over O,C: Accepted writes have independent lifetimes
 ----
 

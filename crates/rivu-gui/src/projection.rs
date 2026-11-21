@@ -1,4 +1,4 @@
-use rivu_format::config::Config;
+use rivu_format::config::ConfigSettings;
 use rivu_protocol::model::{
     ClientSnapshot, LibrarySnapshot, MediaTaskOwner, PlaybackState, ProcessingAudition, QueueState,
     SourceTagRecovery, Track,
@@ -41,7 +41,7 @@ pub struct GuiSystemSnapshot {
     pub devices: Arc<Vec<String>>,
     /// GUI publication/wakeup sequence, independent of query-domain freshness.
     pub revision: u64,
-    pub config: Arc<Config>,
+    pub config: Arc<ConfigSettings>,
     pub mpris_status: String,
     pub ffmpeg_status: String,
     pub export_formats: Option<Vec<rivu_protocol::model::AudioExportFormat>>,

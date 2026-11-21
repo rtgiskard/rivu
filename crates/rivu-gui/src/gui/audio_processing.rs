@@ -1180,8 +1180,8 @@ impl AudioProcessing {
         let handle = self.context.handle().clone();
         let graph_command = matches!(&command, Command::ProcessingGraphEdit { .. });
         cx.spawn(async move |this, cx| {
-            let ack = handle.request_ack(command).await;
-            let success = ack.ack.is_success();
+            let ack = handle.request_command(command).await;
+            let success = ack.is_success();
             let refreshed = matches!(
                 ack.observation,
                 crate::frontend::CommandObservation::Refreshed
@@ -1201,7 +1201,7 @@ impl AudioProcessing {
                     this.reconcile(this.context.snapshot(), cx);
                 }
                 if graph_command {
-                    this.graph_ack(ack.ack.status, refreshed, cx);
+                    this.graph_ack(ack.status(), refreshed, cx);
                 }
                 if refreshed {
                     if success && let Some(submitted) = submitted {

@@ -154,6 +154,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
             } else {
                 StateSections {
                     playback: true,
+                    current_track: true,
                     queue: true,
                     library: true,
                     system: true,
@@ -165,7 +166,10 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         }
         Action::Task(action) => return tasks::run(&i18n, &data_dir, action, mode),
         Action::Quit => {
-            let ack = rivu_client::request_ack(&data_dir, rivu_protocol::AppCommand::Shutdown)?;
+            let ack = output::legacy_ack(rivu_client::request_command(
+                &data_dir,
+                rivu_protocol::AppCommand::Shutdown,
+            )?)?;
             return show_ack(&i18n, &ack, mode);
         }
         Action::Playback(PlaybackAction::Play { track_id }) => {
@@ -286,7 +290,7 @@ fn submit_command(
     mode: OutputMode,
 ) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir);
-    let ack = session.request_ack(command)?;
+    let ack = output::legacy_ack(session.request_command(command)?)?;
     if !ack.is_success() {
         return output::show_task_ack(i18n, &session, &ack, mode);
     }

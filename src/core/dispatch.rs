@@ -639,6 +639,9 @@ impl Core {
             if changed.playback {
                 revisions.playback = revisions.playback.wrapping_add(1);
             }
+            if changed.current_track {
+                revisions.current_track = revisions.current_track.wrapping_add(1);
+            }
             if changed.queue {
                 revisions.queue = revisions.queue.wrapping_add(1);
             }
@@ -656,10 +659,12 @@ impl Core {
             }
             if changed.playback {
                 shared.playback = self.state.playback.clone();
-                shared.source_generation = self.state.source_generation;
-                shared.current_track = self.state.current_track.clone();
                 shared.processing_audition = self.state.processing_audition;
                 shared.processing_selection = self.state.processing_selection;
+            }
+            if changed.current_track {
+                shared.source_generation = self.state.source_generation;
+                shared.current_track = self.state.current_track.clone();
             }
             if changed.queue {
                 shared.queue = self.state.queue.clone();
@@ -755,7 +760,7 @@ impl Core {
                 &self.state,
                 query,
                 self.database_maintenance_active(),
-                self.preferences.settings(),
+                self.preferences.published_settings(),
             )
         }
     }

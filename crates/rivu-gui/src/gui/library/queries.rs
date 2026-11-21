@@ -537,11 +537,11 @@ mod tests {
         library.refresh_search("needle".into());
         for root in &roots {
             // A query on an independent IPC worker is not a command FIFO fence.
-            let ack =
-                futures::executor::block_on(runtime.handle.request_ack(Command::MutateConfig {
+            let ack = futures::executor::block_on(runtime.handle.request_command(
+                Command::MutateConfig {
                     change: ConfigMutation::RemoveLibraryRoot(root.clone()),
-                }))
-                .ack;
+                },
+            ));
             assert!(ack.is_success(), "{ack:?}");
         }
         let revisions = runtime.handle.query(Query::OtherTracksCount).revisions;

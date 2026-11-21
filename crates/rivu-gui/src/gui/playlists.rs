@@ -2564,9 +2564,11 @@ mod content_menu_keyboard_tests {
         );
         key(handle, "enter", cx);
         assert!(app.read_with(cx, |app, _| app.content_menu.is_none()));
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-                .ack;
+        let ack = futures::executor::block_on(
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.0 }),
+        );
         assert!(ack.is_success());
         let ViewResponse::PlaylistSummaries(page) = runtime
             .handle
@@ -2677,9 +2679,11 @@ mod content_menu_keyboard_tests {
                 .is_some()
         );
         key(handle, "enter", cx);
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-                .ack;
+        let ack = futures::executor::block_on(
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.0 }),
+        );
         assert!(ack.is_success());
         let ViewResponse::PlaylistEntries(entries) = runtime
             .handle
@@ -2742,9 +2746,11 @@ mod content_menu_keyboard_tests {
         // Explicitly selecting the replacement makes its own stable ID eligible.
         key(handle, "home", cx);
         key(handle, "enter", cx);
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-                .ack;
+        let ack = futures::executor::block_on(
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.0 }),
+        );
         assert!(ack.is_success());
         let ViewResponse::PlaylistEntries(entries) = runtime
             .handle
@@ -2914,9 +2920,11 @@ mod content_menu_keyboard_tests {
             app.playlists.read(cx).playlist_action,
             Some(PlaylistAction::Menu(..))
         )));
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-                .ack;
+        let ack = futures::executor::block_on(
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.0 }),
+        );
         assert!(ack.is_success());
         let ViewResponse::PlaylistSummaries(page) = runtime
             .handle
@@ -2943,9 +2951,11 @@ mod content_menu_keyboard_tests {
             .unwrap()
             .center();
         click_row(handle, confirm, cx);
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-                .ack;
+        let ack = futures::executor::block_on(
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.0 }),
+        );
         assert!(ack.is_success());
         let ViewResponse::PlaylistSummaries(page) = runtime
             .handle
@@ -2973,11 +2983,10 @@ mod content_menu_keyboard_tests {
         cx: &mut TestAppContext,
     ) -> i64 {
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::AddPlaylist {
+            futures::executor::block_on(runtime.handle.request_command(Command::AddPlaylist {
                 playlist_id: 1,
                 track_ids: vec![1],
             }))
-            .ack
             .is_success()
         );
         let ViewResponse::PlaylistEntries(page) = runtime
@@ -3115,19 +3124,21 @@ mod content_menu_keyboard_tests {
             .unwrap()
             .center();
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::AddPlaylist {
+            futures::executor::block_on(runtime.handle.request_command(Command::AddPlaylist {
                 playlist_id: 1,
                 track_ids: vec![1],
             }))
-            .ack
             .is_success()
         );
         click_row(handle, remove, cx);
         assert!(app.read_with(cx, |app, _| app.error.is_some()));
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-                .ack
-                .is_success()
+            futures::executor::block_on(
+                runtime
+                    .handle
+                    .request_command(Command::Volume { value: 0.0 })
+            )
+            .is_success()
         );
         let ViewResponse::PlaylistEntries(page) = runtime
             .handle
@@ -3177,11 +3188,10 @@ mod content_menu_keyboard_tests {
     fn playlist_row_deduplicate_preserves_first_identity_and_closes_menu(cx: &mut TestAppContext) {
         let (_directory, runtime, _save, app, handle) = fixture(cx);
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::AddPlaylist {
+            futures::executor::block_on(runtime.handle.request_command(Command::AddPlaylist {
                 playlist_id: 1,
                 track_ids: vec![1, 1, 1],
             }))
-            .ack
             .is_success()
         );
         let entries = || {
@@ -3225,9 +3235,11 @@ mod content_menu_keyboard_tests {
         assert!(app.read_with(cx, |app, cx| {
             app.playlists.read(cx).playlist_action.is_none()
         }));
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-                .ack;
+        let ack = futures::executor::block_on(
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.0 }),
+        );
         assert!(ack.is_success());
         let after = entries();
         assert_eq!(after.len(), 1);

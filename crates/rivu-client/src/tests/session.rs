@@ -2,7 +2,7 @@ use super::*;
 use rivu_protocol::wire::PROTOCOL_VERSION;
 
 fn read_test_query(stream: &mut std::os::unix::net::UnixStream) -> Query {
-    let WireRequest::Query(query) = read_test_request(stream) else {
+    let WireRequest::Query(WireReadQuery { query, .. }) = read_test_request(stream) else {
         panic!("expected query")
     };
     Query::try_from(query).unwrap()
@@ -46,7 +46,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
             read_test_command(&mut stream),
             Command::CreatePlaylist { .. }
         ));
-        reply_test_ack(
+        reply_test_command(
             &mut stream,
             Ack {
                 status: rivu_protocol::response::AckStatus::Failed,
@@ -59,15 +59,19 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
                 source_tags: None,
                 source_file_saved: false,
                 source_refresh_error: None,
-            },
+            }
+            .into(),
         );
         assert!(matches!(
             read_test_query(&mut stream),
             Query::PlaylistSummaries { offset: 20, .. }
         ));
-        write_test_response(
+        reply_test_query(
             &mut stream,
-            WireResponse::Error("request unavailable".into()),
+            QueryResponse {
+                revisions: Default::default(),
+                result: Err(QueryError::Message("request unavailable".into())),
+            },
         );
         assert!(matches!(
             read_test_query(&mut stream),
@@ -87,16 +91,19 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
         matches!(response.result, Ok(rivu_protocol::response::ViewResponse::PlaylistSummaries(page)) if page.total == 40)
     );
     let ack = session
-        .request_ack(Command::CreatePlaylist { name: "new".into() })
+        .request_command(Command::CreatePlaylist { name: "new".into() })
         .unwrap();
     assert!(!ack.is_success());
-    assert_eq!(ack.revision, 3);
+    assert_eq!(ack.receipt().unwrap().revision, 3);
     let query = Query::PlaylistSummaries {
         query: None,
         offset: 20,
         limit: 20,
     };
-    assert!(session.query(query.clone()).is_err());
+    assert!(matches!(
+        session.query(query.clone()).unwrap().result,
+        Err(QueryError::Message(_))
+    ));
     let response = session.query(query).unwrap();
     assert!(
         matches!(response.result, Ok(rivu_protocol::response::ViewResponse::PlaylistSummaries(page)) if page.total == 7)
@@ -123,18 +130,21 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         );
         let mut frame = Vec::new();
         encode_response_frame_into(
-            &WireResponse::Ack(Ack {
-                status: rivu_protocol::response::AckStatus::Succeeded,
-                error: None,
-                revision: 1,
-                scan_id: None,
-                relocation_id: None,
-                processing_id: None,
-                database_optimization: None,
-                source_tags: None,
-                source_file_saved: false,
-                source_refresh_error: None,
-            }),
+            &WireResponse::Command(
+                Ack {
+                    status: rivu_protocol::response::AckStatus::Succeeded,
+                    error: None,
+                    revision: 1,
+                    scan_id: None,
+                    relocation_id: None,
+                    processing_id: None,
+                    database_optimization: None,
+                    source_tags: None,
+                    source_file_saved: false,
+                    source_refresh_error: None,
+                }
+                .into(),
+            ),
             &mut frame,
         )
         .unwrap();
@@ -147,7 +157,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         assert!(
             matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
         );
-        reply_test_ack(
+        reply_test_command(
             &mut stream,
             Ack {
                 status: rivu_protocol::response::AckStatus::Succeeded,
@@ -160,13 +170,14 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 source_tags: None,
                 source_file_saved: false,
                 source_refresh_error: None,
-            },
+            }
+            .into(),
         );
     });
     let mut session = client_session(directory.path());
     session.bind_instance(1).unwrap();
     let error = session
-        .request_ack(Command::CreatePlaylist {
+        .request_command(Command::CreatePlaylist {
             name: "first".into(),
         })
         .unwrap_err();
@@ -175,12 +186,12 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         rivu_protocol::response::AckStatus::Unknown
     );
     let ack = session
-        .request_ack(Command::CreatePlaylist {
+        .request_command(Command::CreatePlaylist {
             name: "second".into(),
         })
         .unwrap();
     assert!(ack.is_success());
-    assert_eq!(ack.revision, 2);
+    assert_eq!(ack.receipt().unwrap().revision, 2);
     server.join().unwrap();
 }
 
@@ -205,13 +216,13 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response_offered(
         session
             .bind_instance(session.instance_id().unwrap())
             .unwrap();
-        session.watch_until(StateRevisions::default().into())
+        session.wait_state_until(StateRevisions::default().into())
     });
     let mut stream = listener.accept().unwrap().0;
     complete_test_handshake(&mut stream);
     assert!(matches!(
         read_test_request(&mut stream),
-        WireRequest::Watch(_)
+        WireRequest::WaitState(_)
     ));
     // Cancellation with a partial frame offered, whether or not the client has
     // read it yet; buffer release on cancel is
@@ -251,7 +262,7 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
     let mut session = client_session(directory.path());
     session.bind_instance(1).unwrap();
     let error = session
-        .request_ack(Command::CreatePlaylist {
+        .request_command(Command::CreatePlaylist {
             name: "A-only".into(),
         })
         .unwrap_err();
@@ -307,13 +318,13 @@ fn pinned_session_rejects_reconnected_instance_without_replaying_failed_mutation
     session.bind_instance(1).unwrap();
     assert!(
         session
-            .request_ack(Command::CreatePlaylist {
+            .request_command(Command::CreatePlaylist {
                 name: "first".into()
             })
             .is_err()
     );
     let error = session
-        .request_ack(Command::CreatePlaylist {
+        .request_command(Command::CreatePlaylist {
             name: "second".into(),
         })
         .unwrap_err();
@@ -341,7 +352,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
         assert!(
             matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
         );
-        reply_test_ack(
+        reply_test_command(
             &mut stream,
             Ack {
                 status: rivu_protocol::response::AckStatus::Succeeded,
@@ -354,13 +365,14 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
                 source_tags: None,
                 source_file_saved: false,
                 source_refresh_error: None,
-            },
+            }
+            .into(),
         );
     });
     let mut session = client_session(directory.path());
     assert!(
         session
-            .request_ack(Command::CreatePlaylist {
+            .request_command(Command::CreatePlaylist {
                 name: "first".into()
             })
             .is_err()
@@ -368,13 +380,64 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
     assert_eq!(session.instance_id(), None);
     assert!(
         session
-            .request_ack(Command::CreatePlaylist {
+            .request_command(Command::CreatePlaylist {
                 name: "second".into()
             })
             .unwrap()
             .is_success()
     );
     assert_eq!(session.instance_id(), Some(2));
+    server.join().unwrap();
+}
+
+#[test]
+fn bounded_query_timeout_disconnects_before_the_next_query() {
+    if isolate_socket_test() {
+        return;
+    }
+
+    use std::{io::Read, os::unix::net::UnixListener};
+    let directory = socket_test_directory();
+    let listener =
+        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let mut session = client_session(directory.path());
+    let clock = Arc::new(ResponseClock::default());
+    session.response_clock = Some(clock.clone());
+    let server = std::thread::spawn(move || {
+        let mut abandoned = listener.accept().unwrap().0;
+        complete_test_handshake(&mut abandoned);
+        assert_eq!(
+            read_test_query(&mut abandoned),
+            Query::Track { track_id: 1 }
+        );
+        clock.advance_and_wait_for_poll(
+            rivu_protocol::transport::response_timeout(query_wait_timeout())
+                + Duration::from_secs(1),
+        );
+        assert_eq!(abandoned.read(&mut [0; 1]).unwrap(), 0);
+
+        let mut next = listener.accept().unwrap().0;
+        complete_test_handshake(&mut next);
+        assert_eq!(read_test_query(&mut next), Query::Track { track_id: 2 });
+        reply_test_query(
+            &mut next,
+            QueryResponse {
+                revisions: Default::default(),
+                result: Ok(rivu_protocol::response::ViewResponse::Track(None)),
+            },
+        );
+    });
+
+    let error = session.query(Query::Track { track_id: 1 }).unwrap_err();
+    assert!(error.to_string().contains("timed out"));
+    assert!(session.stream.is_none());
+    assert!(
+        session
+            .query(Query::Track { track_id: 2 })
+            .unwrap()
+            .result
+            .is_ok()
+    );
     server.join().unwrap();
 }
 
@@ -394,7 +457,7 @@ fn retained_query_uses_physical_request_and_returns_actual_reply() {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         complete_test_handshake(&mut stream);
-        let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+        let WireRequest::Query(query) = read_test_request(&mut stream) else {
             panic!("expected physical retained query");
         };
         assert_eq!(Query::try_from(query.query).unwrap(), Query::LibraryStats);
@@ -434,7 +497,7 @@ fn cancelling_retained_query_disconnects_its_physical_session() {
     complete_test_handshake(&mut stream);
     assert!(matches!(
         read_test_request(&mut stream),
-        WireRequest::QueryRetained(_)
+        WireRequest::Query(_)
     ));
     stop.cancel();
     assert!(client.join().unwrap().is_err());
@@ -485,6 +548,7 @@ fn owner_cancel_during_handshake_skips_unsent_query_and_reuses_session() {
             state: wire_state(StateResponse {
                 revisions: StateRevisions::default(),
                 playback: None,
+                current_track: None,
                 queue: None,
                 library: None,
                 system: None,
@@ -495,7 +559,10 @@ fn owner_cancel_during_handshake_skips_unsent_query_and_reuses_session() {
     );
     assert!(matches!(
         read_test_request(&mut stream),
-        WireRequest::Query(WireQuery::Track { track_id: 42 })
+        WireRequest::Query(WireReadQuery {
+            query: WireQuery::Track { track_id: 42 },
+            ..
+        })
     ));
     write_test_response(
         &mut stream,
@@ -566,13 +633,13 @@ fn owner_cancel_sends_identified_control_and_returns_the_physical_reply_before_t
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         complete_test_handshake(&mut stream);
-        let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+        let WireRequest::Query(query) = read_test_request(&mut stream) else {
             panic!("expected retained query");
         };
         assert!(matches!(query.query, WireQuery::LibraryStats));
         admitted.send(()).unwrap();
         assert!(
-            matches!(read_test_request(&mut stream), WireRequest::QueryCancel(id) if id == query.id)
+            matches!(read_test_request(&mut stream), WireRequest::CancelRead(id) if id == query.id)
         );
         write_test_response(
             &mut stream,
@@ -583,7 +650,7 @@ fn owner_cancel_sends_identified_control_and_returns_the_physical_reply_before_t
         );
         assert!(matches!(
             read_test_request(&mut stream),
-            WireRequest::Query(WireQuery::Track { track_id }) if track_id == rolled_back.library as i64
+            WireRequest::Query(WireReadQuery { query: WireQuery::Track { track_id }, .. }) if track_id == rolled_back.library as i64
         ));
         write_test_response(
             &mut stream,

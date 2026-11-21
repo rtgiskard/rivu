@@ -3631,7 +3631,7 @@ mod tests {
             artwork_panel::{ArtworkPanel, ArtworkRuntime},
             layout::{Axis, Node, Panel},
         };
-        use rivu_format::config::{ArtworkMode, ArtworkOptions, ArtworkStyle, Config};
+        use rivu_format::config::{ArtworkMode, ArtworkOptions, ArtworkStyle, ConfigSettings};
         use rivu_protocol::model::PlaybackStatus;
 
         struct CountedPanel {
@@ -3715,9 +3715,9 @@ mod tests {
         });
         let mut panels = crate::gui::workspace::WorkspacePanels::default();
         let mut sync = |track, rotating, cx: &mut gpui::TestAppContext| {
-            let config = Config {
+            let config = ConfigSettings {
                 animation_fps: 0,
-                ..Config::default()
+                ..ConfigSettings::default()
             };
             panels.reconcile(&crate::gui::layout::Layout {
                 root: Some(Node::Split {
@@ -3895,7 +3895,7 @@ mod tests {
             artwork_panel::{ArtworkPanel, ArtworkRuntime},
             layout::{Axis, Node, Panel},
         };
-        use rivu_format::config::{ArtworkMode, ArtworkOptions, ArtworkStyle, Config};
+        use rivu_format::config::{ArtworkMode, ArtworkOptions, ArtworkStyle, ConfigSettings};
         use rivu_protocol::model::PlaybackStatus;
 
         cx.update(|cx| {
@@ -3929,9 +3929,9 @@ mod tests {
         });
         let mut panels = crate::gui::workspace::WorkspacePanels::default();
         let mut sync = |mode, status, fps, visible, cx: &mut gpui::TestAppContext| {
-            let config = Config {
+            let config = ConfigSettings {
                 animation_fps: fps,
-                ..Config::default()
+                ..ConfigSettings::default()
             };
             let root = Node::Split {
                 id: 90,
@@ -4168,7 +4168,7 @@ mod tests {
             artwork_panel::{ArtworkPanel, ArtworkRuntime},
             layout::{Axis, Node, Panel},
         };
-        use rivu_format::config::{ArtworkOptions, ArtworkStyle, Config};
+        use rivu_format::config::{ArtworkOptions, ArtworkStyle, ConfigSettings};
         use rivu_protocol::model::PlaybackStatus;
 
         let directory = tempfile::tempdir().unwrap();
@@ -4176,7 +4176,7 @@ mod tests {
             directory.path(),
         ));
         let images = ArtworkImageRegistry::default();
-        let config = Config::default();
+        let config = ConfigSettings::default();
         let artwork = cx.update(|cx| {
             let default = cx
                 .new(|cx| DefaultArtwork::new(&rivu_presentation::i18n::Localizer::new("en"), cx));

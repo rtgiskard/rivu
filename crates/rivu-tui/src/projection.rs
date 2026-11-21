@@ -1,4 +1,4 @@
-use rivu_format::config::Config;
+use rivu_format::config::ConfigSettings;
 use rivu_protocol::model::{ClientSnapshot, LibrarySnapshot, PlaybackState, QueueState, Track};
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ pub struct TuiSnapshot {
     pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
     pub system: TuiSystemSnapshot,
-    pub(crate) configuration: Arc<Config>,
+    pub(crate) configuration: Arc<ConfigSettings>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -109,7 +109,7 @@ mod tests {
         let initial = TuiSnapshot::from_client(client.clone());
         client.system.revision += 1;
         client.system.selected_device = Some("another device".into());
-        Arc::make_mut(&mut client.configuration.config).volume = 0.25;
+        Arc::make_mut(&mut client.configuration.config).artwork_file_limit_mib += 1;
         client.library.duplicate_groups_revision += 1;
         client.library.duplicate_members_revision += 1;
         let ignored = TuiSnapshot::from_client(client.clone());
@@ -135,7 +135,7 @@ mod tests {
         Arc::make_mut(&mut client.configuration.config).library_roots = vec!["/music".into()];
         let initial = TuiSnapshot::from_client(client.clone());
 
-        Arc::make_mut(&mut client.configuration.config).volume = 0.25;
+        Arc::make_mut(&mut client.configuration.config).scan_max_depth += 1;
         let other_setting = TuiSnapshot::from_client(client.clone());
         assert!(other_setting.same_presentation(&initial));
 
