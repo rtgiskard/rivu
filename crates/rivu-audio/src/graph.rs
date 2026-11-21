@@ -706,7 +706,7 @@ fn estimate(kind: &GraphNodeKind, sample_rate: u32, channels: usize) -> Result<(
             EqImplementation::LinearPhase { taps } => {
                 let partitions = taps.div_ceil(GRAPH_BLOCK_FRAMES);
                 (
-                    channels * partitions * 512 * 16 + channels * 256 * 12 + 512 * 32,
+                    channels * partitions * 512 * 16 + channels * 256 * 8 + 512 * 24,
                     channels as u64 * (partitions as u64 * 16 + 288),
                 )
             }
