@@ -2,8 +2,7 @@
 use rivu_protocol::model::Track;
 use std::path::PathBuf;
 
-/// Reduce a lossless finite stream immediately; only one chunk's folded stereo
-/// and a bounded summary are retained, never a song-sized sample buffer.
+/// Fold each admitted PCM chunk directly into a bounded waveform summary.
 pub(in crate::gui) async fn load(
     data_dir: PathBuf,
     instance: u32,
@@ -22,7 +21,6 @@ pub(in crate::gui) async fn load(
     let hint = expected.decoder_hint;
     let mut summary = rivu_visuals::WaveformSummary::default();
     let mut weights = Vec::new();
-    let mut folded = Vec::new();
     crate::transport::audio::read_stream(
         data_dir,
         instance,
@@ -59,16 +57,15 @@ pub(in crate::gui) async fn load(
                     samples,
                     ..
                 } => {
-                    folded.clear();
-                    folded.extend(samples.chunks_exact(weights.len()).map(|frame| {
+                    let stereo = samples.chunks_exact(weights.len()).map(|frame| {
                         let mut stereo = [0.0; 2];
                         for (&sample, weight) in frame.iter().zip(&weights) {
                             stereo[0] += sample * weight[0];
                             stereo[1] += sample * weight[1];
                         }
                         stereo
-                    }));
-                    summary.push_mapped(*media_start, *media_step, &folded);
+                    });
+                    summary.push_mapped(*media_start, *media_step, stereo);
                     progress(&summary.frame)?;
                 }
                 Response::Complete { duration, .. } => summary.finish(*duration),

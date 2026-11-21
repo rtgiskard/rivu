@@ -348,8 +348,15 @@ impl WaveformSummary {
         }
     }
 
-    pub fn push_mapped(&mut self, start: f64, step: f64, samples: &[[f32; 2]]) {
-        if samples.is_empty()
+    /// The frame count sets the bin geometry before any samples are consumed.
+    pub fn push_mapped(
+        &mut self,
+        start: f64,
+        step: f64,
+        samples: impl ExactSizeIterator<Item = [f32; 2]>,
+    ) {
+        let frames = samples.len();
+        if frames == 0
             || self.frame.peaks.is_empty()
             || !start.is_finite()
             || !step.is_finite()
@@ -357,7 +364,7 @@ impl WaveformSummary {
         {
             return;
         }
-        let end = start + step * samples.len() as f64;
+        let end = start + step * frames as f64;
         if !end.is_finite() || end <= 0.0 {
             return;
         }
@@ -376,7 +383,7 @@ impl WaveformSummary {
         let rate = identity.sample_rate;
         let revision = self.frame.revision.wrapping_add(1);
         let mut last_bin = None;
-        for (offset, &[left, right]) in samples.iter().enumerate() {
+        for (offset, [left, right]) in samples.enumerate() {
             let seconds = start + offset as f64 * step;
             if seconds < 0.0 {
                 continue;
@@ -519,7 +526,7 @@ mod tests {
     #[test]
     fn eof_trims_unknown_tail_without_moving_decoded_bins() {
         let mut summary = summary(None, 100);
-        summary.push_mapped(0.0, 0.01, &[[0.5; 2]; 100]);
+        summary.push_mapped(0.0, 0.01, [[0.5; 2]; 100].into_iter());
         let width = (summary.frame.bin_frames, summary.frame.bin_count);
         let decoded = summary
             .frame
@@ -540,10 +547,10 @@ mod tests {
     #[test]
     fn replay_replaces_peak_rms_and_count_together_preserving_unvisited_bins() {
         let mut summary = summary(Some(2.0), 1024);
-        summary.push_mapped(0.0, 1.0 / 1024.0, &[[2.0, 1.0]; 4]);
+        summary.push_mapped(0.0, 1.0 / 1024.0, [[2.0, 1.0]; 4].into_iter());
         let old_tail = summary.frame.peaks[1];
         summary.begin_traversal();
-        summary.push_mapped(0.0, 1.0 / 1024.0, &[[0.25, 0.125]]);
+        summary.push_mapped(0.0, 1.0 / 1024.0, [[0.25, 0.125]].into_iter());
         assert_eq!(summary.frame.peaks[0], Some(0.25));
         assert_eq!(summary.frame.left_rms[0], Some(0.25));
         assert_eq!(summary.frame.right_rms[0], Some(0.125));
@@ -555,11 +562,11 @@ mod tests {
 
         // Replacing the last old maximum must lower normalization, including
         // when the new maximum switches from the left to the right channel.
-        summary.push_mapped(2.0 / 1024.0, 1.0 / 1024.0, &[[0.125, 1.25]]);
+        summary.push_mapped(2.0 / 1024.0, 1.0 / 1024.0, [[0.125, 1.25]].into_iter());
         assert_eq!(summary.frame.max_peak, 1.25);
         assert_peak_invariant(&summary.frame);
         summary.begin_traversal();
-        summary.push_mapped(2.0 / 1024.0, 1.0 / 1024.0, &[[0.125, 0.5]]);
+        summary.push_mapped(2.0 / 1024.0, 1.0 / 1024.0, [[0.125, 0.5]].into_iter());
         assert_eq!(summary.frame.max_peak, 1.0);
         assert_eq!(summary.frame.peaks[0], Some(0.25));
         assert_peak_invariant(&summary.frame);
@@ -568,7 +575,7 @@ mod tests {
     #[test]
     fn media_step_places_resampled_pcm_in_selected_source_time() {
         let mut summary = summary(Some(8.0), 1);
-        summary.push_mapped(2.0, 0.5, &[[0.5; 2], [0.75; 2], [0.25; 2]]);
+        summary.push_mapped(2.0, 0.5, [[0.5; 2], [0.75; 2], [0.25; 2]].into_iter());
         assert!(summary.frame.peaks[..2].iter().all(Option::is_none));
         assert_eq!(summary.frame.peaks[2], Some(0.5));
         assert_eq!(summary.frame.peaks[3], Some(0.75));
@@ -582,24 +589,28 @@ mod tests {
             .map(|index| [if index % 2 == 0 { 1.0 } else { 0.0 }; 2])
             .collect();
         let mut whole = summary(Some(1.0), 2048);
-        whole.push_mapped(0.0, 1.0 / 2048.0, &samples);
+        whole.push_mapped(0.0, 1.0 / 2048.0, samples.iter().copied());
         let mut packets = summary(Some(1.0), 2048);
         for (index, chunk) in samples.chunks(7).enumerate() {
-            packets.push_mapped((index * 7) as f64 / 2048.0, 1.0 / 2048.0, chunk);
+            packets.push_mapped(
+                (index * 7) as f64 / 2048.0,
+                1.0 / 2048.0,
+                chunk.iter().copied(),
+            );
         }
         assert_eq!(packets.frame.peaks, whole.frame.peaks);
         assert_eq!(packets.frame.rms, whole.frame.rms);
         assert_eq!(packets.frame.rms_counts, vec![4; MAX_BINS]);
         assert_eq!(packets.frame.left_rms_counts, vec![2; MAX_BINS]);
         let mut silent = summary(Some(1.0), 2);
-        silent.push_mapped(0.0, 0.5, &[[0.0; 2]]);
+        silent.push_mapped(0.0, 0.5, [[0.0; 2]].into_iter());
         assert_eq!(silent.frame.peaks, [Some(0.0), None]);
     }
 
     #[test]
     fn sparse_mapped_bins_finalize_rms_after_skipping_negative_start() {
         let mut summary = summary(Some(4.0), 4);
-        summary.push_mapped(-1.0, 0.5, &[[0.25, 0.75]; 8]);
+        summary.push_mapped(-1.0, 0.5, [[0.25, 0.75]; 8].into_iter());
         for bin in 0..16 {
             if bin <= 10 && bin % 2 == 0 {
                 assert_eq!(summary.frame.left_rms[bin], Some(0.25));
@@ -616,13 +627,13 @@ mod tests {
     #[test]
     fn unknown_duration_coarsens_bounded_storage_without_mixing_traversals() {
         let mut summary = summary(None, 100);
-        summary.push_mapped(0.0, 0.01, &[[2.0; 2]]);
-        summary.push_mapped(120.0, 0.01, &[[0.25; 2]]);
+        summary.push_mapped(0.0, 0.01, [[2.0; 2]].into_iter());
+        summary.push_mapped(120.0, 0.01, [[0.25; 2]].into_iter());
         assert_eq!(summary.frame.peaks.len(), MAX_BINS);
         assert_eq!(summary.frame.span_seconds, 240.0);
         assert_eq!(summary.frame.peaks[0], Some(2.0));
         assert_peak_invariant(&summary.frame);
-        summary.push_mapped(0.0, 0.01, &[[0.125; 2]]);
+        summary.push_mapped(0.0, 0.01, [[0.125; 2]].into_iter());
         assert_eq!(summary.frame.peaks[0], Some(0.125));
         assert_eq!(summary.frame.left_rms_counts[0], 1);
         assert_eq!(summary.frame.left_rms[0], Some(0.125));
@@ -637,12 +648,12 @@ mod tests {
         summary.push_mapped(
             0.0,
             1.0,
-            &[[4.0, 0.25], [0.5, 2.0], [1.0, 0.5], [0.25, 1.5]],
+            [[4.0, 0.25], [0.5, 2.0], [1.0, 0.5], [0.25, 1.5]].into_iter(),
         );
         summary.begin_traversal();
-        summary.push_mapped(1.0, 1.0, &[[0.25, 3.0]]);
+        summary.push_mapped(1.0, 1.0, [[0.25, 3.0]].into_iter());
         assert_eq!(summary.frame.max_peak, 4.0);
-        summary.push_mapped(2.0, 1.0, &[[0.125, 0.5]; 3]);
+        summary.push_mapped(2.0, 1.0, [[0.125, 0.5]; 3].into_iter());
         assert_eq!(summary.frame.span_seconds, 8.0);
         assert_eq!(summary.frame.peaks, [Some(3.0), Some(0.5), Some(0.5), None]);
         assert_eq!(summary.frame.left_peaks[0], Some(0.25));
@@ -655,7 +666,7 @@ mod tests {
     #[test]
     fn authoritative_source_change_clears_even_when_path_and_duration_match() {
         let mut summary = summary(Some(2.0), 1);
-        summary.push_mapped(0.0, 1.0, &[[0.75; 2]]);
+        summary.push_mapped(0.0, 1.0, [[0.75; 2]].into_iter());
         let retained = summary.frame.peaks.clone();
         summary.select(
             Path::new("track.wav"),

@@ -632,7 +632,11 @@ async fn run_client(
                             summary.begin_traversal();
                         }
                         waveform_key = Some(key);
-                        summary.push_mapped(header.media_start, header.media_step, &folded);
+                        summary.push_mapped(
+                            header.media_start,
+                            header.media_step,
+                            folded.iter().copied(),
+                        );
                         waveform_generation = Some(header.generation);
                     }
                 }

@@ -825,7 +825,7 @@ fn first_play_replaces_restored_waveform_target_with_the_same_generation(
                 sample_rate: playing.sample_rate,
             }),
         );
-        scan.push_mapped(0.0, 0.25, &[[0.5; 2]; 4]);
+        scan.push_mapped(0.0, 0.25, [[0.5; 2]; 4].into_iter());
         scan.finish(1.0);
         waveform.update(cx, |waveform, cx| {
             waveform.progress_full(generation, &scan.frame, cx);

@@ -2754,7 +2754,7 @@ mod tests {
                     sample_rate: 4,
                 }),
             );
-            scan.push_mapped(0.0, 0.25, &[[3.0, 0.5]; 8]);
+            scan.push_mapped(0.0, 0.25, [[3.0, 0.5]; 8].into_iter());
             scan.finish(2.0);
             let mut display = scan.frame;
             let mut live = summary::WaveformSummary::default();
@@ -2771,10 +2771,10 @@ mod tests {
             );
             let samples = (rate * 2) as usize;
             let step = f64::from(rate).recip();
-            live.push_mapped(0.0, step, &vec![[4.0, 1.0]; samples]);
+            live.push_mapped(0.0, step, std::iter::repeat_n([4.0, 1.0], samples));
             let baseline = live.frame.revision;
             live.begin_traversal();
-            live.push_mapped(0.0, step, &[[0.25, 1.5]]);
+            live.push_mapped(0.0, step, [[0.25, 1.5]].into_iter());
             merge_progressive(&mut display, &live.frame, baseline, baseline);
             assert_eq!(display.peaks[0], Some(1.5));
             assert_eq!(display.left_peaks[0], Some(0.25));
@@ -2782,7 +2782,7 @@ mod tests {
             assert_eq!(display.max_peak, 3.0, "unvisited scan bins remain");
 
             let after = live.frame.revision;
-            live.push_mapped(step, step, &vec![[0.25, 1.5]; samples - 1]);
+            live.push_mapped(step, step, std::iter::repeat_n([0.25, 1.5], samples - 1));
             merge_progressive(&mut display, &live.frame, after, baseline);
             assert_eq!(display.peaks, vec![Some(1.5); 8]);
             assert_eq!(display.left_peaks, vec![Some(0.25); 8]);
@@ -2791,7 +2791,7 @@ mod tests {
 
             let after = live.frame.revision;
             live.begin_traversal();
-            live.push_mapped(0.0, step, &vec![[0.5, 0.125]; samples]);
+            live.push_mapped(0.0, step, std::iter::repeat_n([0.5, 0.125], samples));
             merge_progressive(&mut display, &live.frame, after, baseline);
             assert_eq!(display.peaks, vec![Some(0.5); 8]);
             assert_eq!(display.left_peaks, vec![Some(0.5); 8]);
