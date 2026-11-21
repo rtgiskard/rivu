@@ -259,7 +259,7 @@ pub fn paged_loading_row<T: 'static>(
 #[cfg(test)]
 mod row_tests {
     use super::*;
-    use gpui::{Context, InputEvent, Render, TestAppContext, Window, div};
+    use gpui::{Context, Render, TestAppContext, Window, div};
 
     struct LoadingRow {
         error: Option<&'static str>,
@@ -322,24 +322,7 @@ mod row_tests {
             cx.update_window(handle, |_, window, cx| {
                 window.draw(cx).clear(cx);
                 let position = gpui::point(gpui::px(220.), gpui::px(12.));
-                window.dispatch_event(
-                    gpui::MouseDownEvent {
-                        button: gpui::MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(
-                    gpui::MouseUpEvent {
-                        button: gpui::MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
+                crate::test_events::click(window, cx, gpui::MouseButton::Left, position);
             })
             .unwrap();
             assert_eq!(row.read_with(cx, |row, _| row.retries), retries);
@@ -366,17 +349,7 @@ mod row_tests {
         for expected_retries in [0, 1] {
             cx.update_window(handle, |_, window, cx| {
                 window.draw(cx).clear(cx);
-                let keystroke = gpui::Keystroke::parse("enter").unwrap();
-                window.dispatch_event(
-                    gpui::KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+                crate::test_events::press(window, cx, "enter");
             })
             .unwrap();
             cx.run_until_parked();

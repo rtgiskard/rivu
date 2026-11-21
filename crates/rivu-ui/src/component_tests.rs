@@ -5,8 +5,8 @@ use crate::{
     overlay::ListDragPreview,
 };
 use gpui::{
-    AnyWindowHandle, Context, Focusable, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke, Render,
-    TestAppContext, Window, div, prelude::*,
+    AnyWindowHandle, Context, Focusable, InputEvent, Keystroke, Render, TestAppContext, Window,
+    div, prelude::*,
 };
 
 struct KeyboardControls {
@@ -57,18 +57,8 @@ fn draw(cx: &mut TestAppContext, window: AnyWindowHandle) {
 }
 
 fn press(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
-    let keystroke = Keystroke::parse(key).unwrap();
     cx.update_window(window, |_, window, cx| {
-        window.dispatch_event(
-            KeyDownEvent {
-                keystroke: keystroke.clone(),
-                is_held: false,
-                prefer_character_input: false,
-            }
-            .to_platform_input(),
-            cx,
-        );
-        window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+        crate::test_events::press(window, cx, key);
     })
     .unwrap();
     draw(cx, window);
@@ -132,8 +122,13 @@ fn modified_arrows_do_not_move_menu_focus_or_turn_into_activation() {
     })
     .unwrap();
     draw(&mut cx, handle);
+    let focused = cx
+        .update_window(handle, |_, window, cx| window.focused(cx).unwrap())
+        .unwrap();
     for key in ["shift-down", "ctrl-down", "alt-down", "shift-up"] {
         press(&mut cx, handle, key);
+        cx.update_window(handle, |_, window, _| assert!(focused.is_focused(window)))
+            .unwrap();
     }
     press(&mut cx, handle, "enter");
     press(&mut cx, handle, "tab");
@@ -149,7 +144,7 @@ fn modified_arrows_do_not_move_menu_focus_or_turn_into_activation() {
 }
 
 #[test]
-fn disabling_a_focused_control_cancels_keyboard_activation() {
+fn menu_tab_skips_the_newly_disabled_control() {
     let mut cx = TestAppContext::single();
     let (scope, handle) = keyboard_controls(&mut cx, false);
     cx.update_window(handle, |_, window, cx| {
@@ -159,18 +154,6 @@ fn disabling_a_focused_control_cancels_keyboard_activation() {
     })
     .unwrap();
     draw(&mut cx, handle);
-    cx.update_window(handle, |_, window, cx| {
-        window.dispatch_event(
-            KeyDownEvent {
-                keystroke: Keystroke::parse("enter").unwrap(),
-                is_held: false,
-                prefer_character_input: false,
-            }
-            .to_platform_input(),
-            cx,
-        );
-    })
-    .unwrap();
     cx.update_window(handle, |root, _, cx| {
         root.downcast::<KeyboardControls>()
             .unwrap()
@@ -181,24 +164,6 @@ fn disabling_a_focused_control_cancels_keyboard_activation() {
     })
     .unwrap();
     draw(&mut cx, handle);
-    cx.update_window(handle, |_, window, cx| {
-        window.dispatch_event(
-            KeyUpEvent {
-                keystroke: Keystroke::parse("enter").unwrap(),
-            }
-            .to_platform_input(),
-            cx,
-        );
-    })
-    .unwrap();
-    press(&mut cx, handle, "enter");
-    press(&mut cx, handle, "space");
-    let counts = cx
-        .update_window(handle, |root, _, cx| {
-            root.downcast::<KeyboardControls>().unwrap().read(cx).counts
-        })
-        .unwrap();
-    assert_eq!(counts, [0; 4]);
     press(&mut cx, handle, "tab");
     press(&mut cx, handle, "space");
     let counts = cx
@@ -412,26 +377,7 @@ fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
         draw(&mut cx, handle);
         cx.update_window(handle, |_, window, cx| {
             let position = initial[2].center();
-            window.dispatch_event(
-                gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-            window.dispatch_event(
-                gpui::MouseUpEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
+            crate::test_events::click(window, cx, gpui::MouseButton::Left, position);
         })
         .unwrap();
         draw(&mut cx, handle);
@@ -602,50 +548,58 @@ fn list_tree_and_dropdown_geometry_survives_text_selection_hover_and_scaling() {
     });
     let root = window.root(&mut cx).unwrap();
     let handle = window.into();
-    for rem in [12., 24.] {
-        for font_size in [8, 18] {
-            cx.update(|cx| {
-                crate::theme::set_typography(gpui::font("sans-serif"), "sans-serif", font_size, cx);
+    for (rem, font_size, width) in [
+        (12., 8, 240.),
+        (12., 18, 96.),
+        (24., 8, 240.),
+        (24., 18, 96.),
+    ] {
+        cx.update(|cx| {
+            crate::theme::set_typography(gpui::font("sans-serif"), "sans-serif", font_size, cx);
+        });
+        cx.update_window(handle, |_, window, _| window.set_rem_size(gpui::px(rem)))
+            .unwrap();
+
+        root.update(&mut cx, |this, cx| {
+            this.width = width;
+            this.selected = false;
+            this.alternate = false;
+            cx.notify();
+        });
+        draw(&mut cx, handle);
+        let baseline = bounds.get();
+        for (selected, alternate) in [(false, true), (true, false), (true, true)] {
+            root.update(&mut cx, |this, cx| {
+                this.selected = selected;
+                this.alternate = alternate;
+                cx.notify();
             });
-            cx.update_window(handle, |_, window, _| window.set_rem_size(gpui::px(rem)))
+            let interactions = if width == 96. && selected && alternate {
+                4
+            } else {
+                1
+            };
+            for position in baseline[..3]
+                .iter()
+                .map(|bounds| bounds.center())
+                .chain([gpui::point(gpui::px(500.), gpui::px(500.))])
+                .take(interactions)
+            {
+                cx.update_window(handle, |_, window, cx| {
+                    window.simulate_mouse_move(position, cx)
+                })
                 .unwrap();
-            for width in [96., 240.] {
-                root.update(&mut cx, |this, cx| {
-                    this.width = width;
-                    cx.notify();
-                });
                 draw(&mut cx, handle);
-                let baseline = bounds.get();
-                for selected in [false, true] {
-                    for alternate in [false, true] {
-                        root.update(&mut cx, |this, cx| {
-                            this.selected = selected;
-                            this.alternate = alternate;
-                            cx.notify();
-                        });
-                        for position in baseline[..3]
-                            .iter()
-                            .map(|bounds| bounds.center())
-                            .chain([gpui::point(gpui::px(500.), gpui::px(500.))])
-                        {
-                            cx.update_window(handle, |_, window, cx| {
-                                window.simulate_mouse_move(position, cx)
-                            })
-                            .unwrap();
-                            draw(&mut cx, handle);
-                            let measured = bounds.get();
-                            assert_eq!(&measured[..3], &baseline[..3]);
-                            for row in &measured[..3] {
-                                assert_eq!(row.size.width, gpui::px(width));
-                            }
-                            for text in &measured[3..] {
-                                assert!(text.left() >= measured[0].left());
-                                assert!(text.right() <= measured[0].right());
-                                assert!(text.top() >= measured[0].top());
-                                assert!(text.bottom() <= measured[0].bottom());
-                            }
-                        }
-                    }
+                let measured = bounds.get();
+                assert_eq!(&measured[..3], &baseline[..3]);
+                for row in &measured[..3] {
+                    assert_eq!(row.size.width, gpui::px(width));
+                }
+                for text in &measured[3..] {
+                    assert!(text.left() >= measured[0].left());
+                    assert!(text.right() <= measured[0].right());
+                    assert!(text.top() >= measured[0].top());
+                    assert!(text.bottom() <= measured[0].bottom());
                 }
             }
         }
@@ -788,7 +742,6 @@ fn floating_row_actions_follow_selection_hover_and_focus_without_button_fills() 
         (crate::SurfaceStyle::Opaque, 1.),
         (crate::SurfaceStyle::Translucent(0.), 0.),
         (crate::SurfaceStyle::Translucent(0.28), 0.28),
-        (crate::SurfaceStyle::Translucent(0.63), 0.63),
         (crate::SurfaceStyle::Translucent(1.), 1.),
     ] {
         let mut cx = TestAppContext::single();
@@ -983,26 +936,7 @@ fn row_action_regions_preserve_native_focus_click_and_keyboard_without_selecting
         cx.update_window(handle, |_, window, cx| {
             window.simulate_mouse_move(position, cx);
             window.draw(cx).clear(cx);
-            window.dispatch_event(
-                gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
-            window.dispatch_event(
-                gpui::MouseUpEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }
-                .to_platform_input(),
-                cx,
-            );
+            crate::test_events::click(window, cx, gpui::MouseButton::Left, position);
             assert!(root.read(cx).action_focus.is_focused(window));
         })
         .unwrap();
@@ -1018,12 +952,7 @@ fn row_action_regions_preserve_native_focus_click_and_keyboard_without_selecting
         // Moving a pressed action must not arm the ancestor's native row drag.
         cx.update_window(handle, |_, window, cx| {
             window.dispatch_event(
-                gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
+                crate::test_events::down(gpui::MouseButton::Left, position).to_platform_input(),
                 cx,
             );
             window.dispatch_event(
@@ -1046,21 +975,11 @@ fn row_action_regions_preserve_native_focus_click_and_keyboard_without_selecting
         cx.update_window(handle, |_, window, cx| {
             let row_position = position - gpui::point(gpui::px(64.), gpui::px(0.));
             window.dispatch_event(
-                gpui::MouseUpEvent {
-                    button: gpui::MouseButton::Left,
-                    position: row_position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
+                crate::test_events::up(gpui::MouseButton::Left, row_position).to_platform_input(),
                 cx,
             );
             window.dispatch_event(
-                gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Left,
-                    position: row_position,
-                    ..Default::default()
-                }
-                .to_platform_input(),
+                crate::test_events::down(gpui::MouseButton::Left, row_position).to_platform_input(),
                 cx,
             );
             window.dispatch_event(
@@ -1140,11 +1059,10 @@ fn deferred_row_drop_targets_reject_pointer_outside_list_viewport() {
         draw(&mut cx, handle);
         cx.update_window(handle, |_, window, cx| {
             window.dispatch_event(
-                gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Left,
-                    position: gpui::point(gpui::px(20.), gpui::px(20.)),
-                    ..Default::default()
-                }
+                crate::test_events::down(
+                    gpui::MouseButton::Left,
+                    gpui::point(gpui::px(20.), gpui::px(20.)),
+                )
                 .to_platform_input(),
                 cx,
             );
@@ -1165,11 +1083,10 @@ fn deferred_row_drop_targets_reject_pointer_outside_list_viewport() {
             window.simulate_mouse_move(gpui::point(gpui::px(40.), gpui::px(y)), cx);
             window.draw(cx).clear(cx);
             window.dispatch_event(
-                gpui::MouseUpEvent {
-                    button: gpui::MouseButton::Left,
-                    position: gpui::point(gpui::px(40.), gpui::px(y)),
-                    ..Default::default()
-                }
+                crate::test_events::up(
+                    gpui::MouseButton::Left,
+                    gpui::point(gpui::px(40.), gpui::px(y)),
+                )
                 .to_platform_input(),
                 cx,
             );

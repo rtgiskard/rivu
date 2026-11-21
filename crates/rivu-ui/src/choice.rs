@@ -449,11 +449,7 @@ mod tests {
 
     fn navigate(state: &mut ChoiceState<u8>, key: &str, window: &Window) {
         state.key(
-            &KeyDownEvent {
-                keystroke: Keystroke::parse(key).unwrap(),
-                is_held: false,
-                prefer_character_input: false,
-            },
+            &crate::test_events::key_down(key),
             ChoiceMode::Select,
             false,
             window,
@@ -633,11 +629,7 @@ mod tests {
 
                 let current = this.callback(1);
                 let navigation = this.choices.key(
-                    &KeyDownEvent {
-                        keystroke: Keystroke::parse("down").unwrap(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    },
+                    &crate::test_events::key_down("down"),
                     ChoiceMode::Select,
                     false,
                     window,
@@ -744,26 +736,8 @@ mod tests {
     }
 
     fn click_first_choice(window: &mut Window, cx: &mut App) {
-        use gpui::InputEvent as _;
         let position = point(px(16.), px(40.));
-        window.dispatch_event(
-            MouseDownEvent {
-                button: MouseButton::Left,
-                position,
-                ..Default::default()
-            }
-            .to_platform_input(),
-            cx,
-        );
-        window.dispatch_event(
-            MouseUpEvent {
-                button: MouseButton::Left,
-                position,
-                ..Default::default()
-            }
-            .to_platform_input(),
-            cx,
-        );
+        crate::test_events::click(window, cx, MouseButton::Left, position);
     }
 
     #[test]
@@ -829,12 +803,7 @@ mod tests {
                 window.draw(cx).clear(cx);
                 let before = choice.read(cx).committed.len();
                 window.dispatch_event(
-                    MouseDownEvent {
-                        button: MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
+                    crate::test_events::down(MouseButton::Left, position).to_platform_input(),
                     cx,
                 );
                 choice.update(cx, |this, cx| {
@@ -859,12 +828,7 @@ mod tests {
                     cx,
                 );
                 window.dispatch_event(
-                    MouseUpEvent {
-                        button: MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
+                    crate::test_events::up(MouseButton::Left, position).to_platform_input(),
                     cx,
                 );
                 if replace {
@@ -941,7 +905,6 @@ mod tests {
 
     #[test]
     fn selecting_on_native_trigger_does_not_reopen_on_key_up() {
-        use gpui::InputEvent as _;
         let mut cx = TestAppContext::single();
         let (window, scope) = native_choice_window(&mut cx);
         let handle: AnyWindowHandle = window.into();
@@ -954,17 +917,7 @@ mod tests {
         .unwrap();
         for key in ["enter", "down", "enter"] {
             cx.update_window(handle, |_, window, cx| {
-                let keystroke = Keystroke::parse(key).unwrap();
-                window.dispatch_event(
-                    KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+                crate::test_events::press(window, cx, key);
                 window.draw(cx).clear(cx);
             })
             .unwrap();
@@ -981,7 +934,6 @@ mod tests {
     }
     #[test]
     fn select_binding_routes_owner_dismissal_and_preserves_tab_after_reassignment() {
-        use gpui::InputEvent as _;
         for (key, owns_choices) in ["escape", "tab", "shift-tab"]
             .into_iter()
             .flat_map(|key| [true, false].map(|owned| (key, owned)))
@@ -1001,17 +953,7 @@ mod tests {
                 window.draw(cx).clear(cx);
                 // A rendered trigger must not dismiss another trigger's replacement state.
                 choice.update(cx, |this, _| this.owns_choices = owns_choices);
-                let keystroke = Keystroke::parse(key).unwrap();
-                window.dispatch_event(
-                    KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+                crate::test_events::press(window, cx, key);
                 let owner = choice.read(cx);
                 assert_eq!(owner.dismissed, usize::from(owns_choices));
                 assert_eq!(owner.opens, 0);

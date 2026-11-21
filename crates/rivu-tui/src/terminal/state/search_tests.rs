@@ -1,4 +1,4 @@
-use super::tests::{playlist_view, query_snapshot, queue_row, response, track};
+use super::tests::{playlist_view, query_snapshot, queue_row, response, result, track};
 use super::*;
 use rivu_protocol::model::{
     LibraryLocateResult, LibraryLocation, LibrarySort, Page, PlaylistEntryLocation,
@@ -21,11 +21,12 @@ fn submit(ui: &mut UiState, state: &TuiSnapshot, query: &str) {
     assert!(!ui.search.editing);
 }
 
-fn result(request: &QueryRequest, view: ViewResponse) -> QueryResult {
-    QueryResult {
-        revisions: request.demand.stamp.revisions(),
-        view,
-    }
+fn located_track(offset: usize, total: usize) -> ViewResponse {
+    ViewResponse::LibraryLocate(LibraryLocateResult::Located(LibraryLocation {
+        offset,
+        total,
+        child: None,
+    }))
 }
 
 fn library_fixture() -> (UiState, TuiSnapshot) {
@@ -87,15 +88,18 @@ fn every_printable_shortcut_is_editor_text_and_backspace_is_not_parent() {
         ..UiState::default()
     };
     ui.open_search();
-    for character in " m q?e/春".chars() {
+    for character in "R? m q Aa/[]!e春".chars() {
         assert!(matches!(
             key(&mut ui, &state, KeyCode::Char(character)),
             KeyAction::Ignored
         ));
     }
-    assert_eq!(ui.search.query, " m q?e/春");
+    for modified in [KeyCode::Char('q'), KeyCode::Backspace] {
+        ui.key_action(KeyEvent::new(modified, KeyModifiers::CONTROL), &state);
+    }
+    assert_eq!(ui.search.query, "R? m q Aa/[]!e春");
     key(&mut ui, &state, KeyCode::Backspace);
-    assert_eq!(ui.search.query, " m q?e/");
+    assert_eq!(ui.search.query, "R? m q Aa/[]!e");
     assert!(matches!(&ui.view, View::Tree(tree) if tree.directory == Path::new("/music/album")));
     key(&mut ui, &state, KeyCode::F(1));
     assert!(ui.show_help);
@@ -515,14 +519,7 @@ fn library_same_query_refresh_keeps_identity_and_rejects_old_revision() {
     assert!(
         matches!(locate.demand.query(), Query::LibraryLocate { track_id: 1, query: Some(query), tree: false, .. } if query == "active")
     );
-    let located = result(
-        &locate,
-        ViewResponse::LibraryLocate(LibraryLocateResult::Located(LibraryLocation {
-            offset: 7,
-            total: 12,
-            child: None,
-        })),
-    );
+    let located = result(&locate, located_track(7, 12));
     assert!(tui.ui.apply_query(&next, &locate, Ok(located)));
     let View::LibraryResults(rows) = &tui.ui.view else {
         panic!("library results");
@@ -658,6 +655,15 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
         assert_eq!(detail.entries.total, 2);
         assert_eq!(detail.entries.selected().unwrap().id, expected_id);
         assert_eq!(detail.selected_entry_id, Some(expected_id));
+        for invalid in [
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL),
+            KeyEvent::from(KeyCode::Char('d')),
+        ] {
+            assert!(matches!(
+                tui.ui.key_action(invalid, &next),
+                KeyAction::Ignored
+            ));
+        }
         assert!(matches!(
             key(&mut tui.ui, &next, KeyCode::Delete),
             KeyAction::Command(Command::RemovePlaylistEntry { entry_id }) if entry_id == expected_id
@@ -700,14 +706,7 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
             lookup.demand.query(),
             Query::LibraryLocate { track_id: 1, .. } | Query::OtherTracksLocate { track_id: 1, .. }
         ));
-        let located = result(
-            &lookup,
-            ViewResponse::LibraryLocate(LibraryLocateResult::Located(LibraryLocation {
-                offset: 7,
-                total: 12,
-                child: None,
-            })),
-        );
+        let located = result(&lookup, located_track(7, 12));
         assert!(ui.apply_query(&state, &lookup, Ok(located)));
         let page = ui.query_request(&state).unwrap();
         assert_eq!(page.demand.offset, 6);
@@ -719,16 +718,11 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
         }
         assert!(ui.apply_query(&state, &page, Ok(loaded)));
         let demand = ui.query_request(&state);
-        let (selection, scroll, allocation) = match &ui.view {
-            View::LibraryResults(rows) => (
-                rows.selection.selected(),
-                rows.selection.offset(),
-                rows.pages[&6].as_ptr() as usize,
-            ),
+        let (selection, scroll) = match &ui.view {
+            View::LibraryResults(rows) => (rows.selection.selected(), rows.selection.offset()),
             View::Tree(tree) => (
                 tree.entries.selection.selected(),
                 tree.entries.selection.offset(),
-                tree.entries.pages[&6].as_ptr() as usize,
             ),
             _ => unreachable!(),
         };
@@ -738,12 +732,14 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
             View::LibraryResults(rows) => {
                 assert_eq!(rows.selection.selected(), selection);
                 assert_eq!(rows.selection.offset(), scroll);
-                assert_eq!(rows.pages[&6].as_ptr() as usize, allocation);
+                assert_eq!(rows.selected().unwrap().id, 1);
             }
             View::Tree(tree) => {
                 assert_eq!(tree.entries.selection.selected(), selection);
                 assert_eq!(tree.entries.selection.offset(), scroll);
-                assert_eq!(tree.entries.pages[&6].as_ptr() as usize, allocation);
+                assert!(
+                    matches!(tree.entries.selected(), Some(DirectoryRow::Track(row)) if row.id == 1)
+                );
             }
             _ => unreachable!(),
         }
@@ -1446,11 +1442,7 @@ fn navigation_cancels_pending_track_and_occurrence_search_locates() {
                 offset: 7,
                 total: 8,
             }]),
-            _ => ViewResponse::LibraryLocate(LibraryLocateResult::Located(LibraryLocation {
-                offset: 7,
-                total: 8,
-                child: None,
-            })),
+            _ => located_track(7, 8),
         };
         assert!(!ui.apply_query(&state, &obsolete, Ok(result(&obsolete, late))));
         assert_eq!(fresh.demand.offset, 0);
@@ -1500,12 +1492,11 @@ fn recent_search_preserves_current_track_or_first_without_hidden_selection() {
     let View::Recent(recent) = &ui.view else {
         unreachable!()
     };
-    let allocation = recent.entries.pages[&0].as_ptr();
+    assert_eq!(recent.selected().unwrap().track_id, 1);
     replace_query(&mut ui, &state, "alpha");
     let View::Recent(recent) = &ui.view else {
         unreachable!()
     };
-    assert_eq!(recent.entries.pages[&0].as_ptr(), allocation);
     assert_eq!(recent.selected().unwrap().track_id, 1);
     replace_query(&mut ui, &state, " ");
     let View::Recent(recent) = &ui.view else {

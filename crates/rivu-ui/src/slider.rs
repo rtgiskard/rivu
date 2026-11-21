@@ -262,7 +262,7 @@ impl Slider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Element, FocusHandle, InputEvent, Render, TestAppContext};
+    use gpui::{Element, FocusHandle, Render, TestAppContext};
 
     struct SliderHost {
         focus: FocusHandle,
@@ -323,35 +323,13 @@ mod tests {
             cx.run_until_parked();
             cx.update_window(handle, |_, window, cx| {
                 window.draw(cx).clear(cx);
-                window.dispatch_event(
-                    gpui::MouseDownEvent {
-                        button: MouseButton::Left,
-                        position: gpui::point(px(12.), px(10.)),
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
+                crate::test_events::click(
+                    window,
                     cx,
+                    MouseButton::Left,
+                    gpui::point(px(12.), px(10.)),
                 );
-                window.dispatch_event(
-                    gpui::MouseUpEvent {
-                        button: MouseButton::Left,
-                        position: gpui::point(px(12.), px(10.)),
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                let keystroke = gpui::Keystroke::parse("right").unwrap();
-                window.dispatch_event(
-                    gpui::KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+                crate::test_events::press(window, cx, "right");
             })
             .unwrap();
             cx.run_until_parked();
@@ -377,24 +355,7 @@ mod tests {
                 cx.update_window(handle, |_, window, cx| {
                     window.focus(&other_focus, cx);
                     window.draw(cx).clear(cx);
-                    window.dispatch_event(
-                        gpui::MouseDownEvent {
-                            button,
-                            position: gpui::point(px(12.), px(10.)),
-                            ..Default::default()
-                        }
-                        .to_platform_input(),
-                        cx,
-                    );
-                    window.dispatch_event(
-                        gpui::MouseUpEvent {
-                            button,
-                            position: gpui::point(px(12.), px(10.)),
-                            ..Default::default()
-                        }
-                        .to_platform_input(),
-                        cx,
-                    );
+                    crate::test_events::click(window, cx, button, gpui::point(px(12.), px(10.)));
                     assert_eq!(other_focus.is_focused(window), disabled);
                     assert_eq!(focus.is_focused(window), !disabled);
                 })

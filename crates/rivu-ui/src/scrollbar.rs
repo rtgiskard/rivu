@@ -697,12 +697,8 @@ mod tests {
             cx.update_window(handle, |_, window, cx| {
                 window.simulate_mouse_move(point(px(194.), px(10.)), cx);
                 window.dispatch_event(
-                    MouseDownEvent {
-                        button: MouseButton::Left,
-                        position: point(px(194.), px(10.)),
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
+                    crate::test_events::down(MouseButton::Left, point(px(194.), px(10.)))
+                        .to_platform_input(),
                     cx,
                 );
                 window.dispatch_event(
@@ -759,22 +755,14 @@ mod tests {
             );
             cx.update_window(handle, |_, window, cx| {
                 window.dispatch_event(
-                    MouseUpEvent {
-                        button: MouseButton::Left,
-                        position: point(px(100.), px(150.)),
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
+                    crate::test_events::up(MouseButton::Left, point(px(100.), px(150.)))
+                        .to_platform_input(),
                     cx,
                 );
                 window.simulate_mouse_move(point(px(194.), px(50.)), cx);
                 window.dispatch_event(
-                    MouseDownEvent {
-                        button: MouseButton::Left,
-                        position: point(px(194.), px(50.)),
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
+                    crate::test_events::down(MouseButton::Left, point(px(194.), px(50.)))
+                        .to_platform_input(),
                     cx,
                 );
                 window.dispatch_event(

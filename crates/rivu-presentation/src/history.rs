@@ -74,3 +74,34 @@ pub fn reorder_changed_rows(
     }
     Some(start)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_activity_overrides_history_and_breaks_ties_before_source_order() {
+        use PlaybackStatus::{Paused, Playing, Stopped};
+        let history = [90, 4, 60].map(|track_id| HistoryEntry {
+            track_id,
+            played_at: 20,
+            title: String::new(),
+            play_count: 1,
+            favorite: false,
+        });
+        for (status, id, heard, time, order) in [
+            (Playing, Some(60), Some(20), 20, [2, 0, 1]),
+            (Paused, Some(60), Some(10), 10, [0, 1, 2]),
+            (Paused, Some(60), Some(30), 30, [2, 0, 1]),
+            (Stopped, Some(60), Some(30), 20, [0, 1, 2]),
+            (Playing, None, Some(30), 20, [0, 1, 2]),
+            (Playing, Some(60), None, 20, [0, 1, 2]),
+        ] {
+            let activity = playback_activity(status, id, heard);
+            assert_eq!(activity_key(&history[2], activity).0, time);
+            let mut indices = [0, 1, 2];
+            indices.sort_by(|&a, &b| compare_recent(&history, activity, true, a, b));
+            assert_eq!(indices, order);
+        }
+    }
+}

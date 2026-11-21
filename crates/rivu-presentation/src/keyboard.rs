@@ -547,12 +547,52 @@ pub fn playback_command(
 mod tests {
     use super::*;
 
+    const NONE: Modifiers = Modifiers {
+        control: false,
+        alt: false,
+        shift: false,
+        platform: false,
+        function: false,
+    };
+    const CTRL: Modifiers = Modifiers {
+        control: true,
+        ..NONE
+    };
+    const ALT: Modifiers = Modifiers { alt: true, ..NONE };
+    const SHIFT: Modifiers = Modifiers {
+        shift: true,
+        ..NONE
+    };
+    const CTRL_ALT: Modifiers = Modifiers {
+        control: true,
+        ..ALT
+    };
+    const CTRL_SHIFT: Modifiers = Modifiers {
+        control: true,
+        ..SHIFT
+    };
+    const ALT_SHIFT: Modifiers = Modifiers { shift: true, ..ALT };
+    const PLATFORM: Modifiers = Modifiers {
+        platform: true,
+        ..NONE
+    };
+    const FUNCTION: Modifiers = Modifiers {
+        function: true,
+        ..NONE
+    };
+    const GUI_CONTEXTS: [Context; 8] = [
+        Context::Gui,
+        Context::GuiLibrary,
+        Context::GuiQueue,
+        Context::GuiPlaylistTracks,
+        Context::GuiHistory,
+        Context::GuiPlaylists,
+        Context::GuiAlbums,
+        Context::GuiHelp,
+    ];
+
     #[test]
     fn enqueue_and_other_actions_use_exact_modifiers_and_scopes() {
-        let alt = Modifiers {
-            alt: true,
-            ..Default::default()
-        };
         for context in [
             Context::TuiTree,
             Context::TuiOtherTarget,
@@ -565,117 +605,52 @@ mod tests {
                 Some(Action::Enqueue)
             );
             assert_eq!(resolve("a", Modifiers::default(), context), None);
-            for modifiers in [
-                Modifiers {
-                    control: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    shift: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    control: true,
-                    alt: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    alt: true,
-                    shift: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    platform: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    function: true,
-                    ..Default::default()
-                },
-            ] {
+            for modifiers in [CTRL, SHIFT, CTRL_ALT, ALT_SHIFT, PLATFORM, FUNCTION] {
                 assert_eq!(resolve("e", modifiers, context), None);
             }
         }
         for context in [Context::TuiTree, Context::TuiOtherTarget, Context::TuiOther] {
-            assert_eq!(resolve("e", alt, context), Some(Action::EnqueueCollection));
-            assert_eq!(resolve("x", alt, context), Some(Action::CancelScan));
+            assert_eq!(resolve("e", ALT, context), Some(Action::EnqueueCollection));
+            assert_eq!(resolve("x", ALT, context), Some(Action::CancelScan));
         }
         for context in [Context::TuiOtherTarget, Context::TuiOther] {
-            assert_eq!(resolve("c", alt, context), Some(Action::CheckOtherTracks));
+            assert_eq!(resolve("c", ALT, context), Some(Action::CheckOtherTracks));
             assert_eq!(
-                resolve("C", alt, context),
+                resolve("C", ALT, context),
                 Some(Action::ForceCheckOtherTracks)
             );
-            assert_eq!(
-                resolve(
-                    "c",
-                    Modifiers {
-                        control: true,
-                        ..alt
-                    },
-                    context
-                ),
-                None
-            );
+            assert_eq!(resolve("c", CTRL_ALT, context), None);
         }
         for (key, action) in [
             ("f", Action::FilterFavorites),
             ("m", Action::FilterMissing),
             ("s", Action::CycleSort),
         ] {
-            assert_eq!(resolve(key, alt, Context::TuiOther), Some(action));
+            assert_eq!(resolve(key, ALT, Context::TuiOther), Some(action));
             for context in [Context::TuiTree, Context::TuiOtherTarget] {
-                assert_eq!(resolve(key, alt, context), None);
+                assert_eq!(resolve(key, ALT, context), None);
             }
         }
     }
 
     #[test]
     fn new_terminal_bindings_do_not_leak_to_gui_editors_or_other_collections() {
-        for context in [
-            Context::Gui,
-            Context::GuiLibrary,
-            Context::GuiQueue,
-            Context::GuiPlaylistTracks,
-            Context::GuiHistory,
-            Context::GuiPlaylists,
-            Context::GuiAlbums,
-            Context::GuiHelp,
+        let terminal = [
             Context::TuiSearchQuery,
             Context::TuiQueue,
             Context::TuiRecent,
             Context::TuiPlaylists,
-        ] {
+        ];
+        for context in GUI_CONTEXTS.into_iter().chain(terminal) {
             assert_eq!(resolve("e", Modifiers::default(), context), None);
             for key in ["e", "f", "m", "s", "c"] {
                 for shift in [false, true] {
-                    assert_eq!(
-                        resolve(
-                            key,
-                            Modifiers {
-                                alt: true,
-                                shift,
-                                ..Default::default()
-                            },
-                            context
-                        ),
-                        None
-                    );
+                    assert_eq!(resolve(key, Modifiers { shift, ..ALT }, context), None);
                 }
             }
         }
         for context in [Context::TuiSearchResults, Context::TuiPlaylistTracks] {
-            assert_eq!(
-                resolve(
-                    "e",
-                    Modifiers {
-                        alt: true,
-                        ..Default::default()
-                    },
-                    context
-                ),
-                None
-            );
+            assert_eq!(resolve("e", ALT, context), None);
         }
     }
 
@@ -718,17 +693,7 @@ mod tests {
         ] {
             assert_eq!(resolve(key, Modifiers::default(), context), Some(action));
         }
-        assert_eq!(
-            resolve(
-                "c",
-                Modifiers {
-                    control: true,
-                    ..Default::default()
-                },
-                context
-            ),
-            Some(Action::Close)
-        );
+        assert_eq!(resolve("c", CTRL, context), Some(Action::Close));
     }
 
     #[test]
@@ -761,70 +726,42 @@ mod tests {
 
     #[test]
     fn super_is_not_a_control_alias() {
-        for (key, context, shift, action) in [
-            ("f", Context::GuiLibrary, false, Action::Search),
-            ("a", Context::GuiQueue, false, Action::SelectAll),
+        for (key, context, modifiers, action) in [
+            ("f", Context::GuiLibrary, CTRL, Action::Search),
+            ("a", Context::GuiQueue, CTRL, Action::SelectAll),
             (
                 "down",
                 Context::GuiPlaylistTracks,
-                true,
+                CTRL_SHIFT,
                 Action::AddExtendDown,
             ),
         ] {
-            assert_eq!(
-                resolve(
-                    key,
-                    Modifiers {
-                        control: true,
-                        shift,
-                        ..Default::default()
-                    },
-                    context
-                ),
-                Some(action)
-            );
-            for control in [false, true] {
-                assert_eq!(
-                    resolve(
-                        key,
-                        Modifiers {
-                            control,
-                            shift,
-                            platform: true,
-                            ..Default::default()
-                        },
-                        context
-                    ),
-                    None
-                );
+            assert_eq!(resolve(key, modifiers, context), Some(action));
+            let with_super = Modifiers {
+                platform: true,
+                ..modifiers
+            };
+            let super_only = Modifiers {
+                control: false,
+                ..with_super
+            };
+            for modifiers in [with_super, super_only] {
+                assert_eq!(resolve(key, modifiers, context), None);
             }
         }
     }
 
     #[test]
     fn terminal_only_actions_do_not_leak_into_desktop_contexts() {
-        for (key, control, action) in [
-            ("c", true, Action::Close),
-            ("home", true, Action::SeekStart),
-            ("end", true, Action::SeekEnd),
+        for (key, action) in [
+            ("c", Action::Close),
+            ("home", Action::SeekStart),
+            ("end", Action::SeekEnd),
         ] {
-            let modifiers = Modifiers {
-                control,
-                ..Default::default()
-            };
-            for context in [
-                Context::Gui,
-                Context::GuiLibrary,
-                Context::GuiQueue,
-                Context::GuiPlaylists,
-                Context::GuiPlaylistTracks,
-                Context::GuiAlbums,
-                Context::GuiHistory,
-                Context::GuiHelp,
-            ] {
-                assert_eq!(resolve(key, modifiers, context), None);
+            for context in GUI_CONTEXTS {
+                assert_eq!(resolve(key, CTRL, context), None);
             }
-            assert_eq!(resolve(key, modifiers, Context::TuiQueue), Some(action));
+            assert_eq!(resolve(key, CTRL, Context::TuiQueue), Some(action));
         }
     }
 
@@ -837,18 +774,8 @@ mod tests {
             Context::GuiHelp,
         ] {
             assert_eq!(resolve("f1", Modifiers::default(), context), None);
-            for shift in [false, true] {
-                assert_eq!(
-                    resolve(
-                        "?",
-                        Modifiers {
-                            shift,
-                            ..Default::default()
-                        },
-                        context
-                    ),
-                    None
-                );
+            for modifiers in [Modifiers::default(), SHIFT] {
+                assert_eq!(resolve("?", modifiers, context), None);
             }
         }
         for context in [Context::TuiQueue, Context::TuiHelp] {
@@ -856,30 +783,10 @@ mod tests {
                 resolve("f1", Modifiers::default(), context),
                 Some(Action::Help)
             );
-            for shift in [false, true] {
-                assert_eq!(
-                    resolve(
-                        "?",
-                        Modifiers {
-                            shift,
-                            ..Default::default()
-                        },
-                        context
-                    ),
-                    Some(Action::Help)
-                );
+            for modifiers in [Modifiers::default(), SHIFT] {
+                assert_eq!(resolve("?", modifiers, context), Some(Action::Help));
             }
-            assert_eq!(
-                resolve(
-                    "?",
-                    Modifiers {
-                        control: true,
-                        ..Default::default()
-                    },
-                    context
-                ),
-                None
-            );
+            assert_eq!(resolve("?", CTRL, context), None);
         }
         assert_eq!(
             resolve("?", Modifiers::default(), Context::TuiSearchQuery),
@@ -891,40 +798,8 @@ mod tests {
     fn shortcuts_require_the_declared_modifier_combination() {
         for context in [Context::GuiQueue, Context::TuiQueue] {
             assert_eq!(resolve("left", Modifiers::default(), context), None);
-            assert_eq!(
-                resolve(
-                    "left",
-                    Modifiers {
-                        control: true,
-                        ..Default::default()
-                    },
-                    context
-                ),
-                Some(Action::SeekBackward)
-            );
-            for modifiers in [
-                Modifiers {
-                    alt: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    control: true,
-                    alt: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    platform: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    shift: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    function: true,
-                    ..Default::default()
-                },
-            ] {
+            assert_eq!(resolve("left", CTRL, context), Some(Action::SeekBackward));
+            for modifiers in [ALT, CTRL_ALT, PLATFORM, SHIFT, FUNCTION] {
                 assert_eq!(resolve("q", modifiers, context), None);
                 assert_eq!(resolve("space", modifiers, context), None);
             }
@@ -937,18 +812,7 @@ mod tests {
             resolve("p", Modifiers::default(), Context::TuiQueue),
             Some(Action::Previous)
         );
-        assert_eq!(
-            resolve(
-                "a",
-                Modifiers {
-                    control: true,
-                    alt: true,
-                    ..Default::default()
-                },
-                Context::GuiQueue
-            ),
-            None
-        );
+        assert_eq!(resolve("a", CTRL_ALT, Context::GuiQueue), None);
     }
 
     #[test]
@@ -969,33 +833,13 @@ mod tests {
             Context::GuiPlaylists,
             Context::GuiAlbums,
         ] {
-            for shift in [false, true] {
-                assert_eq!(
-                    resolve(
-                        "tab",
-                        Modifiers {
-                            shift,
-                            ..Default::default()
-                        },
-                        context
-                    ),
-                    Some(Action::Traverse)
-                );
+            for modifiers in [Modifiers::default(), SHIFT] {
+                assert_eq!(resolve("tab", modifiers, context), Some(Action::Traverse));
             }
         }
         for context in [Context::TuiHelp, Context::GuiHelp] {
-            for shift in [false, true] {
-                assert_eq!(
-                    resolve(
-                        "tab",
-                        Modifiers {
-                            shift,
-                            ..Default::default()
-                        },
-                        context
-                    ),
-                    None
-                );
+            for modifiers in [Modifiers::default(), SHIFT] {
+                assert_eq!(resolve("tab", modifiers, context), None);
             }
         }
         for context in [
@@ -1011,17 +855,7 @@ mod tests {
             for key in ["t", "P"] {
                 assert_eq!(resolve(key, Modifiers::default(), context), None);
             }
-            assert_eq!(
-                resolve(
-                    "p",
-                    Modifiers {
-                        shift: true,
-                        ..Default::default()
-                    },
-                    context
-                ),
-                None
-            );
+            assert_eq!(resolve("p", SHIFT, context), None);
         }
     }
 
@@ -1098,17 +932,7 @@ mod tests {
                 assert_eq!(resolve(key, modifiers, context), Some(action));
                 assert_eq!(resolve(key, modifiers, Context::TuiSearchQuery), None);
             }
-            assert_eq!(
-                resolve(
-                    "{",
-                    Modifiers {
-                        control: true,
-                        ..Default::default()
-                    },
-                    context
-                ),
-                None
-            );
+            assert_eq!(resolve("{", CTRL, context), None);
         }
         let state = PlaybackState::default();
         for (action, volume, speed) in [

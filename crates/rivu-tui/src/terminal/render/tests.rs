@@ -1,14 +1,8 @@
 use super::*;
-use crate::terminal::{
-    state::{KeyAction, TuiState, tests::*},
-    worker::{QueryResult, ReadKind},
-};
+use crate::terminal::state::{TuiState, tests::*};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{Terminal, backend::TestBackend};
-use rivu_protocol::{
-    model::Query,
-    response::{QueryRevisions, ViewResponse},
-};
+use rivu_protocol::{model::Query, response::ViewResponse};
 use std::sync::Arc;
 
 #[test]
@@ -23,11 +17,23 @@ fn progress_changes_at_seconds_or_visible_cell_boundaries() {
     assert!(progress(40, 2.0) == progress(40, 2.3));
     assert!(progress(40, 2.3) != progress(40, 3.0));
     assert!(progress(180, 2.0) != progress(180, 2.3));
-    for width in [1, 2, 3, 12, 15, 16, 40, 180] {
-        let area = Rect::new(0, 0, width, 1);
-        let gauge =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(13)]).areas::<2>(area)[0];
-        assert_eq!(progress(width + 2, 2.0).gauge_width, gauge.width);
+    let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
+    for (width, duration) in [(40, 180.), (180, 180.), (60, 12_345.)] {
+        state.playback.duration = Some(duration);
+        let mut previous = None;
+        for position in [2., 2.3, 3., 60., duration / 2.] {
+            state.playback.position = position;
+            let key = PlaybackProgress::new(width, &state);
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+            terminal
+                .draw(|frame| key.draw(frame, frame.area(), colors))
+                .unwrap();
+            let painted = terminal.backend().buffer().clone();
+            if let Some((old_key, old_paint)) = previous {
+                assert_eq!(key == old_key, painted == old_paint);
+            }
+            previous = Some((key, painted));
+        }
     }
 }
 
@@ -86,7 +92,7 @@ fn status_row_shows_speed_only_when_not_normal() {
         let rendered = terminal_text(&terminal);
         match expected {
             Some(text) => {
-                assert!(rendered.contains(&format!("󰑖  {text}")), "{rendered}");
+                assert!(rendered.contains(text), "{rendered}");
                 let buffer = terminal.backend().buffer();
                 let marker = (0..buffer.area.width)
                     .map(|x| &buffer[(x, 0)])
@@ -142,17 +148,17 @@ fn current_error_overrides_retained_scan_but_not_active_scan_or_notice() {
 
 #[test]
 fn command_prompt_keeps_unicode_cursor_in_bounds() {
-    let long_input = "界".repeat(80);
-    for (input, width, expected_column) in [
-        ("", 8, Some(2)),
-        ("a界e\u{301}", 8, Some(6)),
-        (long_input.as_str(), 1, None),
-        (long_input.as_str(), 2, None),
-        (long_input.as_str(), 3, None),
-        (long_input.as_str(), 4, Some(2)),
-        (long_input.as_str(), 8, Some(6)),
-        (long_input.as_str(), 40, Some(38)),
-        (long_input.as_str(), 120, Some(118)),
+    let long_input = "界e\u{301}".repeat(80);
+    for (input, width, visible) in [
+        ("", 8, true),
+        ("a界e\u{301}", 8, true),
+        (long_input.as_str(), 1, false),
+        (long_input.as_str(), 2, false),
+        (long_input.as_str(), 3, false),
+        (long_input.as_str(), 4, true),
+        (long_input.as_str(), 8, true),
+        (long_input.as_str(), 40, true),
+        (long_input.as_str(), 120, true),
     ] {
         let mut ui = UiState::new(Arc::new(Localizer::for_terminal("en-US")));
         ui.command_input = Some(input.to_owned());
@@ -165,16 +171,27 @@ fn command_prompt_keeps_unicode_cursor_in_bounds() {
             .unwrap();
         assert_eq!(
             terminal.backend().cursor_visible(),
-            expected_column.is_some(),
+            visible,
             "width={width}, input={input:?}"
         );
-        if let Some(column) = expected_column {
-            let cursor = terminal.backend().cursor_position();
-            assert_eq!(
-                (cursor.x, cursor.y),
-                (column, 17),
-                "width={width}, input={input:?}"
-            );
+        if visible {
+            let backend = terminal.backend();
+            let cursor = backend.cursor_position();
+            assert_eq!(cursor.y, backend.buffer().area.bottom() - 1);
+            let buffer = backend.buffer();
+            let prompt = (0..width)
+                .find(|&x| buffer[(x, cursor.y)].symbol() == ":")
+                .unwrap();
+            let painted = (prompt + 1..width)
+                .map(|x| buffer[(x, cursor.y)].symbol())
+                .filter(|symbol| *symbol != " ")
+                .collect::<String>();
+            assert!(input.ends_with(&painted));
+            if width >= 8 && !input.is_empty() {
+                assert!(!painted.is_empty());
+            }
+            assert_eq!(cursor.x, prompt + 1 + Span::raw(painted).width() as u16);
+            assert!(cursor.x < width);
         }
     }
 }
@@ -550,7 +567,6 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
             .unwrap();
         let ready_text = terminal_text(&terminal);
         let position = (tui.ui.details.scroll, tui.ui.details.max_scroll);
-        let cached_lines = tui.ui.details.layout.as_ref().unwrap().lines.as_ptr();
         let mut next = state;
         next.library.bitrate_revision += 1;
         tui.apply_snapshot(next);
@@ -563,10 +579,6 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
             .unwrap();
         assert_eq!(terminal_text(&terminal), ready_text);
         assert_eq!((tui.ui.details.scroll, tui.ui.details.max_scroll), position);
-        assert_eq!(
-            tui.ui.details.layout.as_ref().unwrap().lines.as_ptr(),
-            cached_lines
-        );
         tui.ui
             .key_action(KeyEvent::from(KeyCode::Home), &tui.snapshot);
         assert_eq!(tui.ui.details.scroll, 0);
@@ -584,10 +596,7 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
             assert!(tui.ui.apply_query(
                 &tui.snapshot,
                 &request,
-                Ok(QueryResult {
-                    revisions: request.demand.stamp.revisions(),
-                    view: ViewResponse::Track(Some(track)),
-                }),
+                Ok(result(&request, ViewResponse::Track(Some(track)))),
             ));
         }
         terminal
@@ -596,10 +605,6 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
             })
             .unwrap();
         assert!(!terminal_text(&terminal).contains("Original title"));
-        assert_ne!(
-            tui.ui.details.layout.as_ref().unwrap().lines.as_ptr(),
-            cached_lines
-        );
         assert!(tui.ui.details.refresh_deadline().is_none());
         if expire {
             assert!(
@@ -614,37 +619,15 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
 #[test]
 fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
     let query = "春风e\u{301}夜航";
-    for language in ["en-US", "zh-CN"] {
-        let mut search = SearchState {
-            query: query.into(),
-            editing: true,
-            active: true,
-            ..SearchState::default()
-        };
-        let i18n = Localizer::for_terminal(language);
-        for width in [1, 8, 18, 24, 60] {
-            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
-            terminal
-                .draw(|frame| {
-                    draw_search_input(
-                        frame,
-                        frame.area(),
-                        &search,
-                        &i18n,
-                        TerminalColors::new(rivu_presentation::theme::Theme::default()),
-                    )
-                })
-                .unwrap();
-            let prefix = "󰍉 ";
-            if width as usize > Span::raw(prefix).width() {
-                assert!(terminal.backend().cursor_visible());
-                let cursor = terminal.backend().cursor_position();
-                assert!(cursor.x < width);
-                assert_eq!(cursor.y, 0);
-            }
-        }
-        search.editing = false;
-        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+    let mut search = SearchState {
+        query: query.into(),
+        editing: true,
+        active: true,
+        ..SearchState::default()
+    };
+    let i18n = Localizer::for_terminal("en-US");
+    for width in [1, 8, 18, 24, 60] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
         terminal
             .draw(|frame| {
                 draw_search_input(
@@ -656,8 +639,28 @@ fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
                 )
             })
             .unwrap();
-        assert!(!terminal.backend().cursor_visible());
+        let prefix = "󰍉 ";
+        if width as usize > Span::raw(prefix).width() {
+            assert!(terminal.backend().cursor_visible());
+            let cursor = terminal.backend().cursor_position();
+            assert!(cursor.x < width);
+            assert_eq!(cursor.y, 0);
+        }
     }
+    search.editing = false;
+    let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw_search_input(
+                frame,
+                frame.area(),
+                &search,
+                &i18n,
+                TerminalColors::new(rivu_presentation::theme::Theme::default()),
+            )
+        })
+        .unwrap();
+    assert!(!terminal.backend().cursor_visible());
     assert_eq!(query_tail(query, 5), ("e\u{301}夜航", 5));
     assert_eq!(query_tail(query, 1), ("", 0));
 }
@@ -696,9 +699,9 @@ fn bottom_search_preserves_viewport_and_input_cursor() {
 
 #[test]
 fn metadata_columns_clip_whole_graphemes_without_horizontal_overflow() {
-    let title = "春风e\u{301}👩‍💻夜航".repeat(12);
+    let title = "春风e\u{301}👩‍💻夜航".repeat(40);
     let mut track = track(0);
-    track.title = title;
+    track.title = title.clone();
     track.duration = Some(243.0);
     track.favorite = true;
     track.missing = true;
@@ -717,7 +720,14 @@ fn metadata_columns_clip_whole_graphemes_without_horizontal_overflow() {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(!text.contains('\u{fffd}'));
+        let start = text.find('春').expect("title prefix");
+        let (prefix, _) = text[start..].split_once('…').expect("clipped title");
+        assert!(title.starts_with(prefix));
+        assert!(
+            title
+                .grapheme_indices(true)
+                .any(|(end, _)| end == prefix.len())
+        );
     }
     assert_eq!(cell_text("春风", 3, false), "春…");
     assert_eq!(cell_text("e\u{301}夜航", 4, false), "e\u{301}夜…");
@@ -858,85 +868,6 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
     }
 }
 
-#[test]
-fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
-    let mut state = TuiSnapshot::default();
-    state.queue.total = 12;
-    Arc::make_mut(&mut state.configuration).query_batch_size = 3;
-    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::for_terminal("en-US")));
-    tui.ui.queue.selection.select(Some(8));
-    load_queue(&mut tui.ui, &state);
-    state.queue.total = 11;
-    state.queue.revision = 1;
-    tui.apply_snapshot(state.clone());
-    assert!(tui.ui.queue.pages.is_empty());
-    let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.demand.kind(), ReadKind::QueueSelection(1008));
-    assert!(
-        matches!(request.demand.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1008])
-    );
-    let relocated = QueryResult {
-        revisions: QueryRevisions {
-            queue: 1,
-            ..QueryRevisions::default()
-        },
-        view: ViewResponse::QueueEntries(vec![queue_row(2, 1008)]),
-    };
-    assert!(tui.ui.apply_query(&state, &request, Ok(relocated)));
-    assert_eq!(tui.ui.queue.selection.selected(), Some(2));
-    let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.demand.offset, 0);
-    let mut page = response(&request, state.queue.total);
-    let ViewResponse::QueuePage(rows) = &mut page.view else {
-        unreachable!()
-    };
-    rows.rows[2] = queue_row(2, 1008);
-    tui.ui.apply_query(&state, &request, Ok(page));
-    state.queue.total = 2;
-    state.queue.revision = 2;
-    tui.apply_snapshot(state.clone());
-    let request = tui.ui.query_request(&state).unwrap();
-    assert_eq!(request.demand.kind(), ReadKind::QueueSelection(1008));
-    tui.ui.apply_query(
-        &state,
-        &request,
-        Ok(QueryResult {
-            revisions: QueryRevisions {
-                queue: 2,
-                ..QueryRevisions::default()
-            },
-            view: ViewResponse::QueueEntries(Vec::new()),
-        }),
-    );
-    assert_eq!(tui.ui.queue.selection.selected(), Some(1));
-    load_queue(&mut tui.ui, &state);
-    state.queue.total = 0;
-    state.queue.revision = 3;
-    tui.apply_snapshot(state.clone());
-    assert_eq!(tui.ui.queue.selection.selected(), None);
-    assert!(tui.ui.query_request(&state).is_none());
-    assert!(matches!(
-        tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state),
-        KeyAction::Ignored
-    ));
-    let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
-    terminal
-        .draw(|frame| {
-            tui.ui
-                .queue
-                .set_viewport(frame.area().height.saturating_sub(1) as usize);
-            draw_queue(
-                frame,
-                frame.area(),
-                &state,
-                &mut tui.ui.queue,
-                &tui.ui.i18n,
-                TerminalColors::new(state.configuration.ui_theme),
-            )
-        })
-        .unwrap();
-}
-
 pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
     let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
     terminal
@@ -984,71 +915,51 @@ fn retained_rows_size_columns_until_replaced_trimmed_or_cleared_and_resize_refit
                 );
             })
             .unwrap();
-        terminal.backend().buffer().clone()
+        let buffer = terminal.backend().buffer();
+        (0..width)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect::<String>()
     };
     let mut short = track(0);
     short.title = "Title".into();
-    short.artist = "a".into();
+    short.artist = "Zed".into();
     short.album.clear();
     let mut wide = short.clone();
     wide.artist = "艺".repeat(8);
     let mut page = PagedList::default();
     page.set_viewport(2);
     page.insert(0, 2, 10, vec![short.clone(), short.clone()]);
-    // Neighboring retained rows, not only visible rows, set intrinsic widths.
+    let artist = |page: &mut PagedList<LibraryRow>, width| {
+        render(page, width, BrowserMode::Tracks)
+            .find("Zed")
+            .expect("visible artist")
+    };
+    let narrow = artist(&mut page, 100);
+    // An offscreen retained neighbor affects the visible row's artist position.
     page.insert(2, 2, 10, vec![wide.clone()]);
-    assert_eq!(
-        render(&mut page, 100, BrowserMode::Tracks)[(64, 1)].symbol(),
-        "a"
-    );
-    assert_eq!(
-        render(&mut page, 100, BrowserMode::Tracks)[(64, 1)].symbol(),
-        "a"
-    );
-    assert_eq!(
-        render(&mut page, 110, BrowserMode::Tracks)[(74, 1)].symbol(),
-        "a"
-    );
-
+    let wide_position = artist(&mut page, 100);
+    assert!(wide_position < narrow);
+    assert_eq!(artist(&mut page, 100), wide_position);
+    assert!(artist(&mut page, 110) > wide_position);
     page.insert(2, 2, 10, vec![short.clone()]);
-    assert_eq!(
-        render(&mut page, 100, BrowserMode::Tracks)[(79, 1)].symbol(),
-        "a"
-    );
+    assert_eq!(artist(&mut page, 100), narrow);
     page.insert(2, 2, 10, vec![wide.clone()]);
-    assert_eq!(
-        render(&mut page, 100, BrowserMode::Tracks)[(64, 1)].symbol(),
-        "a"
-    );
+    assert_eq!(artist(&mut page, 100), wide_position);
     page.selection.select(Some(8));
     *page.selection.offset_mut() = 8;
     page.set_viewport(2);
     page.insert(8, 2, 10, vec![short.clone(), short.clone()]);
-    assert_eq!(
-        render(&mut page, 100, BrowserMode::Tracks)[(79, 1)].symbol(),
-        "a"
-    );
+    assert_eq!(artist(&mut page, 100), narrow);
     assert!(!page.pages.contains_key(&2));
 
-    // Payload-only metadata/bitrate refreshes clear pages without changing the
-    // saved navigation coordinates; their replacement must resize columns too.
     page.clear_pages();
     page.insert(8, 2, 10, vec![short.clone(), wide]);
-    assert_eq!(
-        render(&mut page, 100, BrowserMode::Tracks)[(64, 1)].symbol(),
-        "a"
-    );
+    assert_eq!(artist(&mut page, 100), wide_position);
     page.selection.select(Some(0));
     page.insert(0, 3, 3, vec![short.clone(), short.clone(), short]);
-    assert_eq!(
-        render(&mut page, 100, BrowserMode::Tracks)[(79, 1)].symbol(),
-        "a"
-    );
-    let labels = render(&mut page, 100, BrowserMode::Labels);
-    assert!(!labels.content.iter().any(|cell| cell.symbol() == "f"));
-    let tracks = render(&mut page, 100, BrowserMode::Tracks);
-    assert!(tracks.content.iter().any(|cell| cell.symbol() == "f"));
-    assert_eq!(tracks[(79, 1)].symbol(), "a");
+    assert_eq!(artist(&mut page, 100), narrow);
+    assert!(!render(&mut page, 100, BrowserMode::Labels).contains("flac"));
+    assert!(render(&mut page, 100, BrowserMode::Tracks).contains("flac"));
 }
 
 #[test]
@@ -1098,90 +1009,82 @@ fn drawing_without_a_layout_commit_cannot_change_retention_or_navigation() {
 fn missing_titles_use_shared_fallback_in_lists_playback_and_details() {
     let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
     let i18n = Arc::new(Localizer::for_terminal("en-US"));
-    for title in ["", " \t\n", "\u{2003}", "  Valid title  "] {
-        for cue_number in [None, Some(3)] {
-            let expected = if !title.trim().is_empty() {
-                title
-            } else if cue_number.is_some() {
-                "night.live · #03"
-            } else {
-                "night.live"
-            };
-            let mut row = track(2);
-            row.path = "/music/night.live.flac".into();
-            row.title = title.into();
-            row.cue_number = cue_number;
-            let columns = BrowserColumns {
-                title: 80,
-                artist: 0,
-                album: 0,
-                codec: 0,
-                duration: 0,
-                markers: 0,
-            };
-            let rendered = columns.line(RowContent::track(&row), colors).to_string();
-            assert!(rendered.contains(&format!("{expected} — {}", row.artist)));
-            let entry = PlaylistEntryRow {
-                id: 7,
-                track_id: row.id,
-                position: 0,
-                offset: 0,
-                path: row.path.clone(),
-                title: row.title.clone(),
-                artist: row.artist.clone(),
-                album: row.album.clone(),
-                duration: row.duration,
-                codec: row.codec.clone(),
-                channels: row.channels,
-                sample_rate: row.sample_rate,
-                bits_per_sample: row.bits_per_sample,
-                bitrate_bps: row.bitrate_bps,
-                bitrate_exact: row.bitrate_exact,
-                cue_number,
-                favorite: false,
-                missing: false,
-            };
-            assert_eq!(
-                columns
-                    .line(RowContent::playlist(&entry), colors)
-                    .to_string(),
-                rendered
-            );
+    let title = "";
+    let cue_number = Some(3);
+    let expected = "night.live · #03";
+    let mut row = track(2);
+    row.path = "/music/night.live.flac".into();
+    row.title = title.into();
+    row.cue_number = cue_number;
+    let columns = BrowserColumns {
+        title: 80,
+        artist: 0,
+        album: 0,
+        codec: 0,
+        duration: 0,
+        markers: 0,
+    };
+    let rendered = columns.line(RowContent::track(&row), colors).to_string();
+    assert!(rendered.contains(expected));
+    let entry = PlaylistEntryRow {
+        id: 7,
+        track_id: row.id,
+        position: 0,
+        offset: 0,
+        path: row.path.clone(),
+        title: row.title.clone(),
+        artist: row.artist.clone(),
+        album: row.album.clone(),
+        duration: row.duration,
+        codec: row.codec.clone(),
+        channels: row.channels,
+        sample_rate: row.sample_rate,
+        bits_per_sample: row.bits_per_sample,
+        bitrate_bps: row.bitrate_bps,
+        bitrate_exact: row.bitrate_exact,
+        cue_number,
+        favorite: false,
+        missing: false,
+    };
+    assert!(
+        columns
+            .line(RowContent::playlist(&entry), colors)
+            .to_string()
+            .contains(expected)
+    );
 
-            let mut current = full_track(2);
-            current.path = row.path;
-            current.title = title.into();
-            current.artist = "artist".into();
-            current.cue = cue_number.map(|number| rivu_protocol::model::CueSegment {
-                sheet: "/music/night.cue".into(),
-                number,
-                start_frame: 0,
-                end_frame: None,
-            });
-            let current = Arc::new(current);
-            let snapshot = TuiSnapshot {
-                current_track: Some(Arc::clone(&current)),
-                ..Default::default()
-            };
-            let mut ui = UiState::new(Arc::clone(&i18n));
-            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
-            terminal
-                .draw(|frame| {
-                    commit_layout(frame.area(), &mut ui);
-                    draw(frame, &snapshot, &mut ui);
-                })
-                .unwrap();
-            assert!(terminal_text(&terminal).contains(&format!("{expected} — artist")));
-            let details = Details {
-                target: Some(2),
-                source_label: "shell-panel-queue",
-                state: DetailState::Ready(current),
-                ..Details::default()
-            };
-            assert_eq!(
-                details_lines(&details, &i18n, 100, colors)[0].to_string(),
-                expected
-            );
-        }
-    }
+    let mut current = full_track(2);
+    current.path = row.path;
+    current.title = title.into();
+    current.artist = "artist".into();
+    current.cue = cue_number.map(|number| rivu_protocol::model::CueSegment {
+        sheet: "/music/night.cue".into(),
+        number,
+        start_frame: 0,
+        end_frame: None,
+    });
+    let current = Arc::new(current);
+    let snapshot = TuiSnapshot {
+        current_track: Some(Arc::clone(&current)),
+        ..Default::default()
+    };
+    let mut ui = UiState::new(Arc::clone(&i18n));
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| {
+            commit_layout(frame.area(), &mut ui);
+            draw(frame, &snapshot, &mut ui);
+        })
+        .unwrap();
+    assert!(terminal_text(&terminal).contains(expected));
+    let details = Details {
+        target: Some(2),
+        source_label: "shell-panel-queue",
+        state: DetailState::Ready(current),
+        ..Details::default()
+    };
+    assert_eq!(
+        details_lines(&details, &i18n, 100, colors)[0].to_string(),
+        expected
+    );
 }

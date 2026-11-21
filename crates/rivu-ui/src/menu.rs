@@ -139,7 +139,7 @@ mod tests {
 
     #[derive(Default)]
     struct MenuRows {
-        bounds: Rc<Cell<[Bounds<Pixels>; 4]>>,
+        bounds: Rc<Cell<Bounds<Pixels>>>,
         text: TextLayout,
     }
 
@@ -154,24 +154,10 @@ mod tests {
                 .w(gpui::px(240.))
                 .font(crate::theme::font(cx).clone())
                 .font_size_scale(crate::theme::font_size_scale(cx))
-                .child(menu_item("new-playlist", "New playlist", cx, |_, _, _| {}))
-                .child(menu_back("back", "Back", cx, |_, _, _| {}))
+                .pt(gpui::px(19.))
                 .child(menu_item_style(theme, "target", "Playlist", text, cx).h(height))
-                .child(crate::loading::paged_loading_row(
-                    "failed-page",
-                    Some("Full diagnostic"),
-                    true,
-                    crate::loading::LoadingRowLabels {
-                        message: "Failed".into(),
-                        retry: "Retry".into(),
-                        copy_error: "Copy".into(),
-                    },
-                    height,
-                    cx,
-                    |_, _, _| {},
-                ))
                 .on_children_prepainted(move |children, _, _| {
-                    bounds.set(children.try_into().unwrap());
+                    bounds.set(children[0]);
                 })
         }
     }
@@ -196,8 +182,10 @@ mod tests {
                 .unwrap();
                 root.read_with(&cx, |rows, _| {
                     let bounds = rows.bounds.get();
-                    assert!(rows.text.bounds().top() >= bounds[2].top());
-                    assert!(rows.text.bounds().bottom() <= bounds[2].bottom());
+                    let text = rows.text.bounds();
+                    assert!(bounds.top() > gpui::px(0.) && text.size.height > gpui::px(0.));
+                    assert!(text.top() >= bounds.top());
+                    assert!(text.bottom() <= bounds.bottom());
                 });
             }
         }

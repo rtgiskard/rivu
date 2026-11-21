@@ -73,3 +73,20 @@ pub fn track_kind_key(track: &Track) -> &'static str {
         "gl-whole-file"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_missing_titles_use_the_stem_and_optional_cue_number() {
+        let path = Path::new("/music/night.live.flac");
+        for title in ["", " \t\n", "\u{2003}"] {
+            assert_eq!(track_title(title, path, None), "night.live");
+            assert_eq!(track_title(title, path, Some(3)), "night.live · #03");
+        }
+        for cue in [None, Some(3)] {
+            assert_eq!(track_title("  Valid title  ", path, cue), "  Valid title  ");
+        }
+    }
+}

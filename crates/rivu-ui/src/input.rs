@@ -1456,20 +1456,12 @@ mod tests {
         dispatch_pointer(
             &mut cx,
             handle,
-            MouseDownEvent {
-                button: MouseButton::Left,
-                position,
-                ..Default::default()
-            },
+            crate::test_events::down(MouseButton::Left, position),
         );
         dispatch_pointer(
             &mut cx,
             handle,
-            MouseUpEvent {
-                button: MouseButton::Left,
-                position,
-                ..Default::default()
-            },
+            crate::test_events::up(MouseButton::Left, position),
         );
         cx.update_window(handle, |_, window, cx| {
             assert!(!input.read(cx).is_focused(window));
@@ -1758,24 +1750,7 @@ mod tests {
                     assert_eq!(input.content.as_ref(), "中");
                 });
                 // Keep the old painted hitboxes: dispatch_pointer would draw first.
-                window.dispatch_event(
-                    MouseDownEvent {
-                        button: MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(
-                    MouseUpEvent {
-                        button: MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
+                crate::test_events::click(window, cx, MouseButton::Left, position);
                 input.update(cx, |input, cx| {
                     assert_eq!(input.selected_range, 0..0);
                     input.replace_selection(None, "x", window, cx);
@@ -1788,24 +1763,7 @@ mod tests {
                     let bounds = field.last_bounds.unwrap();
                     point(bounds.right() - px(1.), bounds.center().y)
                 };
-                window.dispatch_event(
-                    MouseDownEvent {
-                        button: MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(
-                    MouseUpEvent {
-                        button: MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
+                crate::test_events::click(window, cx, MouseButton::Left, position);
                 input.update(cx, |input, cx| {
                     let end = input.content.len();
                     assert_eq!(input.selected_range, end..end);
@@ -1837,11 +1795,7 @@ mod tests {
         dispatch_pointer(
             &mut cx,
             handle,
-            MouseDownEvent {
-                button: MouseButton::Left,
-                position: start,
-                ..Default::default()
-            },
+            crate::test_events::down(MouseButton::Left, start),
         );
         dispatch_pointer(
             &mut cx,
@@ -1869,11 +1823,7 @@ mod tests {
         dispatch_pointer(
             &mut cx,
             handle,
-            MouseUpEvent {
-                button: MouseButton::Right,
-                position: outside,
-                ..Default::default()
-            },
+            crate::test_events::up(MouseButton::Right, outside),
         );
         cx.update(|cx| assert!(input.read(cx).selection_subscriptions.is_some()));
         // No intervening move: the release position itself must update the endpoint.
@@ -1881,11 +1831,7 @@ mod tests {
         dispatch_pointer(
             &mut cx,
             handle,
-            MouseUpEvent {
-                button: MouseButton::Left,
-                position: release,
-                ..Default::default()
-            },
+            crate::test_events::up(MouseButton::Left, release),
         );
         dispatch_pointer(
             &mut cx,
@@ -1926,11 +1872,7 @@ mod tests {
             dispatch_pointer(
                 &mut cx,
                 handle,
-                MouseDownEvent {
-                    button: MouseButton::Left,
-                    position: start,
-                    ..Default::default()
-                },
+                crate::test_events::down(MouseButton::Left, start),
             );
             cx.update(|cx| assert!(input.read(cx).selection_subscriptions.is_some()));
             match cancellation {
@@ -1993,11 +1935,7 @@ mod tests {
             dispatch_pointer(
                 &mut cx,
                 handle,
-                MouseUpEvent {
-                    button: MouseButton::Left,
-                    position: outside,
-                    ..Default::default()
-                },
+                crate::test_events::up(MouseButton::Left, outside),
             );
             cx.update(|cx| {
                 assert_eq!(input.read(cx).selected_range, 0..0, "{cancellation}");
@@ -2167,15 +2105,7 @@ mod tests {
         ] {
             cx.update_window(handle, |_, window, cx| {
                 window.draw(cx).clear(cx);
-                window.dispatch_event(
-                    gpui::KeyDownEvent {
-                        keystroke: gpui::Keystroke::parse(key).unwrap(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
+                window.dispatch_event(crate::test_events::key_down(key).to_platform_input(), cx);
                 let field = input.read(cx);
                 assert_eq!(field.selected_range, range, "{key}");
                 assert_eq!(field.selection_reversed, reversed, "{key}");
@@ -2220,12 +2150,7 @@ mod tests {
         .unwrap();
         cx.update_window(handle, |_, window, cx| {
             window.dispatch_event(
-                gpui::KeyDownEvent {
-                    keystroke: gpui::Keystroke::parse("escape").unwrap(),
-                    is_held: false,
-                    prefer_character_input: false,
-                }
-                .to_platform_input(),
+                crate::test_events::key_down("escape").to_platform_input(),
                 cx,
             );
         })
@@ -2238,12 +2163,7 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             window.draw(cx).clear(cx);
             window.dispatch_event(
-                gpui::KeyDownEvent {
-                    keystroke: gpui::Keystroke::parse("escape").unwrap(),
-                    is_held: false,
-                    prefer_character_input: false,
-                }
-                .to_platform_input(),
+                crate::test_events::key_down("escape").to_platform_input(),
                 cx,
             );
         })

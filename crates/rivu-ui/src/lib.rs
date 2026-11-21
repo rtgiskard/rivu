@@ -51,3 +51,6 @@ pub use surface::{Dialog, Popover, checked_menu_item};
 
 #[cfg(test)]
 mod component_tests;
+
+#[cfg(test)]
+mod test_events;

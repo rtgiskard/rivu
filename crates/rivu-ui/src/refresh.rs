@@ -56,7 +56,7 @@ mod tests {
         }
 
         let view = cx.update(|cx| cx.new(|_| View::default()));
-        let start = Instant::now() - REFRESH_RETENTION;
+        let start = Instant::now() + Duration::from_secs(60);
         view.update(cx, |view, cx| {
             view.text = Some("old result");
             view.retention.begin(start);
@@ -68,6 +68,10 @@ mod tests {
                     false
                 });
         });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |view, _| view.text), Some("old result"));
+        cx.executor()
+            .advance_clock(Duration::from_secs(60) + REFRESH_RETENTION);
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |view, _| view.text), None);
 

@@ -1001,40 +1001,13 @@ mod tests {
             cx.update_window(handle, |_, window, cx| {
                 window.draw(cx).clear(cx);
                 let position = gpui::point(gpui::px(12.), gpui::px(12.));
-                window.dispatch_event(
-                    gpui::MouseDownEvent {
-                        button: gpui::MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(
-                    gpui::MouseUpEvent {
-                        button: gpui::MouseButton::Left,
-                        position,
-                        ..Default::default()
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
+                crate::test_events::click(window, cx, gpui::MouseButton::Left, position);
             })
             .unwrap();
             for key in ["enter", "space"] {
                 cx.update_window(handle, |_, window, cx| {
                     window.draw(cx).clear(cx);
-                    let keystroke = gpui::Keystroke::parse(key).unwrap();
-                    window.dispatch_event(
-                        gpui::KeyDownEvent {
-                            keystroke: keystroke.clone(),
-                            is_held: false,
-                            prefer_character_input: false,
-                        }
-                        .to_platform_input(),
-                        cx,
-                    );
-                    window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+                    crate::test_events::press(window, cx, key);
                 })
                 .unwrap();
                 cx.run_until_parked();
@@ -1047,33 +1020,15 @@ mod tests {
         if input == "pointer" {
             let position = gpui::point(gpui::px(12.), gpui::px(12.));
             if pressed {
-                gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }
-                .to_platform_input()
+                crate::test_events::down(gpui::MouseButton::Left, position).to_platform_input()
             } else {
-                gpui::MouseUpEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }
-                .to_platform_input()
+                crate::test_events::up(gpui::MouseButton::Left, position).to_platform_input()
             }
         } else {
-            let keystroke = gpui::Keystroke::parse(input).unwrap();
             if pressed {
-                gpui::KeyDownEvent {
-                    keystroke,
-                    is_held: false,
-                    prefer_character_input: false,
-                }
-                .to_platform_input()
+                crate::test_events::key_down(input).to_platform_input()
             } else {
-                gpui::KeyUpEvent { keystroke }.to_platform_input()
+                crate::test_events::key_up(input).to_platform_input()
             }
         }
     }
@@ -1139,11 +1094,10 @@ mod tests {
                 window.draw(cx).clear(cx);
                 // An existing window gesture began outside the unavailable button.
                 window.dispatch_event(
-                    gpui::MouseDownEvent {
-                        button: gpui::MouseButton::Left,
-                        position: gpui::point(gpui::px(200.), gpui::px(12.)),
-                        ..Default::default()
-                    }
+                    crate::test_events::down(
+                        gpui::MouseButton::Left,
+                        gpui::point(gpui::px(200.), gpui::px(12.)),
+                    )
                     .to_platform_input(),
                     cx,
                 );
@@ -1320,17 +1274,7 @@ mod tests {
                     );
                 }
                 window.focus_next(cx);
-                let keystroke = gpui::Keystroke::parse("enter").unwrap();
-                window.dispatch_event(
-                    gpui::KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+                crate::test_events::press(window, cx, "enter");
             })
             .unwrap();
             cx.run_until_parked();

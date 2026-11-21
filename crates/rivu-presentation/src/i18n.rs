@@ -324,9 +324,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "invalid arguments for Fluent ID dynamic")]
     fn missing_named_arguments_are_not_silently_accepted() {
-        Localizer::new("en-US").format("core-command-accepted", &[]);
+        Localizer::with_resources("en-US", "dynamic = Hello { $name }\n", None)
+            .format("dynamic", &[]);
     }
 
     #[test]

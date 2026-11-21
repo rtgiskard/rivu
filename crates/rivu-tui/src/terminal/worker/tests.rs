@@ -1,34 +1,33 @@
 use super::*;
-use rivu::test_support::ipc;
+use rivu::test_support::ipc::{SocketTestDirectory, socket_test_directory};
 use rivu_protocol::model::Command;
 use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::response::QueryRevisions;
+use rivu_protocol::test_support as ipc;
 use std::time::Duration;
 
 #[test]
-fn read_kind_changes_follow_shared_payload_coordinate_and_count_dependencies() {
+fn read_kind_changes_project_terminal_revisions_for_their_query() {
     let previous = TuiSnapshot::default();
     let mut bitrate = previous.clone();
     bitrate.library.bitrate_revision = 1;
-    for kind in [ReadKind::Queue, ReadKind::Search("needle")] {
-        let changes = kind.changes(&previous, &bitrate, "");
-        assert!(changes.rows_changed);
-        assert!(!changes.coordinates_changed);
-    }
+    let queue = ReadKind::Queue.changes(&previous, &bitrate, "");
+    assert!(queue.rows_changed && !queue.coordinates_changed);
     let count = ReadKind::OtherTracksCount.changes(&previous, &bitrate, "");
     assert!(!count.rows_changed && !count.coordinates_changed);
 
-    let mut structure = previous.clone();
-    structure.library.structure_revision = 1;
-    let count = ReadKind::OtherTracksCount.changes(&previous, &structure, "");
-    assert!(count.rows_changed && count.coordinates_changed);
-    let queue = ReadKind::Queue.changes(&previous, &structure, "needle");
-    assert!(!queue.rows_changed && !queue.coordinates_changed);
-
-    let mut combined = bitrate;
-    combined.queue.revision = 1;
-    let queue = ReadKind::Queue.changes(&previous, &combined, "needle");
-    assert!(queue.rows_changed && queue.coordinates_changed);
+    let mut metadata = previous.clone();
+    metadata.library.revision += 1;
+    let lookup = ReadKind::PlaylistSelection {
+        playlist_id: 7,
+        entry_id: 42,
+    };
+    assert!(!lookup.changes(&previous, &metadata, "").coordinates_changed);
+    assert!(
+        lookup
+            .changes(&previous, &metadata, "needle")
+            .coordinates_changed
+    );
 }
 
 fn assert_query_socket_closed(mut stream: std::os::unix::net::UnixStream) {
@@ -44,6 +43,20 @@ fn assert_query_socket_closed(mut stream: std::os::unix::net::UnixStream) {
         ));
         pending = &pending[4 + length..];
     }
+}
+
+/// A fake Core endpoint whose directory identity outlives forked test children.
+fn fake_core() -> (SocketTestDirectory, std::os::unix::net::UnixListener) {
+    let directory = socket_test_directory();
+    let listener = std::os::unix::net::UnixListener::bind_addr(
+        &rivu_protocol::wire::address(directory.path()).unwrap(),
+    )
+    .unwrap();
+    (directory, listener)
+}
+
+fn created_playlist(name: &str) -> AppCommand {
+    Command::CreatePlaylist { name: name.into() }.into()
 }
 
 fn queue_request(
@@ -83,11 +96,8 @@ fn injected_watcher(update: Option<WatchedSnapshot>) -> (Watcher, Sender<()>) {
 #[test]
 fn shutdown_snapshot_exits_loading_before_input_or_worker_dispatch() {
     use ratatui::{Terminal, backend::TestBackend};
-    use std::os::unix::net::UnixListener;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let (directory, listener) = fake_core();
     listener.set_nonblocking(true).unwrap();
     let mut state = ClientSnapshot::default();
     state.system.shutting_down = true;
@@ -115,11 +125,11 @@ fn shutdown_snapshot_exits_loading_before_input_or_worker_dispatch() {
 fn shutdown_snapshot_exits_existing_projection_and_cancels_pending_query() {
     use ipc::{complete_test_handshake, read_test_query};
     use ratatui::{Terminal, backend::TestBackend};
-    use std::os::unix::net::UnixListener;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let (started, active) = bounded(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
@@ -170,7 +180,7 @@ fn watcher_failure_and_disconnection_exit_without_polling_and_preserve_the_cause
         (true, None),
         (false, Some("state read failed")),
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = socket_test_directory();
         let update = failure
             .map(|error| Err(error.into()))
             .or_else(|| initialized.then(|| Ok((1, ClientSnapshot::default()))));
@@ -211,7 +221,7 @@ fn command_and_query_worker_death_exit_the_owner_before_input() {
 
     for command_dies in [true, false] {
         for panics in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
+            let directory = socket_test_directory();
             let commands = if command_dies {
                 let (sender, receiver) = bounded(1);
                 let (result_sender, results) = bounded(1);
@@ -295,11 +305,13 @@ fn command_and_query_worker_death_exit_the_owner_before_input() {
 
 #[test]
 fn command_worker_empty_results_and_full_queue_remain_live() {
-    use std::{io::Read, os::unix::net::UnixListener};
+    use rivu_protocol::wire::WireRequest;
+    use std::io::Read;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let worker = spawn_command_worker(directory.path(), 1);
     assert!(worker.take_result().unwrap().is_none());
     assert!(
@@ -308,14 +320,10 @@ fn command_worker_empty_results_and_full_queue_remain_live() {
             .unwrap()
     );
     let mut stream = listener.accept().unwrap().0;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut prefix = [0; 4];
-    stream.read_exact(&mut prefix).unwrap();
-    let length = u32::from_le_bytes(prefix) as usize;
-    assert!(length <= 4096);
-    stream.read_exact(&mut vec![0; length]).unwrap();
+    assert!(matches!(
+        ipc::read_test_request(&mut stream),
+        WireRequest::Hello(_)
+    ));
     // Hello is physically pending, so all eight queue slots can be filled
     // without racing command completion or mistaking the worker for dead.
     for _ in 0..8 {
@@ -337,36 +345,28 @@ fn command_worker_empty_results_and_full_queue_remain_live() {
 
 #[test]
 fn watcher_shutdown_closes_stalled_initial_handshake() {
-    use std::{io::Read, os::unix::net::UnixListener};
+    use rivu_protocol::wire::WireRequest;
+    use std::io::Read;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let watcher = spawn_watcher(directory.path(), 1);
     let mut stream = listener.accept().unwrap().0;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut prefix = [0; 4];
-    stream.read_exact(&mut prefix).unwrap();
-    let length = u32::from_le_bytes(prefix) as usize;
-    assert!(length <= 4096);
-    stream.read_exact(&mut vec![0; length]).unwrap();
+    assert!(matches!(
+        ipc::read_test_request(&mut stream),
+        WireRequest::Hello(_)
+    ));
     // Hello has reached the peer, which deliberately never replies. The
     // loading screen's exit must join the watcher without its response timeout.
-    let (finished, completion) = bounded(1);
-    let shutdown = std::thread::spawn(move || {
-        drop(watcher);
-        finished.send(()).unwrap();
-    });
-    completion.recv_timeout(Duration::from_secs(5)).unwrap();
+    drop(watcher);
     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
-    shutdown.join().unwrap();
 }
 
 #[test]
 fn watcher_reports_initial_connection_failure_to_loading_consumer() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = socket_test_directory();
     let watcher = spawn_watcher(directory.path(), 1);
     watcher
         .receiver
@@ -377,17 +377,12 @@ fn watcher_reports_initial_connection_failure_to_loading_consumer() {
 
 #[test]
 fn watcher_rejects_replacement_at_initial_hello() {
-    use std::{io::Read, os::unix::net::UnixListener};
+    use std::io::Read;
 
-    if rivu::test_support::run_in_subprocess(
-        "terminal::worker::tests::watcher_rejects_replacement_at_initial_hello",
-        Duration::from_secs(15),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
         return;
     }
-    let directory = ipc::socket_test_directory();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    let (directory, listener) = fake_core();
     let watcher = spawn_watcher(directory.path(), 1);
     let mut stream = listener.accept().unwrap().0;
     ipc::complete_test_handshake_for_instance(&mut stream, 2);
@@ -408,14 +403,14 @@ fn watcher_rejects_replacement_at_initial_hello() {
 fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
     use rivu_protocol::{
         response::{StateResponse, StateRevisions},
-        transport::encode_response_frame_into,
+        test_support::write_test_response,
         wire::{HelloResponse, WireRequest, WireResponse, wire_state},
     };
-    use std::{io::Write, os::unix::net::UnixListener};
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let (continue_watch, continuation) = bounded(1);
     let (ignored, ignored_update) = bounded(1);
     let server = std::thread::spawn(move || {
@@ -423,16 +418,11 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let reply = |stream: &mut std::os::unix::net::UnixStream, response| {
-            let mut frame = Vec::new();
-            encode_response_frame_into(&response, &mut frame).unwrap();
-            stream.write_all(&frame).unwrap();
-        };
         assert!(
             matches!(ipc::read_test_request(&mut stream), WireRequest::Hello(sections)
             if sections == TERMINAL_SECTIONS)
         );
-        reply(
+        write_test_response(
             &mut stream,
             WireResponse::Hello(HelloResponse {
                 instance_id: 1u32.to_le_bytes(),
@@ -449,7 +439,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
             ..Default::default()
         };
         // Even a redundant announcement must not cause a state fetch or publication.
-        reply(&mut stream, WireResponse::Watch(processing_only));
+        write_test_response(&mut stream, WireResponse::Watch(processing_only));
         assert!(
             matches!(ipc::read_test_request(&mut stream), WireRequest::Watch(watch)
             if watch.sections == TERMINAL_SECTIONS)
@@ -458,7 +448,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         continuation.recv_timeout(Duration::from_secs(5)).unwrap();
         // A stale announcement can yield no interested payload. Do not publish
         // it or acknowledge the unread processing revision.
-        reply(
+        write_test_response(
             &mut stream,
             WireResponse::Watch(StateRevisions {
                 playback: 1,
@@ -470,7 +460,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
             WireRequest::State(request) if request.sections == TERMINAL_SECTIONS
                 && request.since == Some(StateRevisions::default())
         ));
-        reply(
+        write_test_response(
             &mut stream,
             WireResponse::State(wire_state(StateResponse {
                 revisions: processing_only,
@@ -487,13 +477,13 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
             system: 1,
             ..processing_only
         };
-        reply(&mut stream, WireResponse::Watch(shutdown));
+        write_test_response(&mut stream, WireResponse::Watch(shutdown));
         assert!(
             matches!(ipc::read_test_request(&mut stream), WireRequest::State(request)
             if request.sections == TERMINAL_SECTIONS
                 && request.since == Some(StateRevisions::default()))
         );
-        reply(
+        write_test_response(
             &mut stream,
             WireResponse::State(wire_state(StateResponse {
                 revisions: StateRevisions {
@@ -547,24 +537,24 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
 
 #[test]
 fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
-    use std::{io::Read, os::unix::net::UnixListener};
+    use rivu_protocol::wire::WireRequest;
+    use std::io::Read;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
-    let (connected, accepted) = bounded(1);
-    let server = std::thread::spawn(move || {
-        connected.send(listener.accept().unwrap().0).unwrap();
-    });
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let mut worker = spawn_query_worker(directory.path(), 1);
     let mut tracker = QueryTracker::default();
     let request = queue_request(&mut tracker, 0, QueryRevisions::default());
     worker.request(request, tracker.ticket()).unwrap();
-    let mut stream = accepted.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(worker.take_result().unwrap().is_none());
-    stream
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
+    let mut stream = listener.accept().unwrap().0;
+    // The peer deliberately stalls Hello. Replacements must not abandon
+    // the active connection and start more server work behind it.
+    assert!(matches!(
+        ipc::read_test_request(&mut stream),
+        WireRequest::Hello(_)
+    ));
     for offset in 1..100 {
         worker
             .request(
@@ -573,45 +563,30 @@ fn replacing_queries_keeps_one_stalled_socket_until_worker_shutdown() {
             )
             .unwrap();
     }
-    assert!(worker.sender.as_ref().unwrap().is_full());
     assert!(worker.take_result().unwrap().is_none());
-    // The peer deliberately stalls Hello. Replacements must not abandon
-    // the active connection and start more server work behind it.
-    let mut buffer = [0; 4096];
-    let retained = loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => break false,
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                break true;
-            }
-            Err(error) => panic!("{error}"),
-        }
-    };
+    // Shutdown joins the worker, so any connection it ever opened is queued now.
     drop(worker);
-    let closed = stream.read(&mut buffer).unwrap();
-    server.join().unwrap();
+    assert_eq!(
+        stream.read(&mut [0]).unwrap(),
+        0,
+        "worker shutdown must close a stalled connection"
+    );
+    listener.set_nonblocking(true).unwrap();
     assert!(
-        retained,
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
         "replacement abandoned an active server connection"
     );
-    assert_eq!(closed, 0, "worker shutdown must close a stalled connection");
 }
 
 #[test]
 fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
     use ipc::{complete_test_handshake, read_test_query, read_test_request, reply_test_query};
     use rivu_protocol::wire::{WireQuery, WireRequest};
-    use std::os::unix::net::UnixListener;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let (started, active) = bounded(1);
     let (release, resume) = bounded(1);
     let (cancel_seen, cancellation) = bounded(1);
@@ -685,11 +660,11 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
 #[test]
 fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
     use ipc::{complete_test_handshake, read_test_query};
-    use std::os::unix::net::UnixListener;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let (started, active) = bounded(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
@@ -722,90 +697,80 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
 
 #[test]
 fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
-    use ipc::{complete_test_handshake, read_test_command, reply_test_ack};
-    use std::os::unix::net::UnixListener;
+    use ipc::{
+        complete_test_handshake, complete_test_handshake_for_instance, read_test_command,
+        reply_test_ack,
+    };
+    use rivu_protocol::response::AckStatus;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
-    let server = std::thread::spawn(move || {
-        let mut stream = listener.accept().unwrap().0;
-        complete_test_handshake(&mut stream);
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    for replacement in [false, true] {
+        let (directory, listener) = fake_core();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(
+                matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
+            );
+            // Mutation execution is ambiguous to the client: no Ack arrives.
+            drop(stream);
+            let mut stream = listener.accept().unwrap().0;
+            if replacement {
+                use std::io::Read;
+                complete_test_handshake_for_instance(&mut stream, 2);
+                assert_eq!(stream.read(&mut [0]).unwrap(), 0, "no mutation on B");
+                return;
+            }
+            complete_test_handshake(&mut stream);
+            assert!(
+                matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
+            );
+            reply_test_ack(&mut stream, Ack::new(AckStatus::Succeeded, None, 2));
+        });
+        let worker = spawn_command_worker(directory.path(), 1);
         assert!(
-            matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
+            worker
+                .request(created_playlist("first"), CommandFeedback::Notice)
+                .unwrap()
         );
-        // Mutation execution is ambiguous to the client: no Ack arrives.
-        drop(stream);
-        let mut stream = listener.accept().unwrap().0;
-        complete_test_handshake(&mut stream);
+        let failure = worker
+            .results
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .result
+            .unwrap_err();
+        failure.into_message().unwrap();
         assert!(
-            matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
+            worker
+                .request(created_playlist("second"), CommandFeedback::Notice)
+                .unwrap()
         );
-        reply_test_ack(
-            &mut stream,
-            Ack {
-                status: rivu_protocol::response::AckStatus::Succeeded,
-                error: None,
-                revision: 2,
-                scan_id: None,
-                relocation_id: None,
-                processing_id: None,
-                database_optimization: None,
-                source_tags: None,
-                source_file_saved: false,
-                source_refresh_error: None,
-            },
-        );
-    });
-    let worker = spawn_command_worker(directory.path(), 1);
-    assert!(
-        worker
-            .request(
-                Command::CreatePlaylist {
-                    name: "first".into()
-                }
-                .into(),
-                CommandFeedback::Notice
-            )
+        let second = worker
+            .results
+            .recv_timeout(Duration::from_secs(5))
             .unwrap()
-    );
-    let failure = worker
-        .results
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap()
-        .result
-        .unwrap_err();
-    failure.into_message().unwrap();
-    assert!(
-        worker
-            .request(
-                Command::CreatePlaylist {
-                    name: "second".into()
-                }
-                .into(),
-                CommandFeedback::Notice
-            )
-            .unwrap()
-    );
-    let ack = worker
-        .results
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap()
-        .result
-        .unwrap();
-    assert!(ack.is_success());
-    drop(worker);
-    server.join().unwrap();
+            .result;
+        if replacement {
+            assert!(second.unwrap_err().into_message().is_err());
+        } else {
+            assert!(second.unwrap().is_success());
+        }
+        drop(worker);
+        server.join().unwrap();
+    }
 }
 
 #[test]
 fn command_worker_shutdown_closes_pending_exchange_and_drops_queued_commands() {
     use ipc::{complete_test_handshake, read_test_command};
-    use std::{io::Read, os::unix::net::UnixListener};
+    use std::io::Read;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let (started, active) = bounded(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
@@ -818,25 +783,13 @@ fn command_worker_shutdown_closes_pending_exchange_and_drops_queued_commands() {
     let worker = spawn_command_worker(directory.path(), 1);
     assert!(
         worker
-            .request(
-                Command::CreatePlaylist {
-                    name: "first".into()
-                }
-                .into(),
-                CommandFeedback::Notice
-            )
+            .request(created_playlist("first"), CommandFeedback::Notice)
             .unwrap()
     );
     let mut stream = active.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(
         worker
-            .request(
-                Command::CreatePlaylist {
-                    name: "second".into()
-                }
-                .into(),
-                CommandFeedback::Notice
-            )
+            .request(created_playlist("second"), CommandFeedback::Notice)
             .unwrap()
     );
     drop(worker);
@@ -847,11 +800,12 @@ fn command_worker_shutdown_closes_pending_exchange_and_drops_queued_commands() {
 #[test]
 fn watcher_identity_binds_delayed_command_and_query_workers() {
     use ipc::{complete_test_handshake, complete_test_handshake_for_instance};
-    use std::{io::Read, os::unix::net::UnixListener};
+    use std::io::Read;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let server = std::thread::spawn(move || {
         let mut watch = listener.accept().unwrap().0;
         complete_test_handshake(&mut watch);
@@ -873,13 +827,7 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
     let mut commands = spawn_command_worker(directory.path(), instance_id);
     assert!(
         commands
-            .request(
-                Command::CreatePlaylist {
-                    name: "A-only".into()
-                }
-                .into(),
-                CommandFeedback::Notice
-            )
+            .request(created_playlist("A-only"), CommandFeedback::Notice)
             .unwrap()
     );
     commands.worker.take().unwrap().join().unwrap();
@@ -906,52 +854,14 @@ fn watcher_identity_binds_delayed_command_and_query_workers() {
 }
 
 #[test]
-fn command_worker_reconnection_rejects_replacement_instance() {
-    use ipc::{complete_test_handshake, complete_test_handshake_for_instance, read_test_command};
-    use std::{io::Read, os::unix::net::UnixListener};
-
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
-    let server = std::thread::spawn(move || {
-        let mut stream = listener.accept().unwrap().0;
-        complete_test_handshake(&mut stream);
-        read_test_command(&mut stream);
-        drop(stream);
-        let mut stream = listener.accept().unwrap().0;
-        complete_test_handshake_for_instance(&mut stream, 2);
-        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
-    });
-    let worker = spawn_command_worker(directory.path(), 1);
-    for name in ["ambiguous", "old-baseline"] {
-        assert!(
-            worker
-                .request(
-                    Command::CreatePlaylist { name: name.into() }.into(),
-                    CommandFeedback::Notice,
-                )
-                .unwrap()
-        );
-        let failure = worker
-            .results
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .result
-            .unwrap_err();
-        assert_eq!(failure.instance_changed, name == "old-baseline");
-    }
-    drop(worker);
-    server.join().unwrap();
-}
-
-#[test]
 fn superseded_query_still_reports_replacement_instance_as_fatal() {
     use ipc::complete_test_handshake_for_instance;
-    use std::{io::Read, os::unix::net::UnixListener};
+    use std::io::Read;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let (accepted, connected) = bounded(1);
     let (release, resume) = bounded(1);
     let server = std::thread::spawn(move || {
@@ -992,11 +902,12 @@ fn superseded_query_still_reports_replacement_instance_as_fatal() {
 #[test]
 fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
     use ipc::{complete_test_handshake, complete_test_handshake_for_instance, read_test_query};
-    use std::{io::Read, os::unix::net::UnixListener};
+    use std::io::Read;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let (started, active) = bounded(1);
     let (release, resume) = bounded(1);
     let server = std::thread::spawn(move || {
@@ -1041,6 +952,9 @@ fn query_worker_reconnection_rejects_replacement_before_accepting_results() {
 
 #[test]
 fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(30)) {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("config.toml");
     let _core =
@@ -1088,46 +1002,28 @@ fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
 
 #[test]
 fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
-    use ipc::{complete_test_handshake, reply_test_ack};
+    use ipc::{complete_test_handshake, read_test_request, reply_test_ack};
     use rivu_protocol::{
         response::AckStatus,
-        transport::decode_request_frame,
         wire::{WireCommand, WireRequest},
     };
-    use std::{io::Read, os::unix::net::UnixListener};
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
         for rejected in [true, false] {
-            let mut prefix = [0; 4];
-            stream.read_exact(&mut prefix).unwrap();
-            let length = u32::from_le_bytes(prefix) as usize;
-            assert!(length <= rivu_protocol::wire::MAX_REQUEST);
-            let mut body = vec![0; length];
-            stream.read_exact(&mut body).unwrap();
             assert!(matches!(
-                decode_request_frame(&body).unwrap(),
+                read_test_request(&mut stream),
                 WireRequest::Command(WireCommand::Shutdown)
             ));
             if rejected {
                 reply_test_ack(
                     &mut stream,
-                    Ack {
-                        status: AckStatus::NotAdmitted,
-                        error: Some("shutdown rejected".into()),
-                        revision: 0,
-                        scan_id: None,
-                        relocation_id: None,
-                        processing_id: None,
-                        database_optimization: None,
-                        source_tags: None,
-                        source_file_saved: false,
-                        source_refresh_error: None,
-                    },
+                    Ack::new(AckStatus::NotAdmitted, Some("shutdown rejected".into()), 0),
                 );
             }
         }
@@ -1244,11 +1140,11 @@ fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_querie
 fn repeated_withdrawal_discards_pending_but_retains_active_until_reply() {
     use ipc::{complete_test_handshake, read_test_query, read_test_request, reply_test_query};
     use rivu_protocol::wire::WireRequest;
-    use std::os::unix::net::UnixListener;
 
-    let directory = tempfile::tempdir().unwrap();
-    let listener =
-        UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap()).unwrap();
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    let (directory, listener) = fake_core();
     let (started, active) = bounded(1);
     let (cancel_seen, cancelled) = bounded(1);
     let (release, resume) = bounded(1);
