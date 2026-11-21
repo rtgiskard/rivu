@@ -1,9 +1,8 @@
 //! Frozen processing-task results and explicit snapshot actions.
-use super::graph_editor::{node_fields, node_label};
+use super::graph_editor::{GraphField, node_fields, node_label};
 use super::*;
 use rivu_format::config::processing_graph::{GraphNodeKind, GraphPort};
 use rivu_protocol::model::GraphExecutionMode;
-use serde_json::{Value, json};
 
 #[derive(Default)]
 pub(super) struct ResultsState {
@@ -16,147 +15,183 @@ pub(super) fn graph_action_run(task: &rivu_protocol::model::ProcessingTaskStatus
     task.graph_run_id.filter(|_| task.graph_actions_available)
 }
 
-fn captured_label_id(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "mode" => "processing-denoise-mode",
-        "device" => "processing-device",
-        "strength" => "processing-strength",
-        "spectral_gain_floor_db" => "processing-spectral-gain-floor",
-        "attack_ms" => "processing-attack",
-        "release_ms" => "processing-release",
-        "smoothing_bins" => "processing-smoothing",
-        "transient_protection" => "processing-transients",
-        "wet" => "processing-wet",
-        "fft_size" => "processing-fft",
-        "stationary_noise_dbfs" => "processing-stationary-floor",
-        "enabled" => "processing-enabled",
-        "fundamental_hz" => "processing-hum-frequency",
-        "hum" => "processing-hum",
-        "impulse" => "processing-impulse",
-        "max_width" => "processing-impulse-width",
-        "floor_dbfs" => "processing-impulse-floor",
-        "speech_interpreter" => "processing-speech-interpreter",
-        "separation_interpreter" => "processing-separation-interpreter",
-        "speech_wet_mix" => "processing-speech-wet",
-        "speech_attenuation_limit_db" => "processing-speech-attenuation",
-        "speech_post_filter" => "processing-speech-post-filter",
-        "separation_overlap" => "processing-separation-overlap",
-        "frequency_hz" => "processing-frequency",
-        "harmonics" => "processing-harmonics",
-        "q" => "processing-q",
-        "threshold" => "processing-threshold",
-        "worker" => "processing-worker",
-        "speech_manifest" => "processing-speech-manifest",
-        "separation_manifest" => "processing-separation-manifest",
-        "threads" => "processing-threads",
-        _ => return None,
-    })
-}
-
 impl AudioProcessing {
-    fn captured_line(&self, label: &str, text: &str, id: Option<&str>) -> String {
-        let count_line = match id {
-            Some("processing-smoothing") => Some("processing-result-bins"),
-            Some("processing-fft" | "processing-impulse-width") => {
-                Some("processing-result-samples")
+    fn captured_denoise_line(
+        &self,
+        label: &str,
+        field: DenoiseField,
+        config: &DenoiseConfig,
+    ) -> String {
+        use DenoiseField::*;
+        match field {
+            AttackMs => format!("{label}: {} ms", config.attack_ms),
+            ReleaseMs => format!("{label}: {} ms", config.release_ms),
+            SpectralGainFloorDb => format!("{label}: {} dB", config.spectral_gain_floor_db),
+            StationaryNoiseDbfs => format!("{label}: {} dBFS", config.stationary_noise_dbfs),
+            ImpulseFloorDbfs => format!("{label}: {} dBFS", config.impulse.floor_dbfs),
+            HumFundamentalHz => format!("{label}: {} Hz", config.hum.fundamental_hz),
+            FftSize => self.captured_count(label, config.fft_size, "processing-result-samples"),
+            ImpulseMaxWidth => {
+                self.captured_count(label, config.impulse.max_width, "processing-result-samples")
             }
-            _ => None,
-        };
-        if let Some(id) = count_line
-            && let Ok(count) = text.parse::<u32>()
-        {
-            return self
-                .context
-                .i18n
-                .format(id, &[("label", label.into()), ("count", count.into())]);
+            SmoothingBins => {
+                self.captured_count(label, config.smoothing_bins, "processing-result-bins")
+            }
+            _ => format!("{label}: {}", field.text(config)),
         }
-        let unit = match id {
-            Some(
-                "processing-spectral-gain-floor"
-                | "processing-speech-attenuation"
-                | "processing-graph-input-gain",
-            ) => "dB",
-            Some("processing-stationary-floor" | "processing-impulse-floor") => "dBFS",
-            Some("processing-attack" | "processing-release") => "ms",
-            Some("processing-frequency" | "processing-hum-frequency") => "Hz",
-            Some("processing-profile-start" | "processing-profile-end") => "s",
-            _ => return format!("{label}: {text}"),
-        };
-        format!("{label}: {text} {unit}")
     }
 
-    fn captured_parameters(&self, prefix: &str, value: &Value, cx: &App) -> Div {
-        let theme = rivu_ui::theme::palette(cx);
-        let mut content = column().min_w_0().gap_1();
-        if let Some(object) = value.as_object() {
-            for (key, value) in object {
-                if value.is_object() {
-                    content = content.child(self.captured_parameters(
-                        &format!("{prefix}.{key}"),
-                        value,
-                        cx,
-                    ));
-                    continue;
-                }
-                let id = captured_label_id(key);
-                let label = id.map_or_else(|| key.replace('_', " "), |id| self.tr(id).to_string());
-                let label = match prefix.strip_prefix("denoise.").and_then(captured_label_id) {
-                    Some(group) => format!("{} · {label}", self.tr(group)),
-                    None => label,
-                };
-                let text = match value {
-                    Value::Null => "—".to_owned(),
-                    Value::Bool(value) => self
-                        .context
-                        .i18n
-                        .text(if *value {
-                            "processing-enabled"
-                        } else {
-                            "processing-off"
-                        })
-                        .to_owned(),
-                    Value::String(value) if key == "mode" => self
-                        .context
-                        .i18n
-                        .text(match value.as_str() {
-                            "off" => "processing-off",
-                            "stationary" => "processing-stationary",
-                            "profile" => "processing-profile",
-                            "adaptive" => "processing-adaptive",
-                            _ => unreachable!("serialized denoise mode"),
-                        })
-                        .to_owned(),
-                    Value::String(value) => value.clone(),
-                    _ => value.to_string(),
-                };
-                let unit = if value.is_number() { id } else { None };
-                content = content.child(caption(theme, self.captured_line(&label, &text, unit)));
+    fn captured_neural_line(label: &str, field: NeuralField, config: &NeuralConfig) -> String {
+        match field {
+            NeuralField::SpeechAttenuationLimitDb => {
+                format!("{label}: {} dB", config.speech_attenuation_limit_db)
             }
+            _ => format!("{label}: {}", field.text(config)),
         }
-        content
+    }
+
+    fn captured_graph_line(&self, field: GraphField, kind: &GraphNodeKind) -> String {
+        let label = self.graph_parameter_label(field);
+        match (field, kind) {
+            (GraphField::Denoise(field), GraphNodeKind::Denoise { config, .. }) => {
+                self.captured_denoise_line(&label, field, config)
+            }
+            (
+                GraphField::Neural(field),
+                GraphNodeKind::Speech { config } | GraphNodeKind::Separate { config },
+            ) => Self::captured_neural_line(&label, field, config),
+            (GraphField::ProfileStart | GraphField::ProfileEnd, _) => {
+                format!("{label}: {} s", field.text(kind))
+            }
+            (GraphField::MixGain(index), GraphNodeKind::Mix { gains_db, .. }) => {
+                format!("{label}: {} dB", gains_db[index])
+            }
+            _ => format!("{label}: {}", field.text(kind)),
+        }
+    }
+
+    fn captured_toggle(&self, enabled: bool) -> SharedString {
+        self.tr(if enabled {
+            "processing-enabled"
+        } else {
+            "processing-off"
+        })
+    }
+
+    fn captured_count(&self, label: &str, count: usize, message: &str) -> String {
+        self.context
+            .i18n
+            .format(message, &[("label", label.into()), ("count", count.into())])
+    }
+
+    fn captured_denoise(&self, config: &DenoiseConfig, cx: &App) -> Div {
+        use DenoiseField::*;
+        let theme = rivu_ui::theme::palette(cx);
+        let fields = [
+            Mode,
+            Strength,
+            SpectralGainFloorDb,
+            AttackMs,
+            ReleaseMs,
+            SmoothingBins,
+            TransientProtection,
+            Wet,
+            FftSize,
+            StationaryNoiseDbfs,
+            HumEnabled,
+            HumFundamentalHz,
+            HumHarmonics,
+            HumQ,
+            ImpulseEnabled,
+            ImpulseMaxWidth,
+            ImpulseThreshold,
+            ImpulseFloorDbfs,
+            ImpulseTransientProtection,
+        ];
+        column()
+            .min_w_0()
+            .gap_1()
+            .children(fields.into_iter().map(|field| {
+                let label = self.tr(field.label_id());
+                let label = if let Some(group) = field.group_label_id() {
+                    SharedString::from(format!("{} · {label}", self.tr(group)))
+                } else {
+                    label
+                };
+                let line = match field {
+                    Mode => {
+                        let mode = self.tr(match config.mode {
+                            DenoiseMode::Off => "processing-off",
+                            DenoiseMode::Stationary => "processing-stationary",
+                            DenoiseMode::Profile => "processing-profile",
+                            DenoiseMode::Adaptive => "processing-adaptive",
+                        });
+                        format!("{label}: {mode}")
+                    }
+                    HumEnabled => format!("{label}: {}", self.captured_toggle(config.hum.enabled)),
+                    ImpulseEnabled => {
+                        format!("{label}: {}", self.captured_toggle(config.impulse.enabled))
+                    }
+                    _ => self.captured_denoise_line(&label, field, config),
+                };
+                caption(theme, line)
+            }))
+    }
+
+    fn captured_neural(&self, config: &NeuralConfig, speech: bool, cx: &App) -> Div {
+        use NeuralField::*;
+        let theme = rivu_ui::theme::palette(cx);
+        let fields: &[NeuralField] = if speech {
+            &[
+                SpeechInterpreter,
+                Worker,
+                SpeechManifest,
+                Device,
+                Threads,
+                SpeechWetMix,
+                SpeechAttenuationLimitDb,
+                SpeechPostFilter,
+            ]
+        } else {
+            &[
+                SeparationInterpreter,
+                Worker,
+                SeparationManifest,
+                Device,
+                Threads,
+                SeparationOverlap,
+            ]
+        };
+        column()
+            .min_w_0()
+            .gap_1()
+            .children(fields.iter().map(|&field| {
+                let label = self.tr(field.label_id());
+                let line = match field {
+                    SpeechManifest if config.speech_manifest.is_none() => format!("{label}: —"),
+                    SeparationManifest if config.separation_manifest.is_none() => {
+                        format!("{label}: —")
+                    }
+                    SpeechPostFilter => format!(
+                        "{label}: {}",
+                        self.captured_toggle(config.speech_post_filter)
+                    ),
+                    _ => Self::captured_neural_line(&label, field, config),
+                };
+                caption(theme, line)
+            }))
     }
 
     fn task_settings(&self, task: &rivu_protocol::model::ProcessingTaskStatus, cx: &App) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let neural = &task.settings.neural;
         let parameters = match task.operation {
-            ProcessingOperation::Denoise => {
-                serde_json::to_value(&task.settings.denoise).expect("serializable captured denoise")
-            }
-            ProcessingOperation::Speech => json!({
-                "speech_interpreter":neural.speech_interpreter,"worker":neural.worker,
-                "speech_manifest":neural.speech_manifest,"device":neural.device,"threads":neural.threads,
-                "speech_wet_mix":neural.speech_wet_mix,"speech_attenuation_limit_db":neural.speech_attenuation_limit_db,
-                "speech_post_filter":neural.speech_post_filter,
-            }),
-            ProcessingOperation::Separate => json!({
-                "separation_interpreter":neural.separation_interpreter,"worker":neural.worker,
-                "separation_manifest":neural.separation_manifest,"device":neural.device,"threads":neural.threads,
-                "separation_overlap":neural.separation_overlap,
-            }),
-            ProcessingOperation::Graph => {
-                serde_json::to_value(&task.settings.graph).expect("serializable graph snapshot")
-            }
+            ProcessingOperation::Denoise => self.captured_denoise(&task.settings.denoise, cx),
+            ProcessingOperation::Speech | ProcessingOperation::Separate => self.captured_neural(
+                &task.settings.neural,
+                task.operation == ProcessingOperation::Speech,
+                cx,
+            ),
+            ProcessingOperation::Graph => unreachable!("graph tasks have a separate results view"),
         };
         let mut content = column()
             .min_w_0()
@@ -167,15 +202,7 @@ impl AudioProcessing {
             .child(
                 caption(theme, self.tr("processing-captured-settings")).text_color(rgb(theme.text)),
             )
-            .child(self.captured_parameters(
-                if task.operation == ProcessingOperation::Denoise {
-                    "denoise"
-                } else {
-                    "neural"
-                },
-                &parameters,
-                cx,
-            ));
+            .child(parameters);
         if let Some(profile) = task.settings.profile {
             content = content.child(caption(
                 theme,
@@ -761,15 +788,8 @@ impl AudioProcessing {
                         format!("#{} · {}", node.id, self.tr(node_label(&node.kind))),
                     ));
                     for field in node_fields(&node.kind) {
-                        let text = field.text(&node.kind);
-                        content = content.child(caption(
-                            theme,
-                            self.captured_line(
-                                &self.graph_parameter_label(field),
-                                &text,
-                                Some(field.label()),
-                            ),
-                        ));
+                        content = content
+                            .child(caption(theme, self.captured_graph_line(field, &node.kind)));
                     }
                     if let GraphNodeKind::Equalizer { config, .. } = &node.kind {
                         use rivu_dsp::equalizer::config::{ChannelTarget, FilterKind};
