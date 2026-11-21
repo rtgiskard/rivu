@@ -185,7 +185,7 @@ impl Store {
                 Ok(self.conn.prepare_cached("SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0")?.query_row([], |row| integer(row, 0))?)
             }
         })?;
-        if limit == 0 {
+        if limit == 0 || offset >= total {
             return Ok(Page {
                 total,
                 rows: Vec::new(),

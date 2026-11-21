@@ -149,9 +149,7 @@ impl FlatLibraryPage<'_> {
         conn: &Connection,
         total: usize,
     ) -> Result<Page<rivu_protocol::model::LibraryRow>> {
-        if self.limit == 0
-            || (matches!(self.scope, FlatLibraryScope::Other(_)) && self.offset >= total)
-        {
+        if self.limit == 0 || self.offset >= total {
             return Ok(Page {
                 total,
                 rows: Vec::new(),

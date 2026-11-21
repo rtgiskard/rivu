@@ -147,6 +147,12 @@ impl Store {
         limit: usize,
     ) -> Result<Page<DuplicateGroup>> {
         let total = self.duplicate_group_count()?;
+        if limit == 0 || offset >= total {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         let mut query = self.conn.prepare_cached(
             "SELECT fingerprint,COUNT(*),SUM(missing<>0),SUM(missing=0)
          FROM tracks INDEXED BY tracks_fingerprint

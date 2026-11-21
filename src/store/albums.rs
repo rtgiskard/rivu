@@ -45,6 +45,13 @@ impl Store {
                     .prepare_cached(&format!("SELECT COUNT(*) FROM albums AS p WHERE {filter}"))?
                     .query_row([query], |row| row.get::<_, i64>(0))? as usize)
             })?;
+        let sql_offset = i64::try_from(offset)?;
+        if limit == 0 || offset >= total {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         let order = match sort {
             AlbumSort::Title => "p.title,p.directory",
             AlbumSort::Artist => "COALESCE(p.artist,'Unknown artist'),p.title,p.directory",
@@ -62,11 +69,8 @@ impl Store {
                 WHERE {DIRECTORY}=+p.directory AND {TITLE}=p.title ORDER BY {ORDER} LIMIT 1
              ) ORDER BY {order}"
         ))?;
-        let mut rows = statement.query(params![
-            query,
-            limit.min(MAX_QUERY_ROWS) as i64,
-            i64::try_from(offset)?
-        ])?;
+        let mut rows =
+            statement.query(params![query, limit.min(MAX_QUERY_ROWS) as i64, sql_offset])?;
         let mut summaries = Vec::new();
         while let Some(row) = rows.next()? {
             let key = AlbumKey {

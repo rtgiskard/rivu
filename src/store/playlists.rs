@@ -384,7 +384,7 @@ impl Store {
     ) -> Result<Page<PlaylistEntryRow>> {
         let query = search_query(query);
         let total = self.playlist_match_count(playlist_id, query.as_deref())?;
-        if limit == 0 {
+        if limit == 0 || offset >= total {
             return Ok(Page {
                 total,
                 rows: Vec::new(),
