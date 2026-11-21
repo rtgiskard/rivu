@@ -22,6 +22,7 @@ use rivu_utils::regular_file::open_regular_file;
 use std::{
     fs::File,
     io::Seek,
+    ops::Range,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
@@ -421,11 +422,23 @@ enum Decode {
     Ffmpeg(Box<super::ffmpeg::Decoder>),
     Memory {
         pcm: super::PcmAudio,
-        position: u64,
+        // Empty before the first read or after a seek; end is the next read position.
+        block: Range<u64>,
     },
     #[cfg(feature = "midi")]
     Midi(Box<midi::MidiSource>),
 }
+
+impl Decode {
+    fn samples<'a>(&'a self, buffer: &'a [f32]) -> &'a [f32] {
+        match self {
+            Self::Memory { pcm, block } if !block.is_empty() => pcm.frame_block(block.start),
+            Self::Memory { .. } => &[],
+            _ => buffer,
+        }
+    }
+}
+
 fn decoder(params: &AudioCodecParameters) -> Result<Decode> {
     if params.codec != CODEC_ID_OPUS {
         return Ok(Decode::Native(get_codecs().make_audio_decoder(
@@ -618,7 +631,10 @@ impl Source {
             identity,
             layout,
             info,
-            Decode::Memory { pcm, position },
+            Decode::Memory {
+                pcm,
+                block: position..position,
+            },
             start,
         ))
     }
@@ -1325,10 +1341,11 @@ impl Source {
             self.exhausted = exhausted;
             return Ok(());
         }
-        if let Decode::Memory { pcm, position } = &mut self.decode {
-            *position = ((target * f64::from(pcm.sample_rate())).round() as u64).min(pcm.frames());
+        if let Decode::Memory { pcm, block } = &mut self.decode {
+            let position =
+                ((target * f64::from(pcm.sample_rate())).round() as u64).min(pcm.frames());
+            *block = position..position;
             self.reset_traversal();
-            self.frames.clear();
             self.ready = false;
             self.exhausted = false;
             return Ok(());
@@ -1491,7 +1508,7 @@ impl Source {
     }
 
     pub(super) fn decoded_samples(&self) -> &[f32] {
-        &self.frames
+        self.decode.samples(&self.frames)
     }
 
     /// Returns normalized media alignment and explicit source continuity.
@@ -1523,9 +1540,10 @@ impl Source {
             }
         }
         let position = self.delivered_frames;
-        self.delivered_frames += (self.frames.len() / self.layout.len()) as u64;
+        let samples = self.decode.samples(&self.frames);
+        self.delivered_frames += (samples.len() / self.layout.len()) as u64;
         Ok(DecodeStep::Frames(PcmSpan {
-            samples: &self.frames,
+            samples,
             media_start: self.frame_start,
             position,
             discontinuity: self.frame_discontinuity,
@@ -1543,7 +1561,7 @@ impl Source {
                 DecodeStep::Eof => return Ok(None),
             }
         }
-        Ok(Some((&self.frames, self.frame_start)))
+        Ok(Some((self.decoded_samples(), self.frame_start)))
     }
 
     /// One finite opening round, preserving the first selected span for refill.
@@ -2147,16 +2165,15 @@ impl Source {
             }
             return Ok(DecodeStep::Yield);
         }
-        if let Decode::Memory { pcm, position } = &mut self.decode {
+        if let Decode::Memory { pcm, block } = &mut self.decode {
             if *budget == 0 {
                 return Ok(DecodeStep::Yield);
             }
             *budget -= 1;
-            self.frames.resize(4096 * usize::from(pcm.channels()), 0.0);
-            let count = pcm.read_frames(*position, &mut self.frames);
-            self.frames.truncate(count * usize::from(pcm.channels()));
-            self.frame_start = *position as f64 / f64::from(pcm.sample_rate());
-            *position += count as u64;
+            let start = block.end;
+            let count = pcm.frame_block(start).len() / usize::from(pcm.channels());
+            *block = start..start + count as u64;
+            self.frame_start = start as f64 / f64::from(pcm.sample_rate());
             self.frame_discontinuity = self.discontinuity_pending;
             self.discontinuity_pending = false;
             if count == 0 {
