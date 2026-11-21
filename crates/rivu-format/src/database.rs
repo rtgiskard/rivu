@@ -655,6 +655,13 @@ mod tests {
         Ok(())
     }
 
+    fn db_stamp(conn: &Connection) -> Result<(u64, i64)> {
+        Ok((
+            conn.total_changes(),
+            conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?,
+        ))
+    }
+
     #[test]
     fn sqlite_named_user_tables_are_not_treated_as_an_empty_database() -> Result<()> {
         for name in ["sqlitex_data", "SQLiteX_data"] {
@@ -662,13 +669,10 @@ mod tests {
             conn.execute_batch(&format!(
                 "CREATE TABLE {name}(value BLOB); INSERT INTO {name} VALUES(X'0102FF');"
             ))?;
-            let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+            let before = db_stamp(&conn)?;
             assert_eq!(inspect(&conn)?, DatabaseState::Unversioned);
             assert!(ensure_current(&conn).is_err());
-            assert_eq!(
-                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
-                schema
-            );
+            assert_eq!(db_stamp(&conn)?, before);
             assert_eq!(
                 conn.query_row(&format!("SELECT value FROM {name}"), [], |row| {
                     row.get::<_, Vec<u8>>(0)
@@ -695,14 +699,9 @@ mod tests {
                 "UPDATE rivu_meta SET format_version=?1 WHERE singleton=1",
                 [version],
             )?;
-            let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
-            let changes = conn.total_changes();
+            let before = db_stamp(&conn)?;
             assert!(ensure_current(&conn).is_err());
-            assert_eq!(conn.total_changes(), changes);
-            assert_eq!(
-                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
-                schema
-            );
+            assert_eq!(db_stamp(&conn)?, before);
         }
         let conn = Connection::open_in_memory()?;
         conn.execute("CREATE TABLE unknown(value BLOB)", [])?;
@@ -838,18 +837,13 @@ mod tests {
         let conn = Connection::open_in_memory()?;
         create_current(&conn)?;
         conn.execute_batch("PRAGMA query_only=ON;")?;
-        let changes = conn.total_changes();
-        let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+        let before = db_stamp(&conn)?;
         validate_structure(&conn)?;
-        assert_eq!(conn.total_changes(), changes);
-        assert_eq!(
-            conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
-            schema
-        );
+        assert_eq!(db_stamp(&conn)?, before);
         conn.execute_batch("PRAGMA query_only=OFF; DELETE FROM rivu_meta; PRAGMA query_only=ON;")?;
-        let changes = conn.total_changes();
+        let before = db_stamp(&conn)?;
         assert!(validate_structure(&conn).is_err());
-        assert_eq!(conn.total_changes(), changes);
+        assert_eq!(db_stamp(&conn)?, before);
         Ok(())
     }
 
@@ -864,15 +858,10 @@ mod tests {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
             conn.execute_batch(sql)?;
-            let changes = conn.total_changes();
-            let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+            let before = db_stamp(&conn)?;
             conn.execute_batch("PRAGMA query_only=ON;")?;
             assert!(validate_structure(&conn).is_err(), "{sql}");
-            assert_eq!(conn.total_changes(), changes);
-            assert_eq!(
-                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
-                schema
-            );
+            assert_eq!(db_stamp(&conn)?, before);
         }
         Ok(())
     }
@@ -936,16 +925,11 @@ mod tests {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
             conn.execute_batch(incompatible)?;
-            let changes = conn.total_changes();
-            let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+            let before = db_stamp(&conn)?;
             conn.execute_batch("PRAGMA query_only=ON;")?;
             assert!(validate_structure(&conn).is_err(), "{incompatible}");
             assert!(ensure_current(&conn).is_err(), "{incompatible}");
-            assert_eq!(conn.total_changes(), changes);
-            assert_eq!(
-                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
-                schema
-            );
+            assert_eq!(db_stamp(&conn)?, before);
         }
         Ok(())
     }

@@ -82,6 +82,20 @@ fn cue_metadata() -> RegisteredCueMetadata {
     }
 }
 
+fn standard_segment(source: std::sync::Arc<ScanRecord>) -> CueRecord {
+    CueRecord::registered(
+        source,
+        CueSegment {
+            sheet: "/music/album.cue".into(),
+            number: 1,
+            start_frame: 0,
+            end_frame: Some(4500),
+        },
+        cue_metadata(),
+        Some(60.0),
+    )
+}
+
 fn queued(record: ScanRecord) -> (Store, ScanResult, i64) {
     queued_scan(ScanResult {
         roots: vec!["/music".into()],
@@ -162,10 +176,7 @@ fn duration_admission_requires_known_positive_duration_strictly_below_threshold(
             record.media.duration = duration;
             let scan = ScanResult {
                 min_duration_secs: threshold,
-                records: (vec![record])
-                    .into_iter()
-                    .map(std::sync::Arc::new)
-                    .collect(),
+                records: vec![std::sync::Arc::new(record)],
                 ..ScanResult::default()
             };
             let skipped = threshold != 0 && duration == Some(59.999);
@@ -317,17 +328,11 @@ fn short_track_relocation_keeps_the_existing_resolution_contract() {
     let mut record = record();
     record.path = directory.path().join("absent-old.wav");
     let mut scan = ScanResult {
-        records: (vec![record])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+        records: vec![std::sync::Arc::new(record)],
         ..ScanResult::default()
     };
     store.apply_scan(&scan).unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&scan.records[0].path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&scan.records[0].path);
     store.mark_played(id, 42).unwrap();
     scan.min_duration_secs = 120;
     std::sync::Arc::make_mut(&mut scan.records[0]).path = directory.path().join("new.wav");
@@ -362,31 +367,15 @@ fn cue_refresh_reports_played_title_changes_without_technical_history_churn() {
         )],
         ..Default::default()
     });
-    let history_values = || {
-        store
-            .history(10)
-            .unwrap()
-            .into_iter()
-            .map(|entry| {
-                (
-                    entry.track_id,
-                    entry.title,
-                    entry.play_count,
-                    entry.played_at,
-                    entry.favorite,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
     store.mark_played(id, 42).unwrap();
-    let history = history_values();
+    let history = super::history_values(&store);
     std::sync::Arc::make_mut(&mut scan.segments[0].source)
         .media
         .codec = "flac".into();
     let technical = store.apply_scan(&scan).unwrap();
     assert!(technical.library);
     assert!(!technical.history);
-    assert_eq!(history_values(), history);
+    assert_eq!(super::history_values(&store), history);
     let mut metadata = cue_metadata();
     metadata.title = "New segment title".into();
     scan.segments[0] =
@@ -396,11 +385,11 @@ fn cue_refresh_reports_played_title_changes_without_technical_history_churn() {
     store
         .edit_track(id, Some("Personal segment"), None, None, None, None)
         .unwrap();
-    let overridden = history_values();
+    let overridden = super::history_values(&store);
     metadata.title = "Refreshed segment title".into();
     scan.segments[0] = CueRecord::registered(source, cue, metadata, Some(60.0));
     assert!(store.apply_scan(&scan).unwrap().history);
-    assert_ne!(history_values(), overridden);
+    assert_ne!(super::history_values(&store), overridden);
     assert_eq!(
         store.history(10).unwrap()[0].title,
         "Refreshed segment title"
@@ -420,17 +409,8 @@ fn inserts_report_identity_and_only_applicable_duplicate_impacts() {
             ..ScanResult::default()
         };
         if cue {
-            scan.segments.push(CueRecord::registered(
-                std::sync::Arc::new(record),
-                CueSegment {
-                    sheet: "/music/album.cue".into(),
-                    number: 1,
-                    start_frame: 0,
-                    end_frame: Some(4500),
-                },
-                cue_metadata(),
-                Some(60.0),
-            ));
+            scan.segments
+                .push(standard_segment(std::sync::Arc::new(record)));
         } else {
             scan.records.push(std::sync::Arc::new(record));
         }
@@ -503,17 +483,7 @@ fn cue_size_only_rescans_invalidate_library_stats_without_fingerprints() {
     let mut source = record();
     source.fingerprint = None;
     let mut scan = ScanResult {
-        segments: vec![CueRecord::registered(
-            std::sync::Arc::new(source),
-            CueSegment {
-                sheet: "/music/album.cue".into(),
-                number: 1,
-                start_frame: 0,
-                end_frame: Some(4500),
-            },
-            cue_metadata(),
-            Some(60.0),
-        )],
+        segments: vec![standard_segment(std::sync::Arc::new(source))],
         ..ScanResult::default()
     };
     store.apply_scan(&scan).unwrap();
@@ -566,17 +536,15 @@ fn library_changes_do_not_proxy_for_queue_or_album_effects() {
     plain.path = "/other/plain.wav".into();
     plain.media.album.clear();
     let mut scan = ScanResult {
-        records: (vec![first, second, plain])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+        records: vec![
+            std::sync::Arc::new(first),
+            std::sync::Arc::new(second),
+            std::sync::Arc::new(plain),
+        ],
         ..ScanResult::default()
     };
     store.apply_scan(&scan).unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&scan.records[0].path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&scan.records[0].path);
     store.enqueue_tracks(&[id]).unwrap();
 
     std::sync::Arc::make_mut(&mut scan.records[1])
@@ -678,17 +646,7 @@ fn audio_source_rescans_refresh_ordinary_and_cue_row_projections() {
             ..ScanResult::default()
         };
         if cue {
-            scan.segments.push(CueRecord::registered(
-                source,
-                CueSegment {
-                    sheet: "/music/album.cue".into(),
-                    number: 1,
-                    start_frame: 0,
-                    end_frame: Some(4500),
-                },
-                cue_metadata(),
-                Some(60.0),
-            ));
+            scan.segments.push(standard_segment(source));
         } else {
             scan.records.push(source);
         }
@@ -820,6 +778,7 @@ fn rescans_replace_edited_tags_and_invalidate_display_without_changing_queue_ide
 #[test]
 fn equal_and_repeated_tag_edits_keep_queue_values_stable_until_rescan() {
     let (store, mut scan, id) = queued(record());
+    let track = store.track(id).unwrap().unwrap();
     let page = store.queue_page(None, 0, 10).unwrap();
     let state = store.queue_state().unwrap();
     for (title, artist, album) in [
@@ -829,9 +788,13 @@ fn equal_and_repeated_tag_edits_keep_queue_values_stable_until_rescan() {
         (Some("Title"), Some("Artist"), Some("Album")),
     ] {
         for _ in 0..2 {
-            store
-                .edit_track(id, title, artist, album, None, None)
-                .unwrap();
+            assert_eq!(
+                store
+                    .edit_track(id, title, artist, album, None, None)
+                    .unwrap(),
+                crate::store::TrackEditImpact::default()
+            );
+            assert_eq!(store.track(id).unwrap().unwrap(), track);
             assert_eq!(store.queue_state().unwrap(), state);
             assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         }
@@ -1046,17 +1009,7 @@ fn scan_metadata_outside_queue_rows_refreshes_without_queue_invalidation() {
 fn cue_source_rename_invalidates_queue_rows_without_changing_occurrences_or_current() {
     let (store, mut scan, id) = queued_scan(ScanResult {
         roots: vec!["/music".into()],
-        segments: vec![CueRecord::registered(
-            std::sync::Arc::new(record()),
-            CueSegment {
-                sheet: "/music/album.cue".into(),
-                number: 1,
-                start_frame: 0,
-                end_frame: Some(4500),
-            },
-            cue_metadata(),
-            Some(60.0),
-        )],
+        segments: vec![standard_segment(std::sync::Arc::new(record()))],
         ..ScanResult::default()
     });
     store.enqueue_tracks(&[id]).unwrap();
@@ -1106,10 +1059,7 @@ fn unqueued_metadata_changes_do_not_invalidate_queue() {
     let state = store.queue_state().unwrap();
     std::sync::Arc::make_mut(&mut scan.records[1]).media.title = "Unqueued title".into();
     store.apply_scan(&scan).unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&scan.records[1].path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&scan.records[1].path);
     assert_eq!(store.track(id).unwrap().unwrap().title, "Unqueued title");
     assert_eq!(store.queue_state().unwrap(), state);
     assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
@@ -1196,36 +1146,18 @@ fn batch_source_lookup_preserves_order_and_identity_preference() {
 }
 
 #[test]
-fn source_metadata_prefers_whole_file_and_falls_back_to_cue_identity() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("selected.wav");
-    std::fs::write(&path, []).unwrap();
+fn scanned_fingerprint_survives_fallback_to_cue_identity() {
+    let path = PathBuf::from("/music/selected.wav");
     let store = Store::open(Path::new(":memory:")).unwrap();
     let mut whole = record();
     whole.path = path.clone();
     let whole = std::sync::Arc::new(whole);
-    let segment = CueRecord::registered(
-        whole.clone(),
-        CueSegment {
-            sheet: directory.path().join("album.cue"),
-            number: 1,
-            start_frame: 0,
-            end_frame: Some(4500),
-        },
-        cue_metadata(),
-        Some(60.0),
-    );
-    let mut records = vec![whole];
-    for index in 0..128 {
-        let mut unrelated = record();
-        unrelated.path = directory.path().join(format!("other/{index}.wav"));
-        unrelated.fingerprint = Some(blake3::hash(index.to_string().as_bytes()));
-        records.push(std::sync::Arc::new(unrelated));
-    }
+    let fingerprint = whole.fingerprint.unwrap();
+    let segment = standard_segment(whole.clone());
     assert!(
         store
             .apply_scan(&ScanResult {
-                records,
+                records: vec![whole],
                 segments: vec![segment],
                 ..ScanResult::default()
             })
@@ -1234,9 +1166,10 @@ fn source_metadata_prefers_whole_file_and_falls_back_to_cue_identity() {
     );
     let known = store.known_source(&path).unwrap().unwrap();
     assert!(known.cue.is_none());
+    assert_eq!(known.fingerprint, Some(fingerprint));
     assert!(
         store
-            .known_source(&directory.path().join("missing.wav"))
+            .known_source(Path::new("/music/missing.wav"))
             .unwrap()
             .is_none()
     );
@@ -1265,29 +1198,20 @@ fn tiny_scan_relocates_global_identity_without_touching_unrelated_missing_rows()
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
         .apply_scan(&ScanResult {
-            records: (vec![original.clone(), unrelated.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![
+                std::sync::Arc::new(original.clone()),
+                std::sync::Arc::new(unrelated.clone()),
+            ],
             ..ScanResult::default()
         })
         .unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&old_path))
-        .unwrap()
-        .unwrap();
-    let unrelated_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&unrelated.path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&old_path);
+    let unrelated_id = store.require_file_id(&unrelated.path);
     store.set_favorite(&[id], true).unwrap();
     original.path = requested.join("音楽.wav");
     let scan = ScanResult {
         roots: vec![requested.clone()],
-        records: (vec![original.clone()])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+        records: vec![std::sync::Arc::new(original.clone())],
         ..ScanResult::default()
     };
     assert_eq!(
@@ -1330,36 +1254,24 @@ fn uncertain_global_candidate_and_failed_scan_preserve_existing_identity() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
         .apply_scan(&ScanResult {
-            records: (vec![original.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![std::sync::Arc::new(original.clone())],
             ..ScanResult::default()
         })
         .unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&original.path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&original.path);
     store.enqueue_sources(&[], &[id], None).unwrap();
     let before = store.track(id).unwrap().unwrap();
     let mut replacement = original.clone();
     replacement.path = directory.path().join("new/source.wav");
     let mut scan = ScanResult {
         roots: vec![replacement.path.clone()],
-        records: (vec![replacement.clone()])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+        records: vec![std::sync::Arc::new(replacement.clone())],
         uncertainties: vec![crate::library::ScanUncertainty::File(original.path.clone())],
         ..ScanResult::default()
     };
     assert!(store.apply_scan(&scan).unwrap().changed);
     assert_eq!(store.track(id).unwrap().unwrap(), before);
-    let new_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&replacement.path))
-        .unwrap()
-        .unwrap();
+    let new_id = store.require_file_id(&replacement.path);
     assert_ne!(id, new_id);
     let queue = store.queue_state().unwrap();
     store
@@ -1395,17 +1307,11 @@ fn one_missing_ordinary_source_and_two_new_copies_preserve_old_id_in_either_scan
         original.path = directory.path().join("old/source.wav");
         store
             .apply_scan(&ScanResult {
-                records: (vec![original.clone()])
-                    .into_iter()
-                    .map(std::sync::Arc::new)
-                    .collect(),
+                records: vec![std::sync::Arc::new(original.clone())],
                 ..ScanResult::default()
             })
             .unwrap();
-        let id = store
-            .track_id_for_identity(crate::store::TrackIdentity::File(&original.path))
-            .unwrap()
-            .unwrap();
+        let id = store.require_file_id(&original.path);
         store.set_favorite(&[id], true).unwrap();
         store.enqueue_tracks(&[id]).unwrap();
         let queue_id = store.queue_ids().unwrap()[0];
@@ -1427,14 +1333,8 @@ fn one_missing_ordinary_source_and_two_new_copies_preserve_old_id_in_either_scan
         assert_eq!(retained.path, original.path);
         assert!(retained.favorite);
         assert!(retained.missing);
-        let first_id = store
-            .track_id_for_identity(crate::store::TrackIdentity::File(&first.path))
-            .unwrap()
-            .unwrap();
-        let second_id = store
-            .track_id_for_identity(crate::store::TrackIdentity::File(&second.path))
-            .unwrap()
-            .unwrap();
+        let first_id = store.require_file_id(&first.path);
+        let second_id = store.require_file_id(&second.path);
         assert_ne!(first_id, id);
         assert_ne!(second_id, id);
         assert_ne!(first_id, second_id);
@@ -1457,21 +1357,15 @@ fn two_missing_ordinary_sources_and_one_new_target_preserve_both_source_states()
     second.path = directory.path().join("old/second.wav");
     store
         .apply_scan(&ScanResult {
-            records: (vec![first.clone(), second.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![
+                std::sync::Arc::new(first.clone()),
+                std::sync::Arc::new(second.clone()),
+            ],
             ..ScanResult::default()
         })
         .unwrap();
-    let first_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&first.path))
-        .unwrap()
-        .unwrap();
-    let second_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&second.path))
-        .unwrap()
-        .unwrap();
+    let first_id = store.require_file_id(&first.path);
+    let second_id = store.require_file_id(&second.path);
     store
         .edit_track(first_id, Some("Owned title"), None, None, None, None)
         .unwrap();
@@ -1482,17 +1376,11 @@ fn two_missing_ordinary_sources_and_one_new_target_preserve_both_source_states()
     store
         .apply_scan(&ScanResult {
             roots: vec![directory.path().join("new")],
-            records: (vec![target.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![std::sync::Arc::new(target.clone())],
             ..ScanResult::default()
         })
         .unwrap();
-    let target_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&target.path))
-        .unwrap()
-        .unwrap();
+    let target_id = store.require_file_id(&target.path);
     assert_ne!(target_id, first_id);
     assert_ne!(target_id, second_id);
     assert_eq!(store.track(first_id).unwrap().unwrap().title, "Owned title");
@@ -1522,29 +1410,23 @@ fn exact_ordinary_identities_do_not_count_as_new_relocation_targets() {
     existing.path = directory.path().join("new/existing.wav");
     store
         .apply_scan(&ScanResult {
-            records: (vec![original.clone(), existing.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![
+                std::sync::Arc::new(original.clone()),
+                std::sync::Arc::new(existing.clone()),
+            ],
             ..ScanResult::default()
         })
         .unwrap();
-    let source_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&original.path))
-        .unwrap()
-        .unwrap();
-    let existing_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&existing.path))
-        .unwrap()
-        .unwrap();
+    let source_id = store.require_file_id(&original.path);
+    let existing_id = store.require_file_id(&existing.path);
     original.path = directory.path().join("new/moved.wav");
     store
         .apply_scan(&ScanResult {
             roots: vec![directory.path().join("new")],
-            records: (vec![existing.clone(), original.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![
+                std::sync::Arc::new(existing.clone()),
+                std::sync::Arc::new(original.clone()),
+            ],
             ..ScanResult::default()
         })
         .unwrap();
@@ -1571,27 +1453,18 @@ fn independent_ordinary_identity_is_never_automatically_reassigned_by_later_scan
     original.path = directory.path().join("old/source.wav");
     store
         .apply_scan(&ScanResult {
-            records: (vec![original.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![std::sync::Arc::new(original.clone())],
             ..ScanResult::default()
         })
         .unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&original.path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&original.path);
     store.keep_independent(id).unwrap();
     let mut copy = original.clone();
     copy.path = directory.path().join("new/copy.wav");
     store
         .apply_scan(&ScanResult {
             roots: vec![directory.path().join("new")],
-            records: (vec![copy.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![std::sync::Arc::new(copy.clone())],
             ..ScanResult::default()
         })
         .unwrap();
@@ -1605,10 +1478,10 @@ fn independent_ordinary_identity_is_never_automatically_reassigned_by_later_scan
     assert!(store.track(id).unwrap().unwrap().missing);
     store
         .apply_scan(&ScanResult {
-            records: (vec![original.clone(), copy])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![
+                std::sync::Arc::new(original.clone()),
+                std::sync::Arc::new(copy),
+            ],
             ..ScanResult::default()
         })
         .unwrap();
@@ -1638,17 +1511,14 @@ fn other_check_rechecks_current_membership_and_never_admits_or_relocates() {
     inside.path = "/configured/inside.wav".into();
     store
         .apply_scan(&ScanResult {
-            records: (vec![original.clone(), inside.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![
+                std::sync::Arc::new(original.clone()),
+                std::sync::Arc::new(inside.clone()),
+            ],
             ..Default::default()
         })
         .unwrap();
-    let original_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&original.path))
-        .unwrap()
-        .unwrap();
+    let original_id = store.require_file_id(&original.path);
     let mut unknown = original.clone();
     unknown.path = "/elsewhere/unregistered.wav".into();
     let mut changed = original.clone();
@@ -1656,10 +1526,10 @@ fn other_check_rechecks_current_membership_and_never_admits_or_relocates() {
     changed.media.duration = Some(0.25);
     let mut result = ScanResult {
         roots: vec![inside.path.clone()],
-        records: (vec![changed, unknown.clone()])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+        records: vec![
+            std::sync::Arc::new(changed),
+            std::sync::Arc::new(unknown.clone()),
+        ],
         min_duration_secs: 60,
         ..Default::default()
     };
@@ -1686,20 +1556,14 @@ fn other_check_rechecks_current_membership_and_never_admits_or_relocates() {
         store.track(original_id).unwrap().unwrap().duration,
         Some(0.25)
     );
-    let inside_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&inside.path))
-        .unwrap()
-        .unwrap();
+    let inside_id = store.require_file_id(&inside.path);
     assert!(!store.track(inside_id).unwrap().unwrap().missing);
 
     // Roots changed during preparation: neither metadata nor absence from the
     // old Other scope may affect a source that is now configured.
     let mut stale = ScanResult {
         roots: vec![original.path.clone()],
-        records: (vec![original.clone()])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+        records: vec![std::sync::Arc::new(original.clone())],
         ..Default::default()
     };
     assert!(
@@ -1744,10 +1608,7 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
             ..Default::default()
         })
         .unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&ordinary.path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&ordinary.path);
     let cue_id = store
         .track_id_for_identity(crate::store::TrackIdentity::Cue(
             Path::new("/sheets/registered.cue"),
@@ -1891,25 +1752,32 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
 #[test]
 fn overlapping_scan_scope_preserves_owner_boundaries_and_missing_protections() {
     let store = Store::open(Path::new(":memory:")).unwrap();
+    // The extensionless root is stat-checked when omitted; keep it absent here
+    // rather than depending on the host's /music.
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
     let records: Vec<_> = [
-        "/music",
-        "/music/nested/inside.wav",
-        "/loose.wav",
-        "/musicology/untouched.wav",
-        "/outside/extra.wav",
-        "/music/nested/deleted.wav",
-        "/music/nested/uncertain.wav",
+        "music",
+        "music/nested/inside.wav",
+        "loose.wav",
+        "musicology/untouched.wav",
+        "outside/extra.wav",
+        "music/nested/deleted.wav",
+        "music/nested/uncertain.wav",
     ]
     .into_iter()
     .map(|path| {
         let mut source = record();
-        source.path = path.into();
+        source.path = base.join(path);
         source.fingerprint = None;
         std::sync::Arc::new(source)
     })
     .collect();
-    let sheets = ["/music/nested/album.cue", "/sheets/external.cue"];
-    let segment = |sheet: &str, source| {
+    let sheets = [
+        base.join("music/nested/album.cue"),
+        base.join("sheets/external.cue"),
+    ];
+    let segment = |sheet: &Path, source| {
         CueRecord::registered(
             source,
             CueSegment {
@@ -1926,8 +1794,8 @@ fn overlapping_scan_scope_preserves_owner_boundaries_and_missing_protections() {
         .apply_scan(&ScanResult {
             records: records.clone(),
             segments: vec![
-                segment(sheets[0], records[4].clone()),
-                segment(sheets[1], records[1].clone()),
+                segment(&sheets[0], records[4].clone()),
+                segment(&sheets[1], records[1].clone()),
             ],
             ..Default::default()
         })
@@ -1945,7 +1813,7 @@ fn overlapping_scan_scope_preserves_owner_boundaries_and_missing_protections() {
         .iter()
         .map(|sheet| {
             store
-                .track_id_for_identity(crate::store::TrackIdentity::Cue(Path::new(sheet), 1))
+                .track_id_for_identity(crate::store::TrackIdentity::Cue(sheet, 1))
                 .unwrap()
                 .unwrap()
         })
@@ -1959,12 +1827,16 @@ fn overlapping_scan_scope_preserves_owner_boundaries_and_missing_protections() {
     };
     let inside = refreshed(1);
     let outside = refreshed(4);
-    let roots = vec!["/music/nested".into(), "/music".into(), "/loose.wav".into()];
+    let roots = vec![
+        base.join("music/nested"),
+        base.join("music"),
+        base.join("loose.wav"),
+    ];
     store
         .apply_scan(&ScanResult {
             roots: roots.clone(),
             records: vec![inside.clone(), outside.clone()],
-            segments: vec![segment(sheets[0], outside), segment(sheets[1], inside)],
+            segments: vec![segment(&sheets[0], outside), segment(&sheets[1], inside)],
             uncertainties: vec![crate::library::ScanUncertainty::File(
                 records[6].path.clone(),
             )],
@@ -1995,18 +1867,12 @@ fn overlapping_scan_scope_preserves_owner_boundaries_and_missing_protections() {
 fn import_staging_budget_failure_commits_no_tracks() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let scan = ScanResult {
-        records: (vec![record()])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+        records: vec![std::sync::Arc::new(record())],
         retained_budget: Some(Default::default()),
         ..Default::default()
     };
-    scan.retained_budget
-        .as_ref()
-        .unwrap()
-        .reserve(64 * 1024 * 1024)
-        .unwrap();
+    let budget = scan.retained_budget.as_ref().unwrap();
+    budget.reserve(budget.remaining()).unwrap();
     assert!(
         store
             .apply_scan(&scan)
@@ -2051,10 +1917,7 @@ fn import_scope_json_escaping_is_budgeted_and_failure_releases_workspace() {
         };
         let mut scan = ScanResult {
             roots: vec![format!("/{path}").into()],
-            records: (vec![record()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![std::sync::Arc::new(record())],
             retained_budget: Some(Default::default()),
             ..Default::default()
         };
@@ -2116,7 +1979,7 @@ fn repeated_scan_staging_releases_its_retained_workspace() {
     let (store, mut scan, _) = queued(record());
     scan.retained_budget = Some(Default::default());
     let budget = scan.retained_budget.as_ref().unwrap();
-    budget.reserve(64 * 1024 * 1024 - 8192).unwrap();
+    budget.reserve(budget.remaining() - 8192).unwrap();
     for _ in 0..16 {
         assert!(!store.apply_scan(&scan).unwrap().changed);
         assert_eq!(budget.remaining(), 8192);

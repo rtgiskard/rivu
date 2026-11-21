@@ -1,5 +1,28 @@
 use super::*;
 
+const VALID_MIDI: &[u8] = b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x05\x87\x40\xff\x2f\0";
+
+fn cached_midi_segment(source: std::sync::Arc<ScanRecord>, sheet: &Path) -> CueRecord {
+    CueRecord::registered(
+        source,
+        CueSegment {
+            sheet: sheet.to_path_buf(),
+            number: 1,
+            start_frame: 0,
+            end_frame: None,
+        },
+        RegisteredCueMetadata {
+            title: "Cached segment".into(),
+            artist: "Cached artist".into(),
+            album: String::new(),
+            track_number: Some(1),
+            disc_number: None,
+            release_date: None,
+        },
+        Some(1.0),
+    )
+}
+
 fn cached_midi_source(path: &Path) -> Result<std::sync::Arc<ScanRecord>> {
     let metadata = fs::metadata(path)?;
     Ok(std::sync::Arc::new(ScanRecord {
@@ -33,10 +56,7 @@ fn midi_warm_cache_matches_build_capability_for_ordinary_and_cue_admission() -> 
     let root = directory.path().to_path_buf();
     let source = root.join("source.mid");
     let sheet = root.join("album.cue");
-    fs::write(
-        &source,
-        b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x05\x87\x40\xff\x2f\0",
-    )?;
+    fs::write(&source, VALID_MIDI)?;
     fs::write(
         &sheet,
         "FILE \"source.mid\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n",
@@ -46,24 +66,7 @@ fn midi_warm_cache_matches_build_capability_for_ordinary_and_cue_admission() -> 
     store.apply_scan(&ScanResult {
         roots: vec![root],
         records: vec![cached.clone()],
-        segments: vec![CueRecord::registered(
-            cached.clone(),
-            CueSegment {
-                sheet: sheet.clone(),
-                number: 1,
-                start_frame: 0,
-                end_frame: None,
-            },
-            RegisteredCueMetadata {
-                title: "Cached segment".into(),
-                artist: "Cached artist".into(),
-                album: String::new(),
-                track_number: Some(1),
-                disc_number: None,
-                release_date: None,
-            },
-            Some(1.0),
-        )],
+        segments: vec![cached_midi_segment(cached.clone(), &sheet)],
         ..ScanResult::default()
     })?;
     let ids = [
@@ -121,10 +124,7 @@ fn version_four_midi_cache_revalidates_ports_without_losing_fingerprints() -> Re
     let valid = root.join("valid.mid");
     let invalid = root.join("multiport.mid");
     let sheet = root.join("multiport.cue");
-    fs::write(
-        &valid,
-        b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x05\x87\x40\xff\x2f\0",
-    )?;
+    fs::write(&valid, VALID_MIDI)?;
     fs::write(
         &invalid,
         b"MThd\0\0\0\x06\0\x01\0\x02\x01\xe0\
@@ -141,24 +141,7 @@ fn version_four_midi_cache_revalidates_ports_without_losing_fingerprints() -> Re
     store.apply_scan(&ScanResult {
         roots: vec![root],
         records: records.clone(),
-        segments: vec![CueRecord::registered(
-            records[1].clone(),
-            CueSegment {
-                sheet: sheet.clone(),
-                number: 1,
-                start_frame: 0,
-                end_frame: None,
-            },
-            RegisteredCueMetadata {
-                title: "Cached segment".into(),
-                artist: "Cached artist".into(),
-                album: String::new(),
-                track_number: Some(1),
-                disc_number: None,
-                release_date: None,
-            },
-            Some(1.0),
-        )],
+        segments: vec![cached_midi_segment(records[1].clone(), &sheet)],
         ..ScanResult::default()
     })?;
     // Version 4 admitted multiport MIDI before port validation was introduced.
@@ -412,9 +395,7 @@ fn replaygain_rescan_reloads_file_tags_after_database_edits_with_current_queue()
         }
         let store = crate::store::Store::open(Path::new(":memory:"))?;
         store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-        let id = store
-            .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
-            .unwrap();
+        let id = store.require_file_id(&audio);
         store.enqueue_tracks(&[id])?;
         let entry = store.queue_page(None, 0, 10)?.rows[0].id;
         store.set_queue_current(Some(entry))?;
@@ -708,6 +689,9 @@ fn oversized_scan_cue_is_a_local_error_preserving_owned_tracks() -> Result<()> {
 #[cfg(unix)]
 #[test]
 fn scan_rejects_fifo_sheets_before_or_after_discovery_without_losing_owned_tracks() -> Result<()> {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(30)) {
+        return Ok(());
+    }
     for (replace_after_discovery, explicit_sheet) in [(false, false), (false, true), (true, false)]
     {
         let StoredCue {
@@ -720,31 +704,19 @@ fn scan_rejects_fifo_sheets_before_or_after_discovery_without_losing_owned_track
         } = stored_two_track_cue()?;
         let replace = |sheet: &Path| {
             fs::remove_file(sheet).unwrap();
-            let name = std::ffi::CString::new(sheet.as_os_str().as_encoded_bytes()).unwrap();
-            // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
-            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            make_fifo(sheet);
         };
         if !replace_after_discovery {
             replace(&sheet);
         }
         let requested = if explicit_sheet { sheet.clone() } else { root };
-        let worker_sheet = sheet.clone();
-        let (completed, receive) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let result =
-                scan_paths_at_depth(&[requested], &[], false, 1, |phase, processed, _, _, _| {
-                    if replace_after_discovery
-                        && phase == ScanPhase::ReadingMetadata
-                        && processed == 0
-                    {
-                        replace(&worker_sheet);
-                    }
-                });
-            completed.send(result).unwrap();
-        });
-        // Do not join on timeout: a regression must fail rather than hang the suite.
-        let result = receive.recv_timeout(Duration::from_secs(2))??;
-        worker.join().unwrap();
+        let result =
+            scan_paths_at_depth(&[requested], &[], false, 1, |phase, processed, _, _, _| {
+                if replace_after_discovery && phase == ScanPhase::ReadingMetadata && processed == 0
+                {
+                    replace(&sheet);
+                }
+            })?;
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.uncertainties, [ScanUncertainty::CueSheet(sheet)]);
         store.apply_scan(&result)?;
@@ -756,8 +728,12 @@ fn scan_rejects_fifo_sheets_before_or_after_discovery_without_losing_owned_track
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(60)) {
+        return Ok(());
+    }
     for enabled in [false, true] {
         for replace_after_discovery in [false, true] {
             let directory = tempfile::tempdir()?;
@@ -783,9 +759,7 @@ fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> 
             ];
             let replace = |path: &Path| {
                 fs::remove_file(path).unwrap();
-                let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
-                // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
-                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                make_fifo(path);
             };
             if !replace_after_discovery {
                 replace(&audio);
@@ -795,39 +769,27 @@ fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> 
                 source.size = metadata.len();
                 source.modified_ns = cache_modified_ns(metadata.modified().ok());
             }
-            let worker_audio = audio.clone();
-            let worker_root = root.clone();
-            let (completed, receive) = std::sync::mpsc::channel();
-            let worker = std::thread::spawn(move || {
-                let run = || -> Result<(ScanResult, ScanResult, bool)> {
-                    let mut terminal = false;
-                    let result = scan_paths_at_depth(
-                        std::slice::from_ref(&worker_root),
-                        &known,
-                        enabled,
-                        1,
-                        |phase, processed, total, _, path| {
-                            if replace_after_discovery
-                                && phase == ScanPhase::ReadingMetadata
-                                && processed == 0
-                            {
-                                replace(&worker_audio);
-                            }
-                            terminal |= phase == ScanPhase::ReadingMetadata
-                                && total == Some(processed)
-                                && path.is_none();
-                        },
-                    )?;
-                    fs::remove_file(&worker_audio)?;
-                    wav(&worker_audio, 225)?;
-                    let next = scan_paths(&[worker_root], &known, enabled)?;
-                    Ok((result, next, terminal))
-                };
-                completed.send(run()).unwrap();
-            });
-            // Do not join on timeout: an unopened FIFO must never hang the suite.
-            let (result, next, terminal) = receive.recv_timeout(Duration::from_secs(5))??;
-            worker.join().unwrap();
+            let mut terminal = false;
+            let result = scan_paths_at_depth(
+                std::slice::from_ref(&root),
+                &known,
+                enabled,
+                1,
+                |phase, processed, total, _, path| {
+                    if replace_after_discovery
+                        && phase == ScanPhase::ReadingMetadata
+                        && processed == 0
+                    {
+                        replace(&audio);
+                    }
+                    terminal |= phase == ScanPhase::ReadingMetadata
+                        && total == Some(processed)
+                        && path.is_none();
+                },
+            )?;
+            fs::remove_file(&audio)?;
+            wav(&audio, 225)?;
+            let next = scan_paths(std::slice::from_ref(&root), &known, enabled)?;
             assert!(terminal);
             assert!(!result.errors.is_empty());
             assert_eq!(result.track_count(), 1);
@@ -854,6 +816,9 @@ fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> 
 #[cfg(unix)]
 #[test]
 fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> Result<()> {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(120)) {
+        return Ok(());
+    }
     for enabled in [false, true] {
         for replacement in ["fifo", "linked-fifo", "linked-device"] {
             for explicit in [false, true] {
@@ -869,33 +834,22 @@ fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> 
                     let mut known = known_records(&baseline);
                     let store = crate::store::Store::open(Path::new(":memory:"))?;
                     store.apply_scan(&baseline)?;
-                    let id = store
-                        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
-                        .unwrap();
-                    let deleted_id = store
-                        .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
-                        .unwrap();
+                    let id = store.require_file_id(&audio);
+                    let deleted_id = store.require_file_id(&deleted);
                     store.set_favorite(&[id], true)?;
                     store.edit_track(id, Some("Kept title"), None, None, None, None)?;
                     fs::remove_file(&deleted)?;
                     wav(&good, 75)?;
-                    let replace = move |path: &Path| {
+                    let replace = |path: &Path| {
                         fs::remove_file(path).unwrap();
                         if replacement == "linked-device" {
                             std::os::unix::fs::symlink("/dev/null", path).unwrap();
+                        } else if replacement == "fifo" {
+                            make_fifo(path);
                         } else {
-                            let fifo = if replacement == "fifo" {
-                                path.to_path_buf()
-                            } else {
-                                path.with_file_name("pipe")
-                            };
-                            let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes())
-                                .unwrap();
-                            // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
-                            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-                            if replacement == "linked-fifo" {
-                                std::os::unix::fs::symlink(fifo, path).unwrap();
-                            }
+                            let fifo = path.with_file_name("pipe");
+                            make_fifo(&fifo);
+                            std::os::unix::fs::symlink(fifo, path).unwrap();
                         }
                     };
                     if !replace_after_discovery {
@@ -912,34 +866,24 @@ fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> 
                     } else {
                         vec![root]
                     };
-                    let worker_audio = audio.clone();
-                    let (completed, receive) = std::sync::mpsc::channel();
-                    let worker = std::thread::spawn(move || {
-                        let mut terminal = false;
-                        let result = scan_paths_at_depth(
-                            &requested,
-                            &known,
-                            enabled,
-                            1,
-                            |phase, processed, total, _, path| {
-                                if replace_after_discovery
-                                    && phase == ScanPhase::ReadingMetadata
-                                    && processed == 0
-                                {
-                                    replace(&worker_audio);
-                                }
-                                terminal |= phase == ScanPhase::ReadingMetadata
-                                    && total == Some(processed)
-                                    && path.is_none();
-                            },
-                        );
-                        completed
-                            .send(result.map(|result| (result, terminal)))
-                            .unwrap();
-                    });
-                    // A nonregular source must fail, never wait for a FIFO writer.
-                    let (result, terminal) = receive.recv_timeout(Duration::from_secs(5))??;
-                    worker.join().unwrap();
+                    let mut terminal = false;
+                    let result = scan_paths_at_depth(
+                        &requested,
+                        &known,
+                        enabled,
+                        1,
+                        |phase, processed, total, _, path| {
+                            if replace_after_discovery
+                                && phase == ScanPhase::ReadingMetadata
+                                && processed == 0
+                            {
+                                replace(&audio);
+                            }
+                            terminal |= phase == ScanPhase::ReadingMetadata
+                                && total == Some(processed)
+                                && path.is_none();
+                        },
+                    )?;
                     assert!(terminal);
                     assert_eq!(result.errors.len(), if explicit { 2 } else { 1 });
                     assert_eq!(result.uncertainties, [ScanUncertainty::File(audio.clone())]);
@@ -987,9 +931,7 @@ fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<(
             wav(&deleted, 150)?;
             let store = crate::store::Store::open(Path::new(":memory:"))?;
             store.apply_scan(&scan_paths(std::slice::from_ref(&good_root), &[], false)?)?;
-            let deleted_id = store
-                .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
-                .unwrap();
+            let deleted_id = store.require_file_id(&deleted);
             fs::remove_file(&deleted)?;
             let good = good_root.join("good.wav");
             wav(&good, 75)?;
@@ -1051,9 +993,7 @@ fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<(
             assert!(events.windows(2).all(|pair| pair[0].3 <= pair[1].3));
             store.apply_scan(&result)?;
             assert!(store.track(deleted_id)?.unwrap().missing);
-            let good_id = store
-                .track_id_for_identity(crate::store::TrackIdentity::File(&good))?
-                .unwrap();
+            let good_id = store.require_file_id(&good);
             assert!(!store.track(good_id)?.unwrap().missing);
             store.remove_missing_tracks()?;
             assert_eq!(store.track_count()?, 1);
@@ -1075,9 +1015,7 @@ fn invalid_only_scopes_finish_without_coverage_and_honor_cancellation() -> Resul
     wav(&good, 75)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&good))?
-        .unwrap();
+    let id = store.require_file_id(&good);
     let mut events = Vec::new();
     let result = crate::library::scan_paths(
         std::slice::from_ref(&bad),
@@ -1139,12 +1077,8 @@ fn failed_audio_probe_is_not_missing_or_cleanable_but_true_deletion_is() -> Resu
     wav(&deleted, 150)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
-        .unwrap();
-    let deleted_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
-        .unwrap();
+    let id = store.require_file_id(&audio);
+    let deleted_id = store.require_file_id(&deleted);
     store.set_favorite(&[id], true)?;
     store.edit_track(id, Some("Kept title"), None, None, None, None)?;
     fs::write(&audio, b"not audio")?;
@@ -1175,9 +1109,7 @@ fn discovered_file_not_found_is_uncertain_until_a_later_explicit_request() -> Re
     wav(&audio, 150)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
-        .unwrap();
+    let id = store.require_file_id(&audio);
     let failed = scan_paths_at_depth(
         std::slice::from_ref(&root),
         &[],
@@ -1261,9 +1193,7 @@ fn non_utf8_cue_name_does_not_prevent_valid_audio_from_being_saved() -> Result<(
     store.apply_scan(&scan)?;
     assert_eq!(store.track_count()?, 2);
     for path in [audio, unrelated] {
-        let id = store
-            .track_id_for_identity(crate::store::TrackIdentity::File(&path))?
-            .unwrap();
+        let id = store.require_file_id(&path);
         assert!(!store.track(id)?.unwrap().missing);
     }
     Ok(())
@@ -1291,9 +1221,7 @@ fn forced_scan_isolates_non_utf8_audio_and_persists_valid_tracks() -> Result<()>
     assert_eq!(forced.records[0].path, good);
     store.apply_scan(&forced)?;
     assert_eq!(store.track_count()?, 1);
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&good))?
-        .unwrap();
+    let id = store.require_file_id(&good);
     assert!(!store.track(id)?.unwrap().missing);
     Ok(())
 }
@@ -1307,9 +1235,7 @@ fn failed_cue_source_not_found_keeps_segments_until_the_sheet_is_deleted() -> Re
     two_track_sheet(&sheet)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&sheet), &[], false)?)?;
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
-        .unwrap();
+    let id = store.require_cue_id(&sheet, 1);
     fs::remove_file(&audio)?;
     let failed = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
     assert!(failed.track_count() == 0);
@@ -1346,15 +1272,9 @@ fn traversal_not_found_preserves_the_failed_subtree_and_its_identities() -> Resu
     wav(&deleted, 150)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(&[root.clone(), audio.clone()], &[], false)?)?;
-    let audio_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
-        .unwrap();
-    let cue_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::Cue(&sheet, 1))?
-        .unwrap();
-    let deleted_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&deleted))?
-        .unwrap();
+    let audio_id = store.require_file_id(&audio);
+    let cue_id = store.require_cue_id(&sheet, 1);
+    let deleted_id = store.require_file_id(&deleted);
     store.set_favorite(&[audio_id, cue_id], true)?;
     let copy = root.join("copy.wav");
     fs::copy(&audio, &copy)?;
@@ -1397,9 +1317,7 @@ fn failed_requested_root_metadata_is_uncertain_not_deleted() -> Result<()> {
     wav(&audio, 150)?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
-        .unwrap();
+    let id = store.require_file_id(&audio);
     fs::rename(&root, directory.path().join("moved"))?;
     std::os::unix::fs::symlink(&root, &root)?;
     let failed = scan_paths(std::slice::from_ref(&root), &[], false)?;
@@ -1432,9 +1350,7 @@ fn nested_scan_keeps_its_own_excluded_identity_and_user_data() -> Result<()> {
     )?;
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&baseline)?;
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&deep))?
-        .unwrap();
+    let id = store.require_file_id(&deep);
     store.set_favorite(&[id], true)?;
     store.edit_track(id, Some("Kept title"), None, None, None, None)?;
     let copy = nested.join("copy.wav");
@@ -1469,9 +1385,7 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
     assert_eq!(original.records[0].modified_ns, -2_000_000_000);
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&original)?;
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&audio))?
-        .unwrap();
+    let id = store.require_file_id(&audio);
     let known = vec![(audio.clone(), store.known_source(&audio)?.unwrap())];
     assert_eq!(known[0].1.modified_ns, -2_000_000_000);
 
@@ -1522,7 +1436,6 @@ fn cue_missing_source_and_out_of_bounds_fail_atomically() -> Result<()> {
         let result = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         assert!(result.track_count() == 0);
         assert_eq!(result.errors.len(), 1);
-        assert!(result.tracks().all(|track| !track.duration_filter_exempt));
         let directory_scan = scan_paths(&[directory.path().to_path_buf()], &[], false)?;
         assert_eq!(directory_scan.track_count(), 1);
         assert!(
@@ -1575,18 +1488,11 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
         )
         .await?;
         store.apply_scan(&imported)?;
-        let ids: Vec<_> = prepared
-            .items
-            .iter()
-            .map(|item| {
-                store
-                    .track_id_for_identity(match item.cue_track {
-                        Some(number) => crate::store::TrackIdentity::Cue(&item.path, number),
-                        None => crate::store::TrackIdentity::File(&item.path),
-                    })
-                    .map(Option::unwrap)
-            })
-            .collect::<Result<_>>()?;
+        let ids = store.imported_track_ids(&imported, &prepared.items)?;
+        assert_eq!(ids.len(), 2);
+        for (id, number) in ids.iter().zip([1, 2]) {
+            assert_eq!(store.track(*id)?.unwrap().cue.unwrap().number, number);
+        }
         store.set_favorite(&[ids[0]], true)?;
         store.edit_track(ids[0], Some("Personal"), None, None, None, None)?;
         store.enqueue_tracks(&ids)?;
@@ -1653,9 +1559,7 @@ fn cue_import_rescan_relocation_and_copy_preserve_independent_user_state() -> Re
             )
             .await?,
         )?;
-        let copy_id = store
-            .track_id_for_identity(crate::store::TrackIdentity::Cue(&copy.join("album.cue"), 1))?
-            .unwrap();
+        let copy_id = store.require_cue_id(&copy.join("album.cue"), 1);
         assert_ne!(copy_id, ids[0]);
         assert!(!store.track(copy_id)?.unwrap().favorite);
         assert_eq!(store.track(copy_id)?.unwrap().title, "New raw title");

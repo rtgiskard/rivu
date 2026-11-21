@@ -97,7 +97,7 @@ pub(crate) struct ImportSheets {
 #[cfg(test)]
 pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
     let workers = &BlockingExecutor::new(4);
-    Ok(test_io(prepare_playlist_import(
+    Ok(futures::executor::block_on(prepare_playlist_import(
         workers,
         path,
         &ScanCancellation::default(),
@@ -110,7 +110,7 @@ pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
 #[cfg(test)]
 pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
     let workers = &BlockingExecutor::new(4);
-    Ok(test_io(prepare_import(
+    Ok(futures::executor::block_on(prepare_import(
         workers,
         path,
         false,
@@ -118,11 +118,6 @@ pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
         None,
     ))?
     .items)
-}
-
-#[cfg(test)]
-fn test_io<T>(future: impl Future<Output = T>) -> T {
-    futures::executor::block_on(future)
 }
 
 pub(crate) async fn prepare_playlist_import(
@@ -746,6 +741,38 @@ mod tests {
             unique_import_sources(&paths, &budget, &ScanCancellation::default()).unwrap_err();
         assert!(super::super::import_budget::ImportBudget::is_limit(&error));
         assert_eq!(budget.remaining(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn export_cancelled_after_last_row_preserves_existing_destination() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("playlist.m3u8");
+        let original = b"original\n";
+        std::fs::write(&destination, original)?;
+        let cancellation = ScanCancellation::default();
+        let final_check = cancellation.clone();
+        let track = PlaylistExportTrack {
+            path: directory.path().join("song.wav"),
+            title: "Song".into(),
+            artist: String::new(),
+            duration: None,
+            cue: None,
+        };
+        let tracks = std::iter::once(Ok(track)).chain(std::iter::from_fn(move || {
+            final_check.cancel();
+            None
+        }));
+        let error = futures::executor::block_on(export_m3u(
+            &BlockingExecutor::new(1),
+            &destination,
+            futures::stream::iter(tracks),
+            &cancellation,
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("scan cancelled"), "{error:#}");
+        assert_eq!(std::fs::read(&destination)?, original);
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
         Ok(())
     }
 

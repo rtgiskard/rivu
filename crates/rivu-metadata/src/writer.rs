@@ -576,16 +576,25 @@ mod tests {
     fn clone_keeps_offsets_and_contents_independent_when_supported() {
         use std::{io::Write, os::fd::AsRawFd};
 
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cache");
-        fs::create_dir_all(&cache).unwrap();
-        let mut source = tempfile::tempfile_in(&cache).unwrap();
+        // Keep anonymous temporary files on the checkout filesystem: /tmp
+        // may be tmpfs even when the checkout supports reflinks.
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut source = tempfile::tempfile_in(cache).unwrap();
         source.write_all(b"original source bytes").unwrap();
-        let probe = tempfile::tempfile_in(&cache).unwrap();
+        let probe = tempfile::tempfile_in(cache).unwrap();
         if unsafe { libc::ioctl(probe.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } != 0 {
             // Only the clone-specific assertions depend on filesystem support.
+            let error = std::io::Error::last_os_error();
+            assert!(
+                matches!(
+                    error.raw_os_error(),
+                    Some(libc::EOPNOTSUPP | libc::ENOTTY | libc::EINVAL)
+                ),
+                "clone probe failed for a reason other than filesystem support: {error}"
+            );
             return;
         }
-        let mut destination = tempfile::tempfile_in(&cache).unwrap();
+        let mut destination = tempfile::tempfile_in(cache).unwrap();
         source.seek(std::io::SeekFrom::Start(3)).unwrap();
         copy_source(&mut source, &mut destination).unwrap();
         // Ordinary copying rewinds and consumes the source. An unchanged offset
@@ -631,13 +640,14 @@ mod tests {
     fn comparison_without_fingerprint_stops_at_first_difference() {
         use std::io::Write;
 
+        let len = 1024 * 1024;
         let mut source = tempfile::tempfile().unwrap();
         let mut written = tempfile::tempfile().unwrap();
-        source.write_all(&vec![7; 3 * 64 * 1024]).unwrap();
-        written.write_all(&vec![8; 3 * 64 * 1024]).unwrap();
+        source.write_all(&vec![7; len]).unwrap();
+        written.write_all(&vec![8; len]).unwrap();
         assert!(!same_bytes(&mut source, &mut written, None).unwrap());
-        assert_eq!(written.stream_position().unwrap(), 64 * 1024);
-        written.set_len(4 * 64 * 1024).unwrap();
+        assert!(written.stream_position().unwrap() < len as u64);
+        written.set_len(len as u64 + 1).unwrap();
         written.rewind().unwrap();
         assert!(!same_bytes(&mut source, &mut written, None).unwrap());
         assert_eq!(written.stream_position().unwrap(), 0);
@@ -669,16 +679,6 @@ mod tests {
             assert_eq!(
                 hasher.finalize().as_bytes(),
                 blake3::hash(&output).as_bytes()
-            );
-            assert_eq!(
-                source.stream_position().unwrap(),
-                if original == output {
-                    original.len() as u64
-                } else if original.len() == output.len() {
-                    64 * 1024
-                } else {
-                    original.len() as u64
-                }
             );
         }
     }

@@ -783,34 +783,6 @@ mod deletion_tests {
     }
 
     #[test]
-    fn page_and_batch_decode_identical_track_fields_and_matching_offsets() -> Result<()> {
-        let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute_batch(
-            "INSERT INTO tracks(id,path,title,artist,album,duration,
-                codec,channels,sample_rate,bits_per_sample,bitrate_bps,bitrate_exact,favorite,missing)
-             VALUES (1,'/audio.flac','Needle','artist','album',12.5,'flac',2,96000,24,123456,1,1,1),
-                    (2,'/other.wav','other','','',1.0,'pcm',1,8000,16,NULL,0,0,0);
-             INSERT INTO playlists(id,name) VALUES(1,'decoder');
-             INSERT INTO playlist_entries(id,playlist_id,track_id,position)
-                VALUES (10,1,2,0),(11,1,1,1),(12,1,1,2);",
-        )?;
-        for query in [None, Some("needle")] {
-            let page = store.playlist_entries_page(1, query, 0, 10)?;
-            let first = store.playlist_entry_batch(1, query, None, 1, QueryStamp::default())?;
-            let mut rows = first.rows;
-            let mut after = first.next;
-            while after.is_some() {
-                let next = store.playlist_entry_batch(1, query, after, 1, QueryStamp::default())?;
-                rows.extend(next.rows);
-                after = next.next;
-            }
-            assert_eq!(rows, page.rows);
-            assert_eq!(page.total, rows.len());
-        }
-        Ok(())
-    }
-
-    #[test]
     fn playlist_entry_location_tracks_reorder_and_deletion_by_identity() -> Result<()> {
         let store = stored_playlist_entries()?;
         assert_eq!(
@@ -1459,48 +1431,6 @@ mod group_tests {
     }
 
     #[test]
-    fn all_after_selection_shapes_match_stable_remove_then_insert_order() -> Result<()> {
-        let original: Vec<i64> = (100..106).collect();
-        for mask in 0..64 {
-            let selected: Vec<_> = original
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|(index, _)| mask & (1 << index) != 0)
-                .map(|(_, id)| id)
-                .collect();
-            for target in original.iter().copied().map(Some).chain([None]) {
-                let store = fixture()?;
-                let mut expected = original.clone();
-                if !target.is_some_and(|id| selected.contains(&id)) {
-                    expected.retain(|id| !selected.contains(id));
-                    let insertion = target.map_or(expected.len(), |id| {
-                        expected.iter().position(|&entry| entry == id).unwrap() + 1
-                    });
-                    expected.splice(insertion..insertion, selected.iter().copied());
-                }
-                let submitted: Vec<_> = selected
-                    .iter()
-                    .rev()
-                    .copied()
-                    .chain(selected.iter().copied())
-                    .collect();
-                assert_eq!(
-                    store.move_playlist_entries(10, &submitted, target, true)?,
-                    expected != original
-                );
-                assert_eq!(
-                    order(&store, 10)?,
-                    expected,
-                    "mask={mask}, target={target:?}"
-                );
-                assert_eq!(order(&store, 20)?, [200]);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
     fn all_selection_shapes_match_stable_remove_then_insert_order() -> Result<()> {
         let original: Vec<i64> = (100..106).collect();
         for mask in 0..64 {
@@ -1511,28 +1441,31 @@ mod group_tests {
                 .filter(|(index, _)| mask & (1 << index) != 0)
                 .map(|(_, id)| id)
                 .collect();
-            for target in original.iter().copied().map(Some).chain([None]) {
-                let store = fixture()?;
-                let mut expected = original.clone();
-                if !target.is_some_and(|id| selected.contains(&id)) {
-                    expected.retain(|id| !selected.contains(id));
-                    let insertion = target.map_or(expected.len(), |id| {
-                        expected.iter().position(|&entry| entry == id).unwrap()
-                    });
-                    expected.splice(insertion..insertion, selected.iter().copied());
+            for after in [false, true] {
+                for target in original.iter().copied().map(Some).chain([None]) {
+                    let store = fixture()?;
+                    let mut expected = original.clone();
+                    if !target.is_some_and(|id| selected.contains(&id)) {
+                        expected.retain(|id| !selected.contains(id));
+                        let insertion = target.map_or(expected.len(), |id| {
+                            expected.iter().position(|&entry| entry == id).unwrap()
+                                + usize::from(after)
+                        });
+                        expected.splice(insertion..insertion, selected.iter().copied());
+                    }
+                    let mut submitted: Vec<_> = selected.iter().rev().copied().collect();
+                    submitted.extend_from_slice(&selected);
+                    assert_eq!(
+                        store.move_playlist_entries(10, &submitted, target, after)?,
+                        expected != original
+                    );
+                    assert_eq!(
+                        order(&store, 10)?,
+                        expected,
+                        "mask={mask}, target={target:?}, after={after}"
+                    );
+                    assert_eq!(order(&store, 20)?, [200]);
                 }
-                let mut submitted: Vec<_> = selected.iter().rev().copied().collect();
-                submitted.extend_from_slice(&selected);
-                assert_eq!(
-                    store.move_playlist_entries(10, &submitted, target, false)?,
-                    expected != original
-                );
-                assert_eq!(
-                    order(&store, 10)?,
-                    expected,
-                    "mask={mask}, target={target:?}"
-                );
-                assert_eq!(order(&store, 20)?, [200]);
             }
         }
         Ok(())

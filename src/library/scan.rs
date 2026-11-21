@@ -963,6 +963,45 @@ fn cue_records(
 const DIRECTORY_BATCH_SIZE: usize = 64;
 
 #[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    #[test]
+    fn uncertainty_overflow_alone_marks_the_scan_incomplete() {
+        let mut result = ScanResult::default();
+        for index in 0..MAX_RECORDED_SCAN_UNCERTAINTIES {
+            result.push_uncertainty(ScanUncertainty::File(PathBuf::from(format!("/{index}"))));
+        }
+        result.push_uncertainty(ScanUncertainty::File(PathBuf::from("/0")));
+        assert!(!result.scan_incomplete, "a duplicate is not an overflow");
+        result.push_uncertainty(ScanUncertainty::File(PathBuf::from("/overflow")));
+        assert_eq!(result.uncertainties.len(), MAX_RECORDED_SCAN_UNCERTAINTIES);
+        assert!(result.scan_incomplete);
+    }
+
+    #[test]
+    fn skipped_directory_overflow_alone_marks_the_scan_incomplete() {
+        let mut result = ScanResult {
+            roots: vec![PathBuf::from("/root")],
+            ..ScanResult::default()
+        };
+        for index in 0..MAX_RECORDED_SKIPPED_DIRECTORIES {
+            assert!(result.push_skipped_directory(0, Path::new(&format!("/root/{index}"))));
+        }
+        assert!(!result.push_skipped_directory(0, Path::new("/root/0")));
+        assert!(!result.scan_incomplete, "a duplicate is not an overflow");
+        assert!(!result.push_skipped_directory(0, Path::new("/root/overflow")));
+        assert_eq!(
+            result.skipped_directories.len(),
+            MAX_RECORDED_SKIPPED_DIRECTORIES
+        );
+        assert!(result.skipped_directories_truncated);
+        assert!(result.scan_incomplete);
+        assert!(result.errors.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod recheck_tests {
     use super::super::source::cache_modified_ns;
     use super::*;
@@ -1087,20 +1126,13 @@ mod recheck_tests {
             let mut paths = Vec::new();
             for value in [123_i16, 456_i16] {
                 let path = directory.path().join(format!("{value}.wav"));
-                let mut writer = hound::WavWriter::create(
+                rivu_audio::test_support::write_i16_wav(
                     &path,
-                    hound::WavSpec {
-                        channels: 1,
-                        sample_rate: 8000,
-                        bits_per_sample: 16,
-                        sample_format: hound::SampleFormat::Int,
-                    },
+                    1,
+                    8000,
+                    std::iter::repeat_n(value, 150_000),
                 )
                 .unwrap();
-                for _ in 0..150_000 {
-                    writer.write_sample(value).unwrap();
-                }
-                writer.finalize().unwrap();
                 paths.push(path);
             }
             let result = recheck_sources(
@@ -1114,7 +1146,8 @@ mod recheck_tests {
             .await
             .unwrap();
             assert!(result.errors.is_empty(), "{:?}", result.errors);
-            assert_eq!(result.records.len(), paths.len());
+            let returned: Vec<_> = result.records.iter().map(|record| &record.path).collect();
+            assert_eq!(returned, paths.iter().collect::<Vec<_>>());
             for record in result.records {
                 let expected = blake3::hash(&fs::read(&record.path).unwrap());
                 assert_eq!(record.fingerprint, Some(expected));
@@ -1123,7 +1156,7 @@ mod recheck_tests {
     }
 
     #[test]
-    fn exact_recheck_preserves_probe_failures_and_observes_cancellation_after_lookup() {
+    fn exact_recheck_reports_lookup_failures_and_observes_cancellation_after_lookup() {
         futures::executor::block_on(async {
             let workers = &BlockingExecutor::new(4);
             let directory = tempfile::tempdir().unwrap();
@@ -1132,7 +1165,7 @@ mod recheck_tests {
             let failed = recheck_sources(
                 workers,
                 std::slice::from_ref(&path),
-                |_| std::future::ready(Err(anyhow!(std::io::ErrorKind::PermissionDenied))),
+                |_| std::future::ready(Err(anyhow!("injected lookup failure"))),
                 false,
                 &ScanCancellation::default(),
                 |_, _, _, _, _| {},
@@ -1141,7 +1174,10 @@ mod recheck_tests {
             .unwrap();
             assert!(failed.records.is_empty());
             assert!(failed.roots.is_empty());
-            assert_eq!(failed.errors.len(), 1);
+            assert_eq!(
+                failed.errors,
+                [format!("{}: injected lookup failure", path.display())]
+            );
             let cancellation = ScanCancellation::default();
             let cancelled = recheck_sources(
                 workers,

@@ -15,7 +15,13 @@ fn maintenance_retries_after_reader_releases_and_keeps_records() {
         .unwrap();
     store.mark_played(id, 42).unwrap();
     store.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
-    assert!(store.optimize().is_err());
+    let error = store.optimize().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("checkpoint blocked by another reader"),
+        "{error:#}"
+    );
     reader.execute_batch("ROLLBACK").unwrap();
     drop(reader);
     drop(store);

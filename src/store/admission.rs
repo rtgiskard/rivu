@@ -308,22 +308,6 @@ mod tests {
                         .1
                 }
             };
-            let history_values = || {
-                store
-                    .history(10)
-                    .unwrap()
-                    .into_iter()
-                    .map(|entry| {
-                        (
-                            entry.track_id,
-                            entry.title,
-                            entry.play_count,
-                            entry.played_at,
-                            entry.favorite,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            };
             let mut source = record("/history.wav");
             assert!(!apply(source.clone()).history);
             let id = store
@@ -334,7 +318,7 @@ mod tests {
             assert!(!apply(source.clone()).history);
             assert!(store.history(10).unwrap().is_empty());
             store.mark_played(id, 42).unwrap();
-            let history = history_values();
+            let history = crate::store::tests::history_values(&store);
             source.size += 1;
             source.modified_ns += 1;
             source.media.codec = "flac".into();
@@ -342,17 +326,17 @@ mod tests {
             let technical = apply(source.clone());
             assert!(technical.library);
             assert!(!technical.history);
-            assert_eq!(history_values(), history);
+            assert_eq!(crate::store::tests::history_values(&store), history);
             source.media.title = "Played title".into();
             assert!(apply(source.clone()).history);
             assert_eq!(store.history(10).unwrap()[0].title, "Played title");
             store
                 .edit_track(id, Some("Personal title"), None, None, None, None)
                 .unwrap();
-            let overridden = history_values();
+            let overridden = crate::store::tests::history_values(&store);
             source.media.title = "Refreshed title".into();
             assert!(apply(source).history);
-            assert_ne!(history_values(), overridden);
+            assert_ne!(crate::store::tests::history_values(&store), overridden);
             assert_eq!(store.history(10).unwrap()[0].title, "Refreshed title");
         }
     }
@@ -524,10 +508,7 @@ mod tests {
         store
             .apply_scan(&ScanResult {
                 segments: vec![cue],
-                records: (vec![ordinary, absent])
-                    .into_iter()
-                    .map(std::sync::Arc::new)
-                    .collect(),
+                records: vec![std::sync::Arc::new(ordinary), std::sync::Arc::new(absent)],
                 ..ScanResult::default()
             })
             .unwrap();

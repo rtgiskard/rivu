@@ -1428,10 +1428,8 @@ impl Store {
     }
     #[cfg(test)]
     pub fn remove_tracks(&self, ids: &[i64]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
         let removal = self.prepare_track_removal(ids)?;
-        self.remove_track_rows(&tx, removal)?;
-        tx.commit()?;
+        self.remove_prepared_tracks(removal)?;
         Ok(())
     }
 
@@ -2370,34 +2368,6 @@ mod request_tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert_eq!(stored, (1, None));
-        Ok(())
-    }
-
-    #[test]
-    fn equal_tag_edits_have_no_persisted_or_projection_effects() -> Result<()> {
-        let store = Store::open(Path::new(":memory:"))?;
-        store.conn.execute(
-            "INSERT INTO tracks(id,path,title,album) VALUES(1,'one','Title','Album')",
-            [],
-        )?;
-        store.enqueue_tracks(&[1])?;
-        let track = store.track(1)?.unwrap();
-        let queue = store.queue_state()?;
-        assert_eq!(
-            store.edit_track(1, Some("Title"), None, None, None, None)?,
-            TrackEditImpact::default()
-        );
-        assert_eq!(store.track(1)?.unwrap(), track);
-        assert_eq!(store.queue_state()?, queue);
-        assert_eq!(
-            store.edit_track(1, Some("Title"), None, None, None, None)?,
-            TrackEditImpact::default()
-        );
-        assert_eq!(
-            store.edit_track(1, None, None, Some("Album"), None, None)?,
-            TrackEditImpact::default()
-        );
-        assert_eq!(store.queue_state()?, queue);
         Ok(())
     }
 

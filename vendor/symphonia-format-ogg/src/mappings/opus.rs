@@ -228,13 +228,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn valid_comment_then_audio() {
-        let mut mapper = mapper();
+    fn assert_comment_then_audio(mapper: &mut OpusMapper) {
         let packet = b"OpusTags\0\0\0\0\0\0\0\0";
         assert!(matches!(mapper.map_packet(packet), Ok(MapResult::SideData { .. })));
-        assert!(!mapper.need_comment);
-        assert_audio(&mut mapper);
+        assert_audio(mapper);
+    }
+
+    #[test]
+    fn valid_comment_then_audio() {
+        assert_comment_then_audio(&mut mapper());
     }
 
     #[test]
@@ -243,7 +245,6 @@ mod tests {
         // The declared vendor string extends past the packet boundary.
         let packet = b"OpusTags\x04\0\0\0x";
         assert!(mapper.map_packet(packet).is_err());
-        assert!(!mapper.need_comment);
         assert_audio(&mut mapper);
     }
 
@@ -255,7 +256,6 @@ mod tests {
         for len in OGG_OPUS_COMMENT_SIGNATURE.len()..packet.len() {
             let mut mapper = mapper();
             assert!(mapper.map_packet(&packet[..len]).is_err(), "length {len}");
-            assert!(!mapper.need_comment, "length {len}");
             assert_audio(&mut mapper);
         }
     }
@@ -265,11 +265,11 @@ mod tests {
         for len in 0..OGG_OPUS_COMMENT_SIGNATURE.len() {
             let mut mapper = mapper();
             assert!(mapper.map_packet(&OGG_OPUS_COMMENT_SIGNATURE[..len]).is_err());
-            assert!(mapper.need_comment);
+            assert_comment_then_audio(&mut mapper);
         }
 
         let mut mapper = mapper();
         assert!(matches!(mapper.map_packet(b"NotATags"), Ok(MapResult::Unknown)));
-        assert!(mapper.need_comment);
+        assert_comment_then_audio(&mut mapper);
     }
 }

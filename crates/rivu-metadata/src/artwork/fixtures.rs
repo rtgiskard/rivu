@@ -1,4 +1,5 @@
 use super::*;
+use crate::fixtures::syncsafe;
 use std::fs::File;
 
 pub(super) use crate::fixtures::PNG_IMAGE as DEFAULT_IMAGE;
@@ -9,10 +10,6 @@ pub fn tagged_wav(path: &Path) {
 
 pub(super) fn tagged_wav_image(path: &Path, image: &[u8]) {
     pictures_wav(path, 3, &[(image, image.len(), 3)]);
-}
-
-fn syncsafe(value: usize) -> [u8; 4] {
-    std::array::from_fn(|index| ((value >> (21 - 7 * index)) & 0x7f) as u8)
 }
 
 #[cfg(test)]

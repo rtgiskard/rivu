@@ -155,6 +155,10 @@ fn missing_configuration_and_default_resources_are_not_created() {
 
 #[test]
 fn config_preflight_rejects_fifos_without_a_writer_including_symlinks() {
+    // A regression to a blocking open would wait forever for a writer.
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
+        return;
+    }
     use std::ffi::CString;
 
     let (directory, options) = fixture();
@@ -367,6 +371,14 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
             (1, 7, 12345)
         );
     }
+    // The backup precedes the transaction: only the live database has its change.
+    let title = |source: &Connection| -> String {
+        source
+            .query_row("SELECT title FROM tracks WHERE id=1", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(title(&connection), "Changed");
+    assert_eq!(title(&backup), "");
     connection
         .execute(
             "UPDATE tracks SET path='/music/renamed.flac' WHERE id=1",
@@ -1127,16 +1139,6 @@ fn real_migrations_reclaim_deleted_pages_collect_statistics_and_truncate_wal() {
                 .len(),
             0
         );
-        let tracks_sql: String = conn
-            .query_row(
-                "SELECT sql FROM sqlite_schema WHERE name='tracks'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        for column in ["title", "artist", "album"] {
-            assert!(tracks_sql.contains(&format!("\"{column}\" TEXT NOT NULL DEFAULT ''")));
-        }
         target_schema::validate(&conn).unwrap();
     }
 }

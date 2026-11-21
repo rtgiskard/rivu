@@ -578,19 +578,6 @@ mod tests {
     }
 
     #[test]
-    fn removing_tracks_closes_every_duplicate_queue_gap() -> Result<()> {
-        let store = fixture()?;
-        store.enqueue_tracks(&[1, 2, 1, 3, 1, 2])?;
-        let before = store.queue_ids()?;
-        store.set_queue_current(Some(before[3]))?;
-        store.remove_tracks(&[1])?;
-        assert_eq!(store.queue_ids()?, [before[1], before[3], before[5]]);
-        assert_eq!(store.queue_location(before[3])?, Some((3, 1)));
-        assert_eq!(store.queue_projection(0)?.total, 3);
-        assert_compact(&store)
-    }
-
-    #[test]
     fn database_selection_moves_and_removes_duplicate_occurrences() -> Result<()> {
         let store = fixture()?;
         store.enqueue_tracks(&[1, 2, 1, 3])?;
@@ -942,7 +929,7 @@ mod tests {
     #[test]
     fn track_cascades_return_effects_compact_and_preserve_surviving_current() -> Result<()> {
         let store = fixture()?;
-        store.enqueue_tracks(&[1, 2, 1, 3, 2])?;
+        store.enqueue_tracks(&[1, 2, 1, 3, 1, 2])?;
         let ids = store.queue_ids()?;
         store.set_queue_current(Some(ids[3]))?;
         let before = store.queue_state()?;
@@ -953,15 +940,17 @@ mod tests {
         let removal = store.prepare_track_removal(&[1])?;
         assert!(store.remove_prepared_tracks(removal)?.queue);
         assert_compact(&store)?;
-        assert_eq!(store.queue_ids()?, [ids[1], ids[3], ids[4]]);
+        assert_eq!(store.queue_ids()?, [ids[1], ids[3], ids[5]]);
         assert_eq!(store.queue_state()?.current_id, Some(ids[3]));
         assert_eq!(store.queue_state()?.current_position, Some(1));
+        assert_eq!(store.queue_location(ids[3])?, Some((3, 1)));
+        assert_eq!(store.queue_projection(0)?.total, 3);
         store
             .conn
             .execute("UPDATE tracks SET missing=1 WHERE id=3", [])?;
         assert!(store.remove_missing_tracks()?.queue);
         assert_compact(&store)?;
-        assert_eq!(store.queue_ids()?, [ids[1], ids[4]]);
+        assert_eq!(store.queue_ids()?, [ids[1], ids[5]]);
         assert_eq!(store.queue_state()?.current_id, None);
         Ok(())
     }

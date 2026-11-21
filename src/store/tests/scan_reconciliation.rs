@@ -216,18 +216,9 @@ fn depth_excluded_tracks_keep_missing_state_and_are_not_relocation_candidates() 
             ])
         })
         .unwrap();
-    let whole_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&whole.path))
-        .unwrap()
-        .unwrap();
-    let cue_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::Cue(cue.cue().sheet, 1))
-        .unwrap()
-        .unwrap();
-    let missing_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&already_missing.path))
-        .unwrap()
-        .unwrap();
+    let whole_id = store.require_file_id(&whole.path);
+    let cue_id = store.require_cue_id(cue.cue().sheet, 1);
+    let missing_id = store.require_file_id(&already_missing.path);
     store.set_favorite(&[whole_id, cue_id], true).unwrap();
     store
         .apply_scan(&ScanResult {
@@ -257,10 +248,7 @@ fn depth_excluded_tracks_keep_missing_state_and_are_not_relocation_candidates() 
         Path::new("/music/deep/album.cue")
     );
     assert!(store.track(missing_id).unwrap().unwrap().missing);
-    let copy_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&copy.path))
-        .unwrap()
-        .unwrap();
+    let copy_id = store.require_file_id(&copy.path);
     assert_ne!(copy_id, whole_id);
     let outside_id = all_tracks(&store)
         .into_iter()
@@ -315,10 +303,7 @@ fn outer_exclusions_do_not_hide_a_completed_nested_scan() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let deep = rec("/music/nested/covered/deep.wav", "deep", "Deep", 10.0);
     store.apply_scan(&scan(vec![deep.clone()])).unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&deep.path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&deep.path);
     let mut partial = scan(Vec::new());
     partial.roots.push("/music/nested".into());
     partial
@@ -336,10 +321,7 @@ fn incomplete_scan_preserves_absent_identities_and_avoids_relocation() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let old = rec("/music/old.wav", "same", "Original", 10.0);
     store.apply_scan(&scan(vec![old.clone()])).unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&old.path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&old.path);
     store.set_favorite(&[id], true).unwrap();
     let copy = rec("/music/copy.wav", "same", "Copy", 10.0);
     let mut incomplete = scan(vec![copy.clone()]);
@@ -366,10 +348,7 @@ fn failed_inserts_roll_back_complete_and_incomplete_scans() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let mut original = rec("/music/old.wav", "old", "Original", 10.0);
         store.apply_scan(&scan(vec![original.clone()])).unwrap();
-        let id = store
-            .track_id_for_identity(crate::store::TrackIdentity::File(&original.path))
-            .unwrap()
-            .unwrap();
+        let id = store.require_file_id(&original.path);
         store.set_favorite(&[id], true).unwrap();
         let before = store.track(id).unwrap().unwrap();
         original.media.title = "Uncommitted".into();
@@ -415,14 +394,8 @@ fn uncertain_scopes_preserve_owned_rows_and_reject_relocation_candidates() {
         };
         baseline.roots = vec![root.clone()];
         store.apply_scan(&baseline).unwrap();
-        let file_id = store
-            .track_id_for_identity(crate::store::TrackIdentity::File(&old_path))
-            .unwrap()
-            .unwrap();
-        let cue_id = store
-            .track_id_for_identity(crate::store::TrackIdentity::Cue(&old_sheet, 1))
-            .unwrap()
-            .unwrap();
+        let file_id = store.require_file_id(&old_path);
+        let cue_id = store.require_cue_id(&old_sheet, 1);
         store.set_favorite(&[file_id, cue_id], true).unwrap();
         let copy = rec(copy_path.to_str().unwrap(), "whole", "Copy", 10.0);
         let new_cue = segment(new_sheet.to_str().unwrap(), 1, 0, Some(4500));
@@ -485,18 +458,9 @@ fn nearest_explicit_root_owns_uncertain_directory_coverage() {
             ..scan(vec![sibling.clone(), nested.clone()])
         })
         .unwrap();
-    let sibling_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&sibling.path))
-        .unwrap()
-        .unwrap();
-    let nested_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&nested.path))
-        .unwrap()
-        .unwrap();
-    let beyond_id = store
-        .track_id_for_identity(crate::store::TrackIdentity::Cue(beyond.cue().sheet, 1))
-        .unwrap()
-        .unwrap();
+    let sibling_id = store.require_file_id(&sibling.path);
+    let nested_id = store.require_file_id(&nested.path);
+    let beyond_id = store.require_cue_id(beyond.cue().sheet, 1);
     let mut partial = scan(Vec::new());
     partial.roots.push("/music/deep/nested".into());
     partial.uncertainties = vec![
@@ -531,10 +495,7 @@ fn incomplete_scan_does_not_relocate_unknown_sources_outside_requested_roots() {
             10.0,
         )]))
         .unwrap();
-    let id = store
-        .track_id_for_identity(crate::store::TrackIdentity::File(&old_path))
-        .unwrap()
-        .unwrap();
+    let id = store.require_file_id(&old_path);
     let mut partial = scan(vec![rec(copy_path.to_str().unwrap(), "same", "Copy", 10.0)]);
     partial.roots = vec![requested];
     partial.scan_incomplete = true;
@@ -740,14 +701,8 @@ fn exact_cue_identities_do_not_count_as_new_relocation_destinations() {
         };
         result.roots = vec![directory.path().to_path_buf()];
         store.apply_scan(&result).unwrap();
-        let old_id = store
-            .track_id_for_identity(crate::store::TrackIdentity::Cue(old.cue().sheet, 1))
-            .unwrap()
-            .unwrap();
-        let exact_id = store
-            .track_id_for_identity(crate::store::TrackIdentity::Cue(exact.cue().sheet, 1))
-            .unwrap()
-            .unwrap();
+        let old_id = store.require_cue_id(old.cue().sheet, 1);
+        let exact_id = store.require_cue_id(exact.cue().sheet, 1);
         store
             .edit_track(old_id, Some("Migrated title"), None, None, None, None)
             .unwrap();

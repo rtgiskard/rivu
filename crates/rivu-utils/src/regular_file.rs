@@ -73,6 +73,10 @@ mod tests {
 
     #[test]
     fn admission_uses_opened_regular_object_and_follows_symlinks() {
+        // A blocking-open regression waits forever for a FIFO writer.
+        if crate::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
+            return;
+        }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("file");
         std::fs::write(&path, b"original").unwrap();

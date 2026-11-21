@@ -701,6 +701,9 @@ mod tests {
 
     #[test]
     fn retirement_waits_for_physical_writer_shutdown_after_guard_timeout() {
+        if crate::test_support::run_in_subprocess(Duration::from_secs(10)) {
+            return;
+        }
         struct BlockedWriter {
             entered: Option<SyncSender<()>>,
             release: Receiver<()>,
@@ -738,20 +741,23 @@ mod tests {
         writer.write_all(b"queued before retirement").unwrap();
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         drop(writer);
+        let (entering, entered_retire) = mpsc::sync_channel(1);
         let (retired, retired_receiver) = mpsc::sync_channel(1);
         let retiring = std::thread::spawn(move || {
+            entering.send(()).unwrap();
             worker.retire();
             retired.send(()).unwrap();
         });
+        entered_retire.recv_timeout(Duration::from_secs(5)).unwrap();
         // tracing-appender's guard waits at most one second after enqueueing
         // shutdown. Physical retirement must still wait for our blocked flush.
         let result = retired_receiver.recv_timeout(Duration::from_millis(1200));
         release.send(()).unwrap();
-        retiring.join().unwrap();
         assert!(matches!(result, Err(mpsc::RecvTimeoutError::Timeout)));
         retired_receiver
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
+        retiring.join().unwrap();
     }
 
     #[test]

@@ -7,6 +7,39 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+impl Store {
+    #[track_caller]
+    pub(crate) fn require_file_id(&self, path: &Path) -> i64 {
+        self.track_id_for_identity(super::TrackIdentity::File(path))
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing fixture file {path:?}"))
+    }
+
+    #[track_caller]
+    pub(crate) fn require_cue_id(&self, sheet: &Path, number: u32) -> i64 {
+        self.track_id_for_identity(super::TrackIdentity::Cue(sheet, number))
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing fixture CUE {sheet:?} #{number}"))
+    }
+}
+
+pub(super) fn history_values(store: &Store) -> Vec<(i64, String, u64, i64, bool)> {
+    store
+        .history(10)
+        .unwrap()
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.track_id,
+                entry.title,
+                entry.play_count,
+                entry.played_at,
+                entry.favorite,
+            )
+        })
+        .collect()
+}
+
 struct SqlVmSteps<'connection> {
     connection: &'connection Connection,
     steps: Box<std::cell::Cell<u64>>,
@@ -127,12 +160,6 @@ fn scan(records: Vec<ScanRecord>) -> ScanResult {
     ScanResult {
         roots: vec![PathBuf::from("/music")],
         records: records.into_iter().map(std::sync::Arc::new).collect(),
-        min_duration_secs: 0,
-        errors: vec![],
-        skipped_directories: Vec::new(),
-        skipped_directories_truncated: false,
-        scan_incomplete: false,
-        uncertainties: Vec::new(),
         ..Default::default()
     }
 }

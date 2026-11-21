@@ -181,7 +181,7 @@ mod tests {
     use std::path::Path;
 
     fn wav(path: &Path) {
-        crate::test_support::write_i16_wav(path, 1, 8_000, [0; 80]).unwrap();
+        rivu_audio::test_support::write_i16_wav(path, 1, 8_000, [0; 80]).unwrap();
     }
 
     #[test]

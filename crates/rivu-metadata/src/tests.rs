@@ -1,5 +1,5 @@
 use super::*;
-use crate::fixtures::PNG_IMAGE;
+use crate::fixtures::{PNG_IMAGE, syncsafe};
 use std::{
     fs,
     io::{Seek, Write},
@@ -384,29 +384,45 @@ fn normalized_same_value_edit_is_idempotent_without_inode_change() {
 #[test]
 fn ambiguous_paths_and_unsupported_writes_do_not_mutate() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("source");
-    let bytes = b"unsupported container";
-    fs::write(&path, bytes).unwrap();
     let patch = TagPatch {
         title: Some("New".into()),
         ..Default::default()
     };
-    assert!(edit_file(&path, &patch).is_err());
-    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let unsupported = dir.path().join("source");
+    let bytes = b"unsupported container";
+    fs::write(&unsupported, bytes).unwrap();
+    assert!(edit_file(&unsupported, &patch).is_err());
+    assert_eq!(fs::read(&unsupported).unwrap(), bytes);
+
+    // Links target a file that would otherwise be edited successfully.
+    let path = dir.path().join("track.flac");
+    let editable = flac(&["TITLE=Old"], None);
+    fs::write(&path, &editable).unwrap();
+    let original = fs::metadata(&path).unwrap();
     let link = dir.path().join("link");
     symlink(&path, &link).unwrap();
+    let link_inode = fs::symlink_metadata(&link).unwrap().ino();
     assert!(edit_file(&link, &patch).is_err());
+    assert_eq!(fs::read_link(&link).unwrap(), path);
+    assert_eq!(fs::symlink_metadata(&link).unwrap().ino(), link_inode);
     let hard = dir.path().join("hard");
     fs::hard_link(&path, &hard).unwrap();
     assert!(edit_file(&path, &patch).is_err());
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    let after = fs::metadata(&path).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), editable);
+    assert_eq!(fs::metadata(&hard).unwrap().ino(), original.ino());
+    assert_eq!(
+        (original.ino(), original.mtime(), original.mtime_nsec()),
+        (after.ino(), after.mtime(), after.mtime_nsec())
+    );
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
+    fs::remove_file(hard).unwrap();
+    assert!(edit_file(&path, &patch).unwrap().changed());
 }
 
 #[test]
 fn sparse_audio_payload_has_no_whole_file_size_cap() {
-    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cache");
-    fs::create_dir_all(&cache).unwrap();
-    let mut file = tempfile::tempfile_in(cache).unwrap();
+    let mut file = tempfile::tempfile().unwrap();
     file.write_all(&flac(&["TITLE=Sparse"], None)).unwrap();
     file.set_len(2 * 1024 * 1024 * 1024).unwrap();
     file.rewind().unwrap();
@@ -416,14 +432,6 @@ fn sparse_audio_payload_has_no_whole_file_size_cap() {
     );
 }
 
-fn syncsafe(value: usize) -> [u8; 4] {
-    [
-        ((value >> 21) & 127) as u8,
-        ((value >> 14) & 127) as u8,
-        ((value >> 7) & 127) as u8,
-        (value & 127) as u8,
-    ]
-}
 fn frame(id: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut bytes = id.to_vec();
     bytes.extend_from_slice(&syncsafe(payload.len()));

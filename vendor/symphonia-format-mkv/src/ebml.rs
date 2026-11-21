@@ -1113,7 +1113,11 @@ mod tests {
         for (doc_type, codec_id) in [("matroska", "A_FLAC"), ("webm", "A_OPUS")] {
             let _scope = Scope::new(MetadataOptions::default().limit_tag_bytes(Limit::Maximum(0)));
             // Exhaust object admission as well as disabling non-empty metadata text.
-            while symphonia_metadata::budget::text(0) {}
+            let mut admitted = 0;
+            while symphonia_metadata::budget::text(0) {
+                admitted += 1;
+                assert!(admitted <= 1 << 16, "metadata object admission is unbounded");
+            }
             let mut data = element(&[0x1a, 0x45, 0xdf, 0xa3], &element(&[0x42, 0x82], doc_type.as_bytes()));
             let mut track = element(&[0xd7], &[1]);
             track.extend(element(&[0x73, 0xc5], &[1]));

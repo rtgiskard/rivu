@@ -217,12 +217,19 @@ fn track_cache_resize_shrinks_and_does_not_cache_misses() {
     assert_eq!(cache.entries.len(), 2);
     assert!(cache.entries.contains_key(&ids[0]));
     assert!(cache.entries.contains_key(&ids[3]));
-    assert!(cache.entries.len() <= cache.capacity);
+    drop(cache);
+    assert!(store.track(999).unwrap().is_none());
+    let cache = store.track_cache.borrow();
+    assert!(
+        !cache.entries.contains_key(&999),
+        "misses must not be cached"
+    );
+    assert!(cache.entries.contains_key(&ids[0]) && cache.entries.contains_key(&ids[3]));
     drop(cache);
 
     store.set_track_cache_query_batch_size(0);
     assert!(store.track_cache.borrow().entries.is_empty());
-    assert!(store.track(999).unwrap().is_none());
+    store.track(ids[0]).unwrap();
     assert!(store.track_cache.borrow().entries.is_empty());
 }
 
@@ -263,10 +270,16 @@ fn track_cache_invalidates_edits_favorites_statistics_and_deletes() {
 fn track_cache_rescan_invalidation_returns_new_metadata() {
     let (store, ids) = scanned_cache_tracks(1);
     let id = ids[0];
-    store.track(id).unwrap();
     store
         .edit_track(id, None, None, None, Some(DecoderHint::Native), None)
         .unwrap();
+    // Warm the cache after the edit so a missed rescan invalidation serves it.
+    let cached = store.track(id).unwrap().unwrap();
+    assert_eq!(
+        (cached.title.as_str(), cached.duration, cached.decoder_hint),
+        ("A", Some(10.), DecoderHint::Native)
+    );
+    assert!(store.track_cache.borrow().entries.contains_key(&id));
     store
         .apply_scan(&scan(vec![rec("/music/a.mp3", "a", "Rescanned", 20.)]))
         .unwrap();

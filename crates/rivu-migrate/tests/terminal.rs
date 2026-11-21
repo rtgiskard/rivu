@@ -82,20 +82,6 @@ fn unsupported_format_errors_escape_hostile_paths_without_changes() {
 }
 
 #[test]
-fn preflight_error_paths_are_escaped_at_final_cli_output() {
-    let directory = tempfile::tempdir().unwrap();
-    let data = directory.path().join("data");
-    fs::create_dir(&data).unwrap();
-    let config = directory.path().join(format!("{HOSTILE}.toml"));
-    fs::write(&config, "[broken").unwrap();
-    let output = invoke(&data, &config);
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = assert_terminal_safe(&output.stderr);
-    assert!(stderr.contains(&format!("{ESCAPED}.toml")), "{stderr}");
-    assert_eq!(fs::read_to_string(&config).unwrap(), "[broken");
-}
-
-#[test]
 fn stderr_color_policy_respects_environment_precedence_without_changing_diagnostics() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join(format!("{HOSTILE}.toml"));

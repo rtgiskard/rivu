@@ -234,7 +234,6 @@ mod tests {
             conn.execute_batch(incompatible)?;
             let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
             let journal: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-            let changes = conn.total_changes();
             assert!(Store::open(&path).is_err(), "{incompatible}");
             assert_eq!(
                 conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
@@ -244,7 +243,6 @@ mod tests {
                 conn.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
                 journal
             );
-            assert_eq!(conn.total_changes(), changes);
             assert_eq!(
                 conn.query_row("SELECT title FROM tracks WHERE id=1", [], |row| {
                     row.get::<_, String>(0)

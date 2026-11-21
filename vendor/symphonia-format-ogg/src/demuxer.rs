@@ -633,23 +633,31 @@ mod tests {
         assert_eq!(packet.trim_end.get(), end);
     }
 
+    fn assert_single_page(reader: &mut OggReader<'_>) {
+        assert_track(reader, 1, 312, 480, 168);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -312, 168, 312, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), 168, 312, 0, 168);
+    }
+
     #[test]
     fn opus_single_page_presents_without_delay_or_padding() {
         let mut reader = reader(opus_stream(1, 312, &[(792, 2)]));
-        assert_track(&reader, 1, 312, 480, 168);
-        assert_packet(reader.next_packet().unwrap().unwrap(), -312, 168, 312, 0);
-        assert_packet(reader.next_packet().unwrap().unwrap(), 168, 312, 0, 168);
+        assert_single_page(&mut reader);
         assert!(reader.next_packet().unwrap().is_none());
+    }
+
+    fn assert_multi_page(reader: &mut OggReader<'_>, serial: u32) {
+        assert_track(reader, serial, 1000, 800, 120);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -1000, 0, 480, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -520, 0, 480, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), -40, 440, 40, 0);
+        assert_packet(reader.next_packet().unwrap().unwrap(), 440, 360, 0, 120);
     }
 
     #[test]
     fn opus_pre_skip_spans_pages_and_final_padding_is_independent() {
         let mut reader = reader(opus_stream(1, 1000, &[(480, 1), (960, 1), (1800, 2)]));
-        assert_track(&reader, 1, 1000, 800, 120);
-        assert_packet(reader.next_packet().unwrap().unwrap(), -1000, 0, 480, 0);
-        assert_packet(reader.next_packet().unwrap().unwrap(), -520, 0, 480, 0);
-        assert_packet(reader.next_packet().unwrap().unwrap(), -40, 440, 40, 0);
-        assert_packet(reader.next_packet().unwrap().unwrap(), 440, 360, 0, 120);
+        assert_multi_page(&mut reader, 1);
         assert!(reader.next_packet().unwrap().is_none());
     }
 
@@ -658,15 +666,9 @@ mod tests {
         let mut bytes = opus_stream(1, 312, &[(792, 2)]);
         bytes.extend(opus_stream(2, 1000, &[(480, 1), (960, 1), (1800, 2)]));
         let mut reader = reader(bytes);
-        assert_track(&reader, 1, 312, 480, 168);
-        assert_packet(reader.next_packet().unwrap().unwrap(), -312, 168, 312, 0);
-        assert_packet(reader.next_packet().unwrap().unwrap(), 168, 312, 0, 168);
+        assert_single_page(&mut reader);
         assert!(matches!(reader.next_packet(), Err(Error::ResetRequired)));
-        assert_track(&reader, 2, 1000, 800, 120);
-        assert_packet(reader.next_packet().unwrap().unwrap(), -1000, 0, 480, 0);
-        assert_packet(reader.next_packet().unwrap().unwrap(), -520, 0, 480, 0);
-        assert_packet(reader.next_packet().unwrap().unwrap(), -40, 440, 40, 0);
-        assert_packet(reader.next_packet().unwrap().unwrap(), 440, 360, 0, 120);
+        assert_multi_page(&mut reader, 2);
         assert!(reader.next_packet().unwrap().is_none());
     }
 

@@ -162,7 +162,11 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
             index: Some(0),
         },
     ] {
-        assert!(store.transfer_collection(&source, destination).is_err());
+        let error = store.transfer_collection(&source, destination).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("rejected member"),
+            "{error:#}"
+        );
         assert_eq!(store.queue_page(None, 0, 20).unwrap(), queue);
         assert_eq!(store.queue_state().unwrap(), queue_state);
         assert_eq!(
@@ -178,7 +182,15 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
         .unwrap();
     assert_eq!(
         store
-            .transfer_collection(&source, CollectionDestination::Queue { insertion: None },)
+            .transfer_collection(
+                &source,
+                CollectionDestination::Queue {
+                    insertion: Some(CollectionInsertion {
+                        index: 1,
+                        revision: queue_state.revision
+                    })
+                },
+            )
             .unwrap(),
         2
     );
