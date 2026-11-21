@@ -79,15 +79,20 @@ impl SettingsModel {
         &self.baseline
     }
 
-    pub(super) fn reset(&mut self, config: &Arc<Config>) {
+    /// Retire callbacks even when hiding the form without loading another draft.
+    pub(super) fn end_session(&mut self) {
         self.session = self.session.wrapping_add(1);
-        self.baseline = Arc::clone(config);
-        self.draft = config.as_ref().clone();
         self.target = Target::Global;
         self.applying = false;
         self.feedback = None;
         self.edit_revision = 0;
         self.submitted_revision = 0;
+    }
+
+    pub(super) fn reset(&mut self, config: &Arc<Config>) {
+        self.end_session();
+        self.baseline = Arc::clone(config);
+        self.draft = config.as_ref().clone();
     }
 
     pub(super) fn reset_artwork(

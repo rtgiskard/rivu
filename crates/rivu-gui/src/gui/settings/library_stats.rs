@@ -82,9 +82,12 @@ impl RootStats {
     }
 
     pub(super) fn cancel(&mut self) {
-        self.owner.cancel();
-        self.values.clear();
-        self.retention.clear();
+        // Drop the query identity, root paths and cached batches together. A
+        // canceled worker still owns its physical slot until it returns.
+        *self = Self {
+            in_flight: std::mem::take(&mut self.in_flight),
+            ..Self::default()
+        };
     }
 
     pub(super) fn retry(&mut self) {
@@ -358,6 +361,11 @@ mod tests {
                     generation,
                     revisions(this.handle.library_revision()),
                 ));
+                this.open(window, cx);
+                let ticket = this.root_stats.owner.ticket();
+                assert!(ticket.is_current());
+                this.cancel(cx);
+                assert!(!ticket.is_current());
             });
         })
         .unwrap();
@@ -379,6 +387,7 @@ mod tests {
         let read = stats.prepare().unwrap();
         stats.cancel();
         complete_ok(&mut stats, read, 3, 99);
+        assert!(stats.prepare().is_none());
         assert!(stats.values.is_empty());
     }
 
