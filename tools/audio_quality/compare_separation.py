@@ -46,7 +46,7 @@ def compare(args):
               "sample_rate":rate,"frames":len(mixture),"channels":2,"provenance":args.provenance,
               "baseline_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(prepared.channels,mixture.T)],
               "models":[],"limits":"Same excerpt only; no listening review or full-corpus/model ranking. SI-SDR is scale invariant; inspect ordinary SNR, gain, stereo and peaks too. Mixture-minus-vocals reconstruction does not establish separation quality."}
-    for path in args.result:
+    def score_model(path):
         path = Path(path).resolve(strict=True)
         result, raw = read_export_report(path, mixture_identity["sha256"], operation="separate",
                                          mismatch="worker input content differs from selected mixture: " + str(path))
@@ -61,7 +61,7 @@ def compare(args):
         if vocals.shape != mixture.shape or backing.shape != mixture.shape or vocal_rate != rate or backing_rate != rate:
             raise ValueError("worker outputs violate alignment contract: " + str(path))
         residual_rms, residual_peak = reconstruction_metrics(mixture, vocals, backing)
-        report["models"].append({
+        return {
             "model":result["model"],"worker_result":report_identity,
             "export_request_sha256":result["export_request_sha256"],
             "request_sha256":result["request_sha256"],"worker_sha256":result["worker_sha256"],
@@ -72,7 +72,10 @@ def compare(args):
             "vocal_metrics_by_channel":[channel_metrics(a,b) for a,b in zip(prepared.channels,vocals.T)],
             "vocal_stereo":stereo_metrics(vocals),
             "reconstruction":{"residual_rms":residual_rms,"residual_peak":residual_peak},
-        })
+        }
+
+    for path in args.result:
+        report["models"].append(score_model(path))
     return report
 
 

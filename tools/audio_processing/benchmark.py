@@ -185,7 +185,7 @@ def main():
         require_alignment(reference_pcm, backing_pcm, "accompaniment reference")
         backing = PreparedReference(backing_pcm.data, rate)
         report["accompaniment_reference_sha256"] = backing_pcm.identity["sha256"]
-    for index in range(args.repeats):
+    def score_run(index):
         evaluation_start = time.perf_counter()
         run_request = {**request,"output_dir":str(base.with_name(base.name+"-run-"+str(index)))}
         request_path = base.parent / (base.name+"-request-"+str(index)+".json")
@@ -217,7 +217,10 @@ def main():
             if backing is not None:
                 result["accompaniment_quality"] = backing.score(accompaniment, result["processing"]["core_seconds"])
         result["evaluation_wall_seconds"] = time.perf_counter()-evaluation_start
-        report["runs"].append(result)
+        return result
+
+    for index in range(args.repeats):
+        report["runs"].append(score_run(index))
     report["timing_summary"] = timing_summary(report["runs"])
     report["human_listening"] = "not performed; objective scores do not establish listening approval"
     with args.report.open("x") as stream:
