@@ -805,8 +805,9 @@ This adds a full-source read to cold positive embedded acquisition, using a fixe
 Embedded covers can survive a move preserving track ID and fingerprint. Directory
 covers, misses, and failures belong to the attempted path; a path change retries
 discovery, even with unchanged ID/fingerprint, without resetting panel rotation.
-Sharing an unfinished probe from another path requires retrying the current path
-unless it yielded an embedded cover.
+Requests may share an unfinished probe across paths. Only an embedded cover can
+satisfy both; a directory result or fingerprint rejection from the other path
+requires probing the requested path.
 
 Lookup retention targets 64 entries. FIFO eviction selects idle results only;
 active results may exceed the target, with overflow trimmed on subsequent loads.

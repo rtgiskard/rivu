@@ -876,6 +876,47 @@ fn unfinished_directory_lookup_cannot_complete_a_relocated_request() {
 }
 
 #[test]
+fn rejected_lookup_cannot_complete_a_relocated_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_path = directory.path().join("old.wav");
+    let new_path = directory.path().join("new.wav");
+    tagged_wav(&new_path);
+    let relocated = source_fixture(new_path);
+    let original = TestSource {
+        path: old_path,
+        ..relocated.clone()
+    };
+    let mut replacement = DEFAULT_IMAGE.to_vec();
+    replacement.push(42);
+    tagged_wav_image(&original.path, &replacement);
+    let manager = ArtworkManager::new(directory.path());
+
+    // Admit both callers before completing the old probe, without relying
+    // on the order in which worker threads happen to be scheduled.
+    let (old, new) = {
+        let mut cache = manager.entries.lock();
+        (
+            cache.entry_for(original.source()),
+            cache.entry_for(relocated.source()),
+        )
+    };
+    assert!(Arc::ptr_eq(&old.lookup, &new.lookup));
+    let rejected = manager.load_from(original.source(), old, || {
+        manager.source_uri(original.source(), manager.max_image_bytes)
+    });
+    assert!(rejected.is_none());
+    assert!(manager.cached_result(relocated.source()).is_none());
+
+    let recovered = manager
+        .load_from(relocated.source(), new, || {
+            manager.source_uri(relocated.source(), manager.max_image_bytes)
+        })
+        .unwrap();
+    assert_eq!(fs::read(recovered.path()).unwrap(), DEFAULT_IMAGE);
+    assert_eq!(manager.cached(relocated.source()), Some(recovered));
+}
+
+#[test]
 fn concurrent_requests_probe_once_and_share_a_complete_image() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("track.wav");
@@ -1060,7 +1101,7 @@ fn cache_only_reads_do_not_wait_for_an_inflight_probe() {
         let loader = scope.spawn(move || {
             manager.load_with(selected.source(), || {
                 wait().unwrap();
-                ArtworkSource::Directory(None)
+                manager.source_uri(selected.source(), manager.max_image_bytes)
             })
         });
         loading.recv().unwrap();

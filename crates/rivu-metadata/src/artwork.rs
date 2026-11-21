@@ -122,30 +122,30 @@ struct CachedArtwork {
     lookup: Arc<OnceLock<ArtworkLookup>>,
 }
 
-enum ArtworkSource {
-    Embedded(Arc<ArtworkFile>),
-    Directory(Option<Arc<ArtworkFile>>),
-    Rejected,
-}
-
 enum EmbeddedError {
     Read,
     Identity,
 }
 
-struct ArtworkLookup {
-    image: Option<Arc<ArtworkFile>>,
-    source_path: Option<PathBuf>,
-    rejected: bool,
+enum ArtworkLookup {
+    Embedded(Arc<ArtworkFile>),
+    Directory {
+        path: PathBuf,
+        image: Option<Arc<ArtworkFile>>,
+    },
+    Rejected(PathBuf),
 }
 
 impl ArtworkLookup {
-    fn applies_to(&self, path: &Path) -> bool {
-        !self.rejected
-            && self
-                .source_path
-                .as_deref()
-                .is_none_or(|source_path| source_path == path)
+    fn image_at(&self, path: &Path) -> Option<Option<&Arc<ArtworkFile>>> {
+        match self {
+            Self::Embedded(image) => Some(Some(image)),
+            Self::Directory {
+                path: probed,
+                image,
+            } if probed == path => Some(image.as_ref()),
+            _ => None,
+        }
     }
 }
 
@@ -155,7 +155,7 @@ impl CachedArtwork {
             && self
                 .lookup
                 .get()
-                .is_none_or(|lookup| lookup.applies_to(source.path))
+                .is_none_or(|lookup| lookup.image_at(source.path).is_some())
     }
 }
 
@@ -186,9 +186,28 @@ impl ArtworkCache {
                     && entry
                         .lookup
                         .get()
-                        .is_none_or(|lookup| lookup.applies_to(source.path))
+                        .is_none_or(|lookup| lookup.image_at(source.path).is_some())
             })
             .map(|entry| Arc::clone(&entry.lookup))
+    }
+
+    fn entry_for(&mut self, source: Source<'_>) -> Arc<CachedArtwork> {
+        if let Some(entry) = self.find(source) {
+            return Arc::clone(entry);
+        }
+        // Logical CUE tracks retain independent content identities, but the
+        // same physical source version needs only one probe.
+        let lookup = self
+            .source_lookup(source)
+            .unwrap_or_else(|| Arc::new(OnceLock::new()));
+        let entry = Arc::new(CachedArtwork {
+            identity: ArtworkIdentity::new(source),
+            lookup,
+        });
+        self.items.insert(source.id, Arc::clone(&entry));
+        self.insertion_order.push_back(Arc::clone(&entry));
+        self.trim();
+        entry
     }
 
     fn trim(&mut self) {
@@ -289,13 +308,11 @@ impl ArtworkManager {
     pub fn cached_result(&self, source: Source<'_>) -> Option<Option<Artwork>> {
         let cache = self.entries.lock();
         let entry = cache.find(source)?;
-        let lookup = entry.lookup.get()?;
-        lookup.applies_to(source.path).then(|| {
-            lookup.image.as_ref().map(|file| Artwork {
-                file: Arc::clone(file),
-                _entry: Some(Arc::clone(entry)),
-            })
-        })
+        let image = entry.lookup.get()?.image_at(source.path)?;
+        Some(image.map(|file| Artwork {
+            file: Arc::clone(file),
+            _entry: Some(Arc::clone(entry)),
+        }))
     }
 
     /// Blocking singleflight load; a late old version never replaces its successor.
@@ -306,64 +323,46 @@ impl ArtworkManager {
     fn load_with(
         &self,
         source: Source<'_>,
-        probe: impl FnOnce() -> ArtworkSource,
+        probe: impl FnOnce() -> ArtworkLookup,
+    ) -> Option<Artwork> {
+        let entry = self.entries.lock().entry_for(source);
+        self.load_from(source, entry, probe)
+    }
+
+    fn load_from(
+        &self,
+        source: Source<'_>,
+        mut entry: Arc<CachedArtwork>,
+        probe: impl FnOnce() -> ArtworkLookup,
     ) -> Option<Artwork> {
         let mut probe = Some(probe);
         loop {
-            let cached = {
-                let mut cache = self.entries.lock();
-                if let Some(entry) = cache.find(source) {
-                    Arc::clone(entry)
-                } else {
-                    // Logical CUE tracks retain independent content identities,
-                    // but the same physical source version needs only one probe.
-                    let lookup = cache
-                        .source_lookup(source)
-                        .unwrap_or_else(|| Arc::new(OnceLock::new()));
-                    let entry = Arc::new(CachedArtwork {
-                        identity: ArtworkIdentity::new(source),
-                        lookup,
-                    });
-                    cache.items.insert(source.id, Arc::clone(&entry));
-                    cache.insertion_order.push_back(Arc::clone(&entry));
-                    cache.trim();
-                    entry
-                }
-            };
-            let lookup = cached.lookup.get_or_init(|| {
-                let (image, source_path, rejected) = match probe.take().expect("one source probe")()
-                {
-                    ArtworkSource::Embedded(image) => (Some(image), None, false),
-                    ArtworkSource::Directory(image) => (image, Some(source.path.to_owned()), false),
-                    ArtworkSource::Rejected => (None, Some(source.path.to_owned()), true),
-                };
-                ArtworkLookup {
-                    source_path,
-                    image,
-                    rejected,
-                }
-            });
-            if lookup.rejected {
+            let lookup = entry
+                .lookup
+                .get_or_init(|| probe.take().expect("one source probe")());
+            if let ArtworkLookup::Rejected(path) = lookup {
                 let mut cache = self.entries.lock();
                 cache
                     .items
-                    .retain(|_, entry| !Arc::ptr_eq(&entry.lookup, &cached.lookup));
+                    .retain(|_, cached| !Arc::ptr_eq(&cached.lookup, &entry.lookup));
                 cache
                     .insertion_order
-                    .retain(|entry| !Arc::ptr_eq(&entry.lookup, &cached.lookup));
-                return None;
+                    .retain(|cached| !Arc::ptr_eq(&cached.lookup, &entry.lookup));
+                if path == source.path {
+                    return None;
+                }
+            } else if let Some(image) = lookup.image_at(source.path) {
+                let image = image.cloned();
+                self.entries.lock().trim();
+                return image.map(|file| Artwork {
+                    file,
+                    _entry: Some(entry),
+                });
             }
-            // A concurrent request may have shared an unfinished old-path probe.
-            // Only embedded content is reusable without checking the new directory.
-            if !lookup.applies_to(source.path) {
-                continue;
-            }
-            let result = lookup.image.as_ref().map(|file| Artwork {
-                file: Arc::clone(file),
-                _entry: Some(Arc::clone(&cached)),
-            });
-            self.entries.lock().trim();
-            return result;
+            // A pending probe may have run at another path. Only embedded
+            // artwork can be reused after a move.
+            drop(entry);
+            entry = self.entries.lock().entry_for(source);
         }
     }
 
@@ -470,13 +469,14 @@ impl ArtworkManager {
         }
     }
 
-    fn source_uri(&self, source: Source<'_>, limit: usize) -> ArtworkSource {
+    fn source_uri(&self, source: Source<'_>, limit: usize) -> ArtworkLookup {
         match self.embedded_uri(source, limit) {
-            Ok(Some(image)) => ArtworkSource::Embedded(image),
-            Err(EmbeddedError::Identity) => ArtworkSource::Rejected,
-            Ok(None) | Err(EmbeddedError::Read) => {
-                ArtworkSource::Directory(self.directory_uri(source.path, limit))
-            }
+            Ok(Some(image)) => ArtworkLookup::Embedded(image),
+            Err(EmbeddedError::Identity) => ArtworkLookup::Rejected(source.path.to_owned()),
+            Ok(None) | Err(EmbeddedError::Read) => ArtworkLookup::Directory {
+                path: source.path.to_owned(),
+                image: self.directory_uri(source.path, limit),
+            },
         }
     }
 
