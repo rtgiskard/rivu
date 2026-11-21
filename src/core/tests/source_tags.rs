@@ -211,6 +211,61 @@ fn file_save_commits_verified_dates_and_numbers_without_backups() {
 }
 
 #[test]
+fn file_save_updates_shared_cue_source_but_not_equal_content_at_another_path() {
+    let (directory, mut core) = fixture();
+    let db = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    db.execute_batch(
+        "UPDATE tracks SET fingerprint=zeroblob(32);
+         UPDATE tracks SET path=(SELECT path FROM tracks WHERE id=1),cue_sheet='a.cue',
+             cue_number=1,cue_start_frame=75,cue_end_frame=150 WHERE id=2;
+         UPDATE tracks SET path=(SELECT path FROM tracks WHERE id=3),cue_sheet='b.cue',
+             cue_number=1,cue_start_frame=75,cue_end_frame=150 WHERE id=4;",
+    )
+    .unwrap();
+    core.store.invalidate_caches();
+    let before = core.track(1).unwrap();
+    let segment = core.track(2).unwrap();
+    let copy = core.track(3).unwrap();
+    let copy_segment = core.track(4).unwrap();
+    core.state.queue.current_id = core.store.queued_track(2).unwrap();
+    core.state.current_track = Some(Arc::new(segment.clone()));
+    wav(&before.path);
+    let expected = source_tags::track_tags(&before);
+    let mut tags = expected.clone();
+    tags.title = "New source title".into();
+    core.command(Command::SaveSourceTags {
+        track_id: 1,
+        tags,
+        expected: Box::new(expected),
+    })
+    .unwrap();
+    let ack = finish(&mut core);
+    assert!(ack.is_success(), "{:?}", ack.error);
+    let updated = core.track(2).unwrap();
+    assert_ne!(updated.fingerprint, segment.fingerprint);
+    assert_eq!(updated.fingerprint, core.track(1).unwrap().fingerprint);
+    assert_eq!(updated.cue, segment.cue);
+    assert_eq!(
+        source_tags::track_tags(&updated),
+        source_tags::track_tags(&segment)
+    );
+    assert_eq!(core.state.current_track(), Some(&updated));
+    // A warm copy must not hide an accidental write to the other path.
+    core.store.invalidate_caches();
+    assert_eq!(core.track(3).unwrap(), copy);
+    assert_eq!(core.track(4).unwrap(), copy_segment);
+    let matching: i64 = db
+        .query_row(
+            "SELECT count(*) FROM tracks a JOIN tracks b ON a.id=1 AND b.id=2
+         WHERE a.file_size=b.file_size AND a.modified_ns=b.modified_ns AND b.probe_version=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(matching, 1);
+}
+
+#[test]
 fn saving_unchanged_database_tags_refreshes_stopped_source_identity() {
     let (_directory, mut core) = fixture();
     let before = core.track(1).unwrap();

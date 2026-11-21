@@ -240,7 +240,11 @@ impl Core {
         self.accept_catalog_facts(impacts, Some(&[track_id]), impact.playlists.as_deref());
         if impact.library || refresh_pending_current_track {
             self.transport.history_pending |= impacts.history;
-            let current = self.refresh_affected_queue_tracks(&[track_id]);
+            let current = if refresh_pending_current_track {
+                self.refresh_current_track()
+            } else {
+                self.refresh_affected_queue_tracks(&[track_id])
+            };
             let catalog = self.refresh_catalog_projections();
             let errors: Vec<_> = [current, catalog]
                 .into_iter()

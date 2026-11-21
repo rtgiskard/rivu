@@ -1245,7 +1245,7 @@ impl Store {
         &self,
         id: i64,
         source: &rivu_metadata::WrittenSource,
-    ) -> Result<super::CatalogChanges> {
+    ) -> Result<(super::CatalogChanges, Vec<i64>)> {
         let tx = self.conn.unchecked_transaction()?;
         let values = params![
             id,
@@ -1253,42 +1253,49 @@ impl Store {
             source.file_size as i64,
             source.modified_ns,
         ];
-        let changes = tx
-            .query_row(
-                &format!(
-                    "SELECT fingerprint IS NOT ?2 OR file_size IS NOT ?3 OR modified_ns IS NOT ?4,
-                    cue_sheet IS NULL AND fingerprint IS NOT ?2,
-                    cue_sheet IS NULL AND (file_size IS NOT ?3 OR modified_ns IS NOT ?4),
-                    fingerprint IS NOT ?2 OR file_size IS NOT ?3,
-                    fingerprint IS NOT ?2 AND {}
-             FROM tracks AS t WHERE t.id=?1",
-                    super::albums::representative("t")
-                ),
-                values,
-                |row| {
-                    Ok(super::CatalogChanges {
-                        changed: row.get(0)?,
-                        library: row.get(3)?,
-                        albums: row.get(4)?,
-                        duplicate_groups: row.get(1)?,
-                        duplicate_members: row.get(2)?,
-                        ..Default::default()
-                    })
-                },
-            )
-            .optional()?
-            .with_context(|| format!("track {id} does not exist"))?;
+        let mut changes = super::CatalogChanges::default();
+        let mut ids = Vec::new();
+        {
+            let mut statement = tx.prepare(&format!(
+                "SELECT id, cue_sheet IS NULL, fingerprint IS NOT ?2, file_size IS NOT ?3,
+                        modified_ns IS NOT ?4, fingerprint IS NOT ?2 AND {}
+                 FROM tracks AS t WHERE path=(SELECT path FROM tracks WHERE id=?1 AND cue_sheet IS NULL)
+                 AND (fingerprint IS NOT ?2 OR file_size IS NOT ?3 OR modified_ns IS NOT ?4)",
+                super::albums::representative("t")
+            ))?;
+            let mut rows = statement.query(values)?;
+            while let Some(row) = rows.next()? {
+                let ordinary: bool = row.get(1)?;
+                let fingerprint: bool = row.get(2)?;
+                let size: bool = row.get(3)?;
+                changes.changed = true;
+                changes.library |= fingerprint || size;
+                changes.albums |= row.get::<_, bool>(5)?;
+                changes.duplicate_groups |= ordinary && fingerprint;
+                changes.duplicate_members |= ordinary && (size || row.get::<_, bool>(4)?);
+                ids.push(row.get(0)?);
+            }
+        }
         if changes.changed {
             tx.execute(
-                "UPDATE tracks SET fingerprint=?2,file_size=?3,modified_ns=?4,probe_version=0 WHERE id=?1",
+                "UPDATE tracks SET fingerprint=?2,file_size=?3,modified_ns=?4,probe_version=0
+                 WHERE path=(SELECT path FROM tracks WHERE id=?1 AND cue_sheet IS NULL)
+                 AND (fingerprint IS NOT ?2 OR file_size IS NOT ?3 OR modified_ns IS NOT ?4)",
                 values,
+            )?;
+        } else {
+            tx.query_row(
+                "SELECT 1 FROM tracks WHERE id=?1 AND cue_sheet IS NULL",
+                [id],
+                |_| Ok(()),
             )?;
         }
         tx.commit()?;
-        if changes.changed {
-            self.track_cache.borrow_mut().entries.remove(&id);
+        let mut cache = self.track_cache.borrow_mut();
+        for id in &ids {
+            cache.entries.remove(id);
         }
-        Ok(changes)
+        Ok((changes, ids))
     }
 
     /// Persist the complete tag snapshot accepted by the metadata backend.
@@ -2152,7 +2159,7 @@ mod request_tests {
             modified_ns: 456,
         };
         assert_eq!(
-            store.update_written_source(1, &source)?,
+            store.update_written_source(1, &source)?.0,
             super::super::CatalogChanges {
                 changed: true,
                 library: true,
@@ -2169,7 +2176,7 @@ mod request_tests {
         let known = store.known_source(Path::new("/one.wav"))?.unwrap();
         assert!(known.fingerprint.is_some() && known.media.is_none());
         assert_eq!(store.duplicate_groups_page(0, 10)?.total, 0);
-        assert!(!store.update_written_source(2, &source)?.albums);
+        assert!(!store.update_written_source(2, &source)?.0.albums);
         assert_eq!(store.duplicate_groups_page(0, 10)?.total, 1);
         assert!(store.update_written_source(999, &source).is_err());
         Ok(())
@@ -2204,7 +2211,7 @@ mod request_tests {
                 source.modified_ns += 1;
             }
             assert_eq!(
-                store.update_written_source(1, &source)?,
+                store.update_written_source(1, &source)?.0,
                 super::super::CatalogChanges {
                     changed: true,
                     library: size_changed,

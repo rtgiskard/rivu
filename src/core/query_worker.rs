@@ -1092,11 +1092,11 @@ mod tests {
             file_size: 17,
             modified_ns: 2,
         };
-        let changes = core.store.update_written_source(2, &source).unwrap();
+        let (changes, ids) = core.store.update_written_source(2, &source).unwrap();
         assert!(changes.library);
         assert!(!changes.counts);
         assert!(!core.store.sync_track_tags(2, &tags).unwrap().changed);
-        core.accept_catalog_facts(changes, Some(&[2]), None);
+        core.accept_catalog_facts(changes, Some(&ids), None);
         core.publish();
         let stale = execute_read_at(
             &core,

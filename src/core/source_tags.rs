@@ -283,18 +283,18 @@ impl Core {
             "Saved source identity changed; inspect the file before synchronizing"
         );
         self.preflight_tag_sync(&stored, &pending.tags, &pending.expected)?;
-        let changes = self
+        let (changes, ids) = self
             .store
             .update_written_source(track_id, &pending.source)?;
         let impact = self.store.sync_track_tags(track_id, &pending.tags);
         // Source facts are already committed even if the tag write failed.
-        self.accept_catalog_facts(changes, Some(&[track_id]), None);
+        self.accept_catalog_facts(changes, Some(&ids), None);
         self.projections.current_track |= changes.library
             && self
                 .state
                 .current_track
                 .as_ref()
-                .is_some_and(|track| track.id == track_id);
+                .is_some_and(|track| ids.contains(&track.id));
         impact
     }
 

@@ -475,8 +475,9 @@ ID3 tags are normalized to v2.4 with UTF-8; WAV/AIFF use ID3, and FLAC/Ogg use
 Vorbis Comments. Convertible secondary values and artwork are merged before
 secondary tags are removed; unsupported native-only data may be lost.
 Dates retain year, month or full-date precision. Audio is not transcoded.
-GUI saves also update the library's full-file BLAKE3 fingerprint, size and modification
-time from the verified output; no rescan is needed for those facts.
+GUI saves update the verified full-file BLAKE3 fingerprint, size and modification
+time for every library row at the written path, including CUE segments. Only the
+edited ordinary track receives the saved tags; CUE metadata and boundaries stay intact.
 
 Results distinguish `unchanged` (already normalized) and `replaced`; failures report
 `before_replace`. JSON paths are strings for UTF-8 paths, otherwise
