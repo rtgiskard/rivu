@@ -1149,11 +1149,16 @@ impl ReadCoordinator {
     }
 }
 
+pub(super) enum PlaylistNamePhase {
+    Editing(Option<String>),
+    Saving,
+    Unknown,
+}
+
 pub(super) struct PlaylistName {
     target: Option<i64>,
     pub(super) text: String,
-    pub(super) error: Option<String>,
-    pub(super) pending: bool,
+    pub(super) phase: PlaylistNamePhase,
 }
 
 impl PlaylistName {
@@ -1778,8 +1783,7 @@ impl UiState {
             } else {
                 name.into()
             },
-            error: None,
-            pending: false,
+            phase: PlaylistNamePhase::Editing(None),
         });
         if name.is_empty() {
             KeyAction::Ignored
@@ -1792,11 +1796,12 @@ impl UiState {
         let draft = self.playlist_name.as_mut().unwrap();
         let name = draft.text.trim();
         if name.is_empty() {
-            draft.error = Some(self.i18n.text("terminal-playlist-name-required").into());
+            draft.phase = PlaylistNamePhase::Editing(Some(
+                self.i18n.text("terminal-playlist-name-required").into(),
+            ));
             return KeyAction::Ignored;
         }
-        draft.error = None;
-        draft.pending = true;
+        draft.phase = PlaylistNamePhase::Saving;
         let name = name.to_owned();
         KeyAction::WritePlaylistName(match draft.target {
             Some(playlist_id) => Command::RenamePlaylist { playlist_id, name },
@@ -1819,16 +1824,25 @@ impl UiState {
                 self.set_notice(self.i18n.text(key).into(), NoticeKind::Success);
             }
             Err(error) => {
-                draft.pending = false;
-                draft.error = Some(error);
+                draft.phase = PlaylistNamePhase::Editing(Some(error));
             }
         }
         self.mark_local_change();
     }
 
+    pub(super) fn playlist_name_unknown(&mut self) {
+        if let Some(draft) = &mut self.playlist_name {
+            draft.phase = PlaylistNamePhase::Unknown;
+            self.mark_local_change();
+        }
+    }
+
     fn playlist_name_key(&mut self, key: KeyEvent) -> KeyAction {
-        let draft = self.playlist_name.as_mut().unwrap();
-        if draft.pending || !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
+        let draft = self.playlist_name.as_ref().unwrap();
+        if !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+            || matches!(draft.phase, PlaylistNamePhase::Saving)
+            || (matches!(draft.phase, PlaylistNamePhase::Unknown) && key.code != KeyCode::Esc)
+        {
             return KeyAction::Ignored;
         }
         self.mark_local_change();

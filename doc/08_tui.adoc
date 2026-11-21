@@ -62,9 +62,9 @@ to 256 UTF-8 bytes and support Backspace.
 Type a name directly (for example, `:save Friday Night`; no quotes are needed),
 or omit it to open the name editor. Rename starts with the current name. Enter
 submits; Esc discards an unsubmitted draft. Names are trimmed and cannot replace
-an existing playlist of the same name. A rejected name save keeps the draft
-for editing. After a save error or unknown outcome, check Playlists before
-retrying. Neither command changes playback or queue contents.
+an existing playlist of the same name. A rejected name stays editable. If the
+write outcome is unknown, Esc closes the read-only draft; check Playlists before
+starting a new save or rename. Neither command changes playback or queue contents.
 
 Bare `q` has no action outside editors and remains ordinary text inside them.
 Escape cancels or returns; it never closes the client. Unknown commands and

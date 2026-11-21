@@ -237,7 +237,8 @@ fn apply_command_completion(
             return Ok(());
         }
         Some((true, _)) if completion.feedback == CommandFeedback::PlaylistName => {
-            Err(ui.i18n.text("terminal-playlist-name-unknown").into())
+            ui.playlist_name_unknown();
+            return Ok(());
         }
         Some((_, error)) => {
             Err(error.unwrap_or_else(|| ui.i18n.text("terminal-command-rejected").into()))

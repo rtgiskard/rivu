@@ -45,6 +45,145 @@ pub(in crate::terminal) fn queue_replace_tui() -> TuiState {
     tui
 }
 
+fn finish_playlist_name(
+    ui: &mut UiState,
+    result: Result<rivu_protocol::wire::CommandReply, crate::terminal::worker::WorkerFailure>,
+) {
+    use crate::terminal::worker::{CommandCompletion, CommandFeedback};
+
+    crate::terminal::apply_command_completion(
+        ui,
+        CommandCompletion {
+            feedback: CommandFeedback::PlaylistName,
+            result,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn unknown_playlist_name_requires_dismissal_and_a_new_command() {
+    use crossterm::event::KeyEventKind;
+    use rivu_protocol::response::{Ack, AckStatus};
+
+    let held_enter = KeyEvent {
+        kind: KeyEventKind::Repeat,
+        ..KeyEvent::from(KeyCode::Enter)
+    };
+    for (verb, result) in [
+        ("save", Ok(Ack::new(AckStatus::Unknown, None, 0).into())),
+        (
+            "rename",
+            Err(anyhow::Error::new(rivu_client::CommandFailure {
+                status: AckStatus::Unknown,
+            })
+            .into()),
+        ),
+    ] {
+        let mut tui = queue_replace_tui();
+        if verb == "save" {
+            tui.ui.view = View::Queue;
+            assert!(matches!(
+                type_command(&mut tui.ui, &tui.snapshot, "save first collection"),
+                KeyAction::WritePlaylistName(Command::CreatePlaylistFromQueue { name })
+                    if name == "first collection"
+            ));
+        } else {
+            type_command(&mut tui.ui, &tui.snapshot, "rename");
+            assert!(matches!(
+                tui.ui
+                    .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot),
+                KeyAction::WritePlaylistName(Command::RenamePlaylist { playlist_id: 1, name })
+                    if name == "first collection"
+            ));
+        }
+        for key in [held_enter, KeyEvent::from(KeyCode::Esc)] {
+            assert!(matches!(
+                tui.ui.key_action(key, &tui.snapshot),
+                KeyAction::Ignored
+            ));
+        }
+        finish_playlist_name(&mut tui.ui, result);
+        for key in [
+            held_enter,
+            KeyEvent::from(KeyCode::Backspace),
+            KeyEvent::from(KeyCode::Char('x')),
+            KeyEvent::from(KeyCode::Tab),
+            KeyEvent::from(KeyCode::Enter),
+        ] {
+            assert!(matches!(
+                tui.ui.key_action(key, &tui.snapshot),
+                KeyAction::Ignored
+            ));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, &tui.snapshot, &mut tui.ui);
+            })
+            .unwrap();
+        let text = terminal_text(&terminal);
+        assert!(text.contains(tui.ui.i18n.text("terminal-playlist-name-unknown")));
+        assert_eq!(
+            tui.ui.playlist_name.as_ref().unwrap().text,
+            "first collection"
+        );
+        assert!(text.contains(&format!(":{verb} first collection")));
+
+        tui.ui
+            .key_action(KeyEvent::from(KeyCode::Esc), &tui.snapshot);
+        assert!(tui.ui.playlist_name.is_none());
+        match type_command(&mut tui.ui, &tui.snapshot, &format!("{verb} revised")) {
+            KeyAction::WritePlaylistName(Command::CreatePlaylistFromQueue { name })
+                if verb == "save" =>
+            {
+                assert_eq!(name, "revised")
+            }
+            KeyAction::WritePlaylistName(Command::RenamePlaylist {
+                playlist_id: 1,
+                name,
+            }) if verb == "rename" => assert_eq!(name, "revised"),
+            _ => panic!("expected a new {verb} write"),
+        }
+    }
+}
+
+#[test]
+fn rejected_playlist_name_stays_editable_for_retry() {
+    use rivu_protocol::response::{Ack, AckStatus};
+
+    let mut tui = queue_replace_tui();
+    assert!(matches!(
+        type_command(&mut tui.ui, &tui.snapshot, "rename Mix"),
+        KeyAction::WritePlaylistName(_)
+    ));
+    for (message, result) in [
+        (
+            "duplicate",
+            Ok(Ack::new(AckStatus::Failed, Some("duplicate".into()), 0).into()),
+        ),
+        ("not sent", Err(anyhow::anyhow!("not sent").into())),
+    ] {
+        finish_playlist_name(&mut tui.ui, result);
+        let draft = tui.ui.playlist_name.as_ref().unwrap();
+        assert!(
+            matches!(&draft.phase, PlaylistNamePhase::Editing(Some(error)) if error == message)
+        );
+        let revised = format!("{}!", draft.text);
+        tui.ui
+            .key_action(KeyEvent::from(KeyCode::Char('!')), &tui.snapshot);
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot),
+            KeyAction::WritePlaylistName(Command::RenamePlaylist { playlist_id: 1, name }) if name == revised
+        ));
+    }
+    finish_playlist_name(
+        &mut tui.ui,
+        Ok(Ack::new(AckStatus::Succeeded, None, 0).into()),
+    );
+    assert!(tui.ui.playlist_name.is_none());
+}
+
 #[test]
 fn playlist_replacement_confirmation_owns_input_and_commits_bound_identity() {
     for confirm in [KeyCode::Enter, KeyCode::Char('y')] {
