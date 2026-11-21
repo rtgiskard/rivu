@@ -9,6 +9,10 @@ use std::{
     fs::{self, OpenOptions},
     io::ErrorKind,
     os::unix::{fs::OpenOptionsExt, net::UnixListener},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        linux::net::SocketAddrExt,
+    },
     path::{Path, PathBuf},
 };
 
@@ -157,9 +161,59 @@ fn database_plan(options: &Options) -> Result<Option<DatabasePlan>> {
 /// Inspect existing resources without rewriting them. Apply additionally takes
 /// offline ownership and backs up supported older formats before upgrading them.
 pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
+    run_with_owner(options, mode, report, None)
+}
+
+/// Internal startup invocation: stdin carries the host's listening socket.
+pub fn run_inherited(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
+    ensure!(mode == Mode::Apply, "Inherited ownership requires apply");
+    // Duplicate before taking Rust ownership; stdio retains its original descriptor.
+    let fd = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("Duplicating inherited listener");
+    }
+    // SAFETY: fcntl returned a fresh descriptor, now owned by this listener.
+    let listener = unsafe { UnixListener::from_raw_fd(fd) };
+    let socket_option = |option| {
+        let mut value: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+        // SAFETY: both output pointers refer to correctly sized locals.
+        let result = unsafe {
+            libc::getsockopt(
+                listener.as_raw_fd(),
+                libc::SOL_SOCKET,
+                option,
+                (&mut value as *mut libc::c_int).cast(),
+                &mut length,
+            )
+        };
+        if result == 0 {
+            Ok(value)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+    ensure!(
+        socket_option(libc::SO_TYPE)? == libc::SOCK_STREAM
+            && socket_option(libc::SO_ACCEPTCONN)? == 1
+            && listener.local_addr()?.as_abstract_name()
+                == data_directory_address(&options.data_dir)?.as_abstract_name(),
+        "Inherited listener does not own the target data directory"
+    );
+    run_with_owner(options, mode, report, Some(listener))
+}
+
+fn run_with_owner(
+    options: &Options,
+    mode: Mode,
+    report: &mut Report,
+    inherited: Option<UnixListener>,
+) -> Result<()> {
     // Apply inspects existing resources under the same ownership as the host;
     // acquiring only after preflight would leave the plan open to startup races.
-    let _owner = if mode == Mode::Apply && options.data_dir.is_dir() {
+    let _owner = if inherited.is_some() {
+        inherited
+    } else if mode == Mode::Apply && options.data_dir.is_dir() {
         Some(
             UnixListener::bind_addr(&data_directory_address(&options.data_dir)?).context(
                 "Cannot take data-directory ownership; stop the running Rivu instance first",

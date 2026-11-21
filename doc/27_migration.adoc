@@ -21,11 +21,13 @@ application's normal decoding or SQL paths.
 The user-visible startup behavior and tool lookup are described in
 link:10_upgrading.adoc#application-invocation[Automatic startup migration].
 
-Startup acquires data-directory ownership for read-only inspection, closes the
-connection and releases ownership before invoking the tool. After child success,
-it reacquires ownership and checks the format through a fresh connection. Losing
-ownership during this handoff, a missing tool, failed conversion or a noncurrent
-result stops startup before configuration, business connections or audio initialize.
+Startup retains data-directory ownership from read-only inspection through IPC
+readiness. The tool inherits the same listener and holds it without accepting
+connections, so an in-flight Hello survives migration and the exclusive address
+remains held if the host exits while the tool is still writing. After child
+success, the host verifies the format through a fresh connection before serving
+IPC. A missing or incompatible tool, failed conversion or noncurrent result stops
+startup before configuration, business connections or audio initialize.
 There is no blind retry, data reset or automatic restoration.
 
 [[version-authority]]

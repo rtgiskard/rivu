@@ -25,6 +25,8 @@ struct Args {
         help_heading = "Global options"
     )]
     config: Option<PathBuf>,
+    #[arg(long, hide = true, requires = "data_dir")]
+    inherit_listener: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -49,7 +51,11 @@ fn main() -> ExitCode {
     };
     let options = Options::resolve(args.data_dir, args.config);
     let mut report = Report::default();
-    let result = run(&options, mode, &mut report);
+    let result = if args.inherit_listener {
+        rivu_migrate::run_inherited(&options, mode, &mut report)
+    } else {
+        run(&options, mode, &mut report)
+    };
     for line in &report.resources {
         println!("{}", TerminalEscaped(line));
     }

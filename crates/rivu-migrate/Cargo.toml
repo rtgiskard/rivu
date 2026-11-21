@@ -9,6 +9,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2 = "0.4"
+libc = "0.2"
 rivu-format = { path = "../rivu-format", default-features = false, features = ["database"] }
 rivu-utils = { path = "../rivu-utils", default-features = false, features = ["logging", "terminal"] }
 rusqlite = { workspace = true, features = ["backup"] }
@@ -16,5 +17,4 @@ tempfile = "3.27"
 tracing = "0.1"
 
 [dev-dependencies]
-libc = "0.2"
 rivu-utils = { path = "../rivu-utils", default-features = false, features = ["test-support"] }

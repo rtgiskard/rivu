@@ -51,10 +51,12 @@ operations, see link:02_library.adoc#sqlite-maintenance[SQLite maintenance].
 [[application-invocation]]
 == Automatic startup migration
 
-On a database version mismatch, Core startup runs
-`rivu-migrate --data-dir DATA --config CONFIG apply` with resolved host paths,
+On a database version mismatch, Core startup invokes a matching `rivu-migrate`,
 selecting the executable beside `rivu` or otherwise from `PATH`. Current and empty
-databases skip this step.
+databases skip this step. If a desktop launch starts Core, a migration taking
+more than a second can show a desktop notification. The notice is closed after
+successful verification or replaced with a failure notice. Notification service
+availability does not affect migration.
 
 If a GUI or TUI waiting for Core times out, the service may still be starting or
 migrating. Check the service before retrying. If you need the full migration

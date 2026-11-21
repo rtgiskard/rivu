@@ -89,13 +89,23 @@ fn ready_service_does_not_validate_unused_frontend_config() {
     std::fs::write(&unused_config, original).unwrap();
 
     assert_eq!(
-        async_io::block_on(super::ensure_service(directory.path(), &unused_config)).unwrap(),
+        async_io::block_on(super::ensure_service(
+            directory.path(),
+            &unused_config,
+            false
+        ))
+        .unwrap(),
         expected
     );
     assert_eq!(std::fs::read(&unused_config).unwrap(), original);
     let missing_config = directory.path().join("unused-missing.toml");
     assert_eq!(
-        async_io::block_on(super::ensure_service(directory.path(), &missing_config)).unwrap(),
+        async_io::block_on(super::ensure_service(
+            directory.path(),
+            &missing_config,
+            false
+        ))
+        .unwrap(),
         expected
     );
     assert!(!missing_config.exists());
@@ -152,7 +162,7 @@ fn cancelling_startup_closes_pending_hello_but_preserves_the_existing_owner() {
     let address = rivu_protocol::wire::address(directory.path()).unwrap();
     let listener = async_io::Async::new(UnixListener::bind_addr(&address).unwrap()).unwrap();
     async_io::block_on(async {
-        let mut startup = Box::pin(super::ensure_service(directory.path(), &config));
+        let mut startup = Box::pin(super::ensure_service(directory.path(), &config, false));
         let mut stream = timeout(
             Duration::from_secs(2),
             future::or(
@@ -186,16 +196,19 @@ fn cancelling_startup_closes_pending_hello_but_preserves_the_existing_owner() {
         // cancelling one waiter neither replaces nor retires its listener.
         let instance = timeout(
             Duration::from_secs(2),
-            future::or(super::ensure_service(directory.path(), &config), async {
-                let (mut next, _) = listener.accept().await.unwrap();
-                let request = read_request_frame(&mut next, &mut bytes::BytesMut::new())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(matches!(request, WireRequest::Hello(_)));
-                next.write_all(&hello_frame(42)).await.unwrap();
-                future::pending().await
-            }),
+            future::or(
+                super::ensure_service(directory.path(), &config, false),
+                async {
+                    let (mut next, _) = listener.accept().await.unwrap();
+                    let request = read_request_frame(&mut next, &mut bytes::BytesMut::new())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(matches!(request, WireRequest::Hello(_)));
+                    next.write_all(&hello_frame(42)).await.unwrap();
+                    future::pending().await
+                },
+            ),
         )
         .await
         .unwrap()

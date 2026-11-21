@@ -64,6 +64,11 @@ impl SocketOwner {
     pub fn instance_id(&self) -> u32 {
         self.instance_id
     }
+
+    pub(crate) fn migration_stdio(&self) -> std::io::Result<std::process::Stdio> {
+        let fd: std::os::fd::OwnedFd = self.listener.try_clone()?.into();
+        Ok(fd.into())
+    }
 }
 
 /// Async transport owned by App; application execution stays alive until this

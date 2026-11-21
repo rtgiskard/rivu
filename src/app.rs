@@ -190,7 +190,7 @@ impl App {
         rivu_tui::run(
             &data_dir,
             "auto",
-            frontend_host::ensure_service(&data_dir, &config_path),
+            frontend_host::ensure_service(&data_dir, &config_path, false),
         )
     }
     pub fn start(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<Self> {

@@ -204,9 +204,10 @@ not availability: another user can occupy the public abstract name and prevent
 startup, but cannot impersonate the server to a client.
 
 Startup binds the listener before database, configuration-write or audio work;
-binding grants ownership through teardown and partial startup failure. The
-link:10_upgrading.adoc#application-invocation[automatic migration handoff] temporarily
-releases it to the tool, then reacquires and verifies before startup continues.
+binding grants ownership through teardown and partial startup failure.
+During link:10_upgrading.adoc#application-invocation[automatic migration], the
+host keeps the listener and passes a duplicate to the tool. The host verifies the
+schema before serving queued requests on the original listener.
 The kernel releases the address when the last listener closes, including on
 process death; no stale-file cleanup is needed.
 

@@ -17,7 +17,7 @@ pub(super) fn open(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>)
         .transpose()?;
     let instance = match expected {
         Some(instance) => instance,
-        None => async_io::block_on(ensure_service(&data_dir, &config_path))?,
+        None => async_io::block_on(ensure_service(&data_dir, &config_path, true))?,
     };
     // Service-originated desktops must verify that original owner without
     // bootstrapping a replacement. Ordinary launches reuse bootstrap's Hello;

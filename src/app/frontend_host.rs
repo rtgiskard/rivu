@@ -126,7 +126,11 @@ pub(super) fn detach_startup_diagnostics() -> Result<()> {
 /// All probing, initialization and Hello I/O share one startup deadline.
 /// Dropping this waiter closes its readiness connection, not the independent
 /// service. The frontend owns waiting; the detached process owns Core lifetime.
-pub(super) async fn ensure_service(data_dir: &Path, config_path: &Path) -> Result<u32> {
+pub(super) async fn ensure_service(
+    data_dir: &Path,
+    config_path: &Path,
+    desktop: bool,
+) -> Result<u32> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     match probe(data_dir, deadline).await {
         Ok(instance) => return Ok(instance),
@@ -150,6 +154,11 @@ pub(super) async fn ensure_service(data_dir: &Path, config_path: &Path) -> Resul
         .arg(config_path)
         .arg("serve")
         .env(BOOTSTRAP_ENV, "1");
+    if desktop {
+        command.env("RIVU_DESKTOP_BOOTSTRAP", "1");
+    } else {
+        command.env_remove("RIVU_DESKTOP_BOOTSTRAP");
+    }
     // The service must survive both frontend and terminal-session exit.
     // SAFETY: setsid is async-signal-safe and captures no parent state.
     unsafe {
