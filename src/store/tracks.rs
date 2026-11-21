@@ -80,6 +80,20 @@ const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/
 const OTHER_SCOPE: &str = " AND NOT EXISTS(SELECT 1 FROM json_each(?4) AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0'))";
 const DIRECTORY_CHILDREN: &str = "(SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
 
+// Both child branches consume the same matches. Reuse filtered rows, but
+// leave unfiltered sources inlineable to avoid staging the whole subtree.
+fn directory_sources_hint(
+    query: Option<&str>,
+    favorite: Option<bool>,
+    missing: Option<bool>,
+) -> &'static str {
+    if query.is_some() || favorite.is_some() || missing.is_some() {
+        " MATERIALIZED"
+    } else {
+        ""
+    }
+}
+
 fn bool_key(value: Option<bool>) -> &'static str {
     match value {
         None => "",
@@ -691,8 +705,9 @@ impl Store {
                 PathBuf::from(format!("{}{}", prefix, &rest[..separator]))
             }
         });
+        let hint = directory_sources_hint(query.as_deref(), favorite, missing);
         let sql = format!(
-            "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}),
+            "WITH sources AS{hint} (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}),
              children AS {DIRECTORY_CHILDREN},
              target AS (SELECT CASE WHEN ?5 IS NULL THEN 1 ELSE 0 END AS kind,
                                COALESCE(?5,(SELECT path FROM tracks WHERE id=?6)) AS child)
@@ -970,8 +985,9 @@ impl Store {
         };
         // Group narrow children, preserving CUE identity; only the bounded page
         // joins track payloads. The exact scalar total survives page changes.
+        let hint = directory_sources_hint(query.as_deref(), favorite, missing);
         let children = format!(
-            "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}), children AS {DIRECTORY_CHILDREN}"
+            "WITH sources AS{hint} (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}), children AS {DIRECTORY_CHILDREN}"
         );
         let total = self.cached_count(
             super::CountDomain::Directory,
