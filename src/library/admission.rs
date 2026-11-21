@@ -262,7 +262,7 @@ mod tests {
         let known = KnownFile {
             size: metadata.len(),
             modified_ns: super::super::source::cache_modified_ns(metadata.modified().ok()),
-            fingerprint: Some(blake3::hash(b"cached encoded content").to_hex().to_string()),
+            fingerprint: Some(blake3::hash(b"cached encoded content")),
             media: Some(MediaInfo {
                 title: "Cached title".into(),
                 artist: String::new(),

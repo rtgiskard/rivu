@@ -102,7 +102,7 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
                 path: directory.path().join("committed.wav"),
                 size: 1,
                 modified_ns: 1,
-                fingerprint: Some(blake3::hash(b"committed fingerprint").to_hex().to_string()),
+                fingerprint: Some(blake3::hash(b"committed fingerprint")),
                 media,
             }])
             .into_iter()
@@ -1148,7 +1148,7 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
         path,
         size: known.size,
         modified_ns: known.modified_ns,
-        fingerprint: Some(blake3::hash(b"same encoded audio").to_hex().to_string()),
+        fingerprint: Some(blake3::hash(b"same encoded audio")),
         media: known.media.unwrap(),
     };
     let impacts = core
@@ -1172,7 +1172,7 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
     let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
     let before = core.state.query_revisions();
     record.modified_ns += 1;
-    let fingerprint = record.fingerprint.clone().unwrap();
+    let fingerprint = record.fingerprint.unwrap().to_hex().to_string();
     let status = save_prepared_scan(
         &mut core,
         ScanFinished {

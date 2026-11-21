@@ -1337,7 +1337,7 @@ mod tests {
                     path: track.path,
                     size: known.size,
                     modified_ns: known.modified_ns,
-                    fingerprint: fingerprint.map(str::to_owned),
+                    fingerprint: fingerprint.map(|hash| blake3::Hash::from_hex(hash).unwrap()),
                     media: known.media.unwrap(),
                 }
             })

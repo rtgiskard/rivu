@@ -973,7 +973,7 @@ mod recheck_tests {
         KnownFile {
             size: metadata.len(),
             modified_ns: cache_modified_ns(metadata.modified().ok()),
-            fingerprint: Some(blake3::hash(b"cached source").to_hex().to_string()),
+            fingerprint: Some(blake3::hash(b"cached source")),
             cue: None,
             media: Some(MediaInfo {
                 title: "Cached".into(),
@@ -1116,10 +1116,8 @@ mod recheck_tests {
             assert!(result.errors.is_empty(), "{:?}", result.errors);
             assert_eq!(result.records.len(), paths.len());
             for record in result.records {
-                let expected = blake3::hash(&fs::read(&record.path).unwrap())
-                    .to_hex()
-                    .to_string();
-                assert_eq!(record.fingerprint.as_deref(), Some(expected.as_str()));
+                let expected = blake3::hash(&fs::read(&record.path).unwrap());
+                assert_eq!(record.fingerprint, Some(expected));
             }
         });
     }

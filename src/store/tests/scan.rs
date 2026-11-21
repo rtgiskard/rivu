@@ -10,7 +10,7 @@ fn record() -> ScanRecord {
         path: "/music/tagged.wav".into(),
         size: 1024,
         modified_ns: 42,
-        fingerprint: Some(blake3::hash(b"fingerprint").to_hex().to_string()),
+        fingerprint: Some(blake3::hash(b"fingerprint")),
         media: MediaInfo {
             title: "Title".into(),
             artist: "Artist".into(),
@@ -480,7 +480,11 @@ fn verification_rescans_invalidate_library_stats_only_when_size_changes() {
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         let member = store
-            .duplicate_members_page(scan.records[0].fingerprint.as_deref().unwrap(), 0, 10)
+            .duplicate_members_page(
+                scan.records[0].fingerprint.unwrap().to_hex().as_str(),
+                0,
+                10,
+            )
             .unwrap()
             .rows
             .remove(0);
@@ -527,10 +531,7 @@ fn cue_size_only_rescans_invalidate_library_stats_without_fingerprints() {
 #[test]
 fn ordinary_fingerprint_changes_affect_grouping_but_not_structure() {
     let (store, mut scan, id) = queued(record());
-    for fingerprint in [
-        None,
-        Some(blake3::hash(b"replacement").to_hex().to_string()),
-    ] {
+    for fingerprint in [None, Some(blake3::hash(b"replacement"))] {
         std::sync::Arc::make_mut(&mut scan.records[0]).fingerprint = fingerprint;
         assert_eq!(
             store.apply_scan(&scan).unwrap(),
@@ -544,7 +545,9 @@ fn ordinary_fingerprint_changes_affect_grouping_but_not_structure() {
         );
         assert_eq!(
             store.track(id).unwrap().unwrap().fingerprint,
-            scan.records[0].fingerprint
+            scan.records[0]
+                .fingerprint
+                .map(|hash| hash.to_hex().to_string())
         );
     }
 }
@@ -1096,7 +1099,7 @@ fn unqueued_metadata_changes_do_not_invalidate_queue() {
     let (store, mut scan, _) = queued(record());
     let mut other = record();
     other.path = "/music/other.wav".into();
-    other.fingerprint = Some(blake3::hash(b"other").to_hex().to_string());
+    other.fingerprint = Some(blake3::hash(b"other"));
     scan.records.push(std::sync::Arc::new(other));
     store.apply_scan(&scan).unwrap();
     let page = store.queue_page(None, 0, 10).unwrap();
@@ -1216,11 +1219,7 @@ fn source_metadata_prefers_whole_file_and_falls_back_to_cue_identity() {
     for index in 0..128 {
         let mut unrelated = record();
         unrelated.path = directory.path().join(format!("other/{index}.wav"));
-        unrelated.fingerprint = Some(
-            blake3::hash(index.to_string().as_bytes())
-                .to_hex()
-                .to_string(),
-        );
+        unrelated.fingerprint = Some(blake3::hash(index.to_string().as_bytes()));
         records.push(std::sync::Arc::new(unrelated));
     }
     assert!(
@@ -1262,7 +1261,7 @@ fn tiny_scan_relocates_global_identity_without_touching_unrelated_missing_rows()
     original.path = old_path.clone();
     let mut unrelated = record();
     unrelated.path = directory.path().join("tiny-neighbor/absent.wav");
-    unrelated.fingerprint = Some(blake3::hash(b"unrelated").to_hex().to_string());
+    unrelated.fingerprint = Some(blake3::hash(b"unrelated"));
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
         .apply_scan(&ScanResult {
@@ -1363,18 +1362,6 @@ fn uncertain_global_candidate_and_failed_scan_preserve_existing_identity() {
         .unwrap();
     assert_ne!(id, new_id);
     let queue = store.queue_state().unwrap();
-    std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "Must roll back".into();
-    let mut invalid = record();
-    invalid.path = directory.path().join("new/invalid.wav");
-    invalid.fingerprint = Some("invalid fingerprint".into());
-    scan.records.push(std::sync::Arc::new(invalid));
-    assert!(store.apply_scan(&scan).is_err());
-    assert_eq!(
-        store.track(new_id).unwrap().unwrap().title,
-        replacement.media.title
-    );
-    assert_eq!(store.track(id).unwrap().unwrap(), before);
-    assert_eq!(store.queue_state().unwrap(), queue);
     store
         .conn
         .execute_batch(
@@ -1383,8 +1370,9 @@ fn uncertain_global_candidate_and_failed_scan_preserve_existing_identity() {
          BEGIN SELECT RAISE(ABORT,'rejected scan insert'); END",
         )
         .unwrap();
-    let mut rejected = (*scan.records.pop().unwrap()).clone();
-    rejected.fingerprint = Some(blake3::hash(b"rejected").to_hex().to_string());
+    let mut rejected = record();
+    rejected.path = directory.path().join("new/rejected.wav");
+    rejected.fingerprint = Some(blake3::hash(b"rejected"));
     rejected.media.title = "Reject insert".into();
     original.media.title = "Queued update must roll back".into();
     scan.records
@@ -1631,7 +1619,7 @@ fn independent_ordinary_identity_is_never_automatically_reassigned_by_later_scan
         Some(id)
     );
     let members = store
-        .duplicate_members_page(original.fingerprint.as_deref().unwrap(), 0, 10)
+        .duplicate_members_page(original.fingerprint.unwrap().to_hex().as_str(), 0, 10)
         .unwrap();
     assert!(
         members
@@ -1818,7 +1806,7 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
     let mut source = ordinary.as_ref().clone();
     source.size = 4096;
     source.modified_ns = 99;
-    source.fingerprint = Some(blake3::hash(b"refreshed source").to_hex().to_string());
+    source.fingerprint = Some(blake3::hash(b"refreshed source"));
     source.media.title = "Source title must not replace CUE title".into();
     source.media.artist = "Source artist".into();
     source.media.album = "Source album".into();

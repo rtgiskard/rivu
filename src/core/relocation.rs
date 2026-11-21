@@ -137,7 +137,7 @@ async fn verify_target(
             cancellation.check()?;
             verified.revalidate(&prepared.target.path)?;
             ensure!(
-                hasher.finalize().to_hex().as_str() == prepared.source.fingerprint,
+                hasher.finalize() == prepared.source.fingerprint,
                 "Fresh target content does not match the old file fingerprint; relocation refused"
             );
             Ok(verified)
@@ -367,11 +367,11 @@ mod tests {
         let path = directory.path().join("target.wav");
         std::fs::write(&path, b"actual file bytes").unwrap();
         let metadata = FileIdentity::read(&std::fs::metadata(&path).unwrap()).unwrap();
-        let fingerprint = blake3::hash(b"actual file bytes").to_hex().to_string();
+        let fingerprint = blake3::hash(b"actual file bytes");
         let source = RelocationIdentity {
             id: 1,
             path: directory.path().join("missing.wav"),
-            fingerprint: fingerprint.clone(),
+            fingerprint,
             file_size: metadata.size,
             modified_ns: metadata.modified_ns().unwrap(),
         };
@@ -389,11 +389,8 @@ mod tests {
     fn fresh_hash_rejects_matching_cached_hash_for_different_bytes() {
         let (_directory, mut prepared) = prepared();
         // Both database identities still agree; only reading the bytes detects this.
-        prepared.source.fingerprint = blake3::hash(b"historical bytes").to_hex().to_string();
-        prepared
-            .target
-            .fingerprint
-            .clone_from(&prepared.source.fingerprint);
+        prepared.source.fingerprint = blake3::hash(b"historical bytes");
+        prepared.target.fingerprint = prepared.source.fingerprint;
         let error = futures::executor::block_on(verify_target(
             prepared,
             library::ScanCancellation::default(),

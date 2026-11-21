@@ -790,7 +790,7 @@ mod tests {
                 path: directory.path().join("projection-panic.wav"),
                 size: 1,
                 modified_ns: 1,
-                fingerprint: Some(blake3::hash(b"admission-panic").to_hex().to_string()),
+                fingerprint: Some(blake3::hash(b"admission-panic")),
                 media: MediaInfo {
                     title: "Admission panic".into(),
                     artist: String::new(),

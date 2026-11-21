@@ -527,7 +527,7 @@ fn regular_audio_symlink_is_scanned_hashed_and_used_by_cue() -> Result<()> {
     let audio = directory.path().join("audio.wav");
     std::os::unix::fs::symlink(&target, &audio)?;
     two_track_sheet(&directory.path().join("album.cue"))?;
-    let expected = blake3::hash(&fs::read(target)?).to_hex().to_string();
+    let expected = blake3::hash(&fs::read(target)?);
     for enabled in [false, true] {
         let result = scan_paths(
             &[directory.path().to_path_buf(), audio.clone()],
@@ -537,8 +537,7 @@ fn regular_audio_symlink_is_scanned_hashed_and_used_by_cue() -> Result<()> {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(result.track_count(), 3);
         assert!(result.tracks().all(|record| {
-            record.source.path == audio
-                && record.source.fingerprint.as_deref() == Some(expected.as_str())
+            record.source.path == audio && record.source.fingerprint == Some(expected)
         }));
         assert_eq!(
             result
@@ -566,7 +565,7 @@ fn opened_scan_source_keeps_metadata_and_hash_when_its_symlink_is_retargeted() -
             std::os::unix::fs::symlink(&first, &audio)?;
             two_track_sheet(&sheet)?;
             let metadata = fs::metadata(&first)?;
-            let expected = blake3::hash(&fs::read(&first)?).to_hex().to_string();
+            let expected = blake3::hash(&fs::read(&first)?);
             #[cfg(feature = "ffmpeg")]
             if enabled {
                 // Exercise loaded-runtime WAVE inspection as well as native-only opens.
@@ -597,14 +596,14 @@ fn opened_scan_source_keeps_metadata_and_hash_when_its_symlink_is_retargeted() -
                 record.source.path == audio
                     && record.source.size == metadata.len()
                     && record.source.modified_ns == cache_modified_ns(metadata.modified().ok())
-                    && record.source.fingerprint.as_deref() == Some(expected.as_str())
+                    && record.source.fingerprint == Some(expected)
             }));
             let duration: f64 = result
                 .tracks()
                 .map(|record| record.media.duration.unwrap())
                 .sum();
             assert_eq!(duration, if cue { 6.0 } else { 3.0 });
-            assert_ne!(blake3::hash(&fs::read(&audio)?).to_hex().as_str(), expected);
+            assert_ne!(blake3::hash(&fs::read(&audio)?), expected);
         }
     }
     Ok(())
@@ -648,7 +647,7 @@ fn in_place_source_changes_fail_scans_instead_of_mixing_versions() -> Result<()>
             );
             assert_eq!(
                 next.records[0].fingerprint,
-                Some(blake3::hash(&fs::read(&audio)?).to_hex().to_string())
+                Some(blake3::hash(&fs::read(&audio)?))
             );
         }
     }
@@ -1225,7 +1224,7 @@ fn known_records(result: &ScanResult) -> Vec<(PathBuf, KnownFile)> {
                 KnownFile {
                     size: record.source.size,
                     modified_ns: record.source.modified_ns,
-                    fingerprint: record.source.fingerprint.clone(),
+                    fingerprint: record.source.fingerprint,
                     media: Some(media),
                     cue: record.cue.map(cue_segment),
                 },
@@ -1328,7 +1327,10 @@ fn track_from_record(id: i64, record: ScanTrack<'_>) -> Track {
     Track {
         id,
         path: record.source.path.clone(),
-        fingerprint: record.source.fingerprint.clone(),
+        fingerprint: record
+            .source
+            .fingerprint
+            .map(|hash| hash.to_hex().to_string()),
         title: record.media.title.to_owned(),
         artist: record.media.artist.to_owned(),
         album: record.media.album.to_owned(),
@@ -1475,7 +1477,7 @@ fn cue_rescan_rereads_sheet_and_never_reuses_segment_as_full_media() -> Result<(
         .filter(|(_, known)| known.cue.is_some())
         .collect();
     for (_, known) in &mut known {
-        known.fingerprint = Some("unchanged-cue-source-hash".into());
+        known.fingerprint = Some(blake3::hash(b"unchanged-cue-source-hash"));
     }
     let full = scan_paths(std::slice::from_ref(&audio), &known, false)?;
     assert!(full.errors.is_empty(), "{:?}", full.errors);
@@ -1483,8 +1485,8 @@ fn cue_rescan_rereads_sheet_and_never_reuses_segment_as_full_media() -> Result<(
     assert_eq!(full.records[0].media.duration, Some(3.0));
     assert_ne!(full.records[0].media.artist, "Sheet artist");
     assert_eq!(
-        full.records[0].fingerprint.as_deref(),
-        Some("unchanged-cue-source-hash")
+        full.records[0].fingerprint,
+        Some(blake3::hash(b"unchanged-cue-source-hash"))
     );
     fs::write(
         &sheet,

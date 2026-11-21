@@ -1,5 +1,8 @@
 use super::Store;
-use super::rows::{TRACK_COLUMN_COUNT, TRACK_COLUMNS, fingerprint_from_row, track_from_row};
+use super::rows::{
+    TRACK_COLUMN_COUNT, TRACK_COLUMNS, fingerprint_from_row, fingerprint_hash_from_row,
+    track_from_row,
+};
 use super::scan::{SOURCE_FIELDS, write_source_assignments};
 use anyhow::{Context, Result, bail};
 use rivu_protocol::model::{DuplicateGroup, DuplicateMember, Page};
@@ -31,7 +34,7 @@ fn duplicate_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Duplic
 pub(crate) struct RelocationIdentity {
     pub id: i64,
     pub path: PathBuf,
-    pub fingerprint: String,
+    pub fingerprint: blake3::Hash,
     pub file_size: u64,
     pub modified_ns: i64,
 }
@@ -64,7 +67,7 @@ fn relocation_row(conn: &Connection, id: i64) -> Result<RelocationRow> {
             |row| {
                 Ok((
                     PathBuf::from(row.get::<_, String>(0)?),
-                    fingerprint_from_row(row, 1)?,
+                    fingerprint_hash_from_row(row, 1)?,
                     row.get::<_, i64>(2)? as u64,
                     row.get::<_, i64>(3)?,
                     row.get::<_, bool>(4)?,

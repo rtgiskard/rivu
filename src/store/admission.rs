@@ -48,12 +48,6 @@ impl Store {
                 let id = existing
                     .query_row([path], |row| row.get::<_, i64>(0))
                     .optional()?;
-                let fingerprint = record
-                    .fingerprint
-                    .as_deref()
-                    .map(blake3::Hash::from_hex)
-                    .transpose()
-                    .context("Invalid external audio BLAKE3 fingerprint")?;
                 let media = &record.media;
                 let bitrate = media
                     .bitrate_bps
@@ -64,7 +58,10 @@ impl Store {
                     i64::try_from(ordinal)?,
                     id,
                     path,
-                    fingerprint.as_ref().map(|hash| hash.as_bytes().as_slice()),
+                    record
+                        .fingerprint
+                        .as_ref()
+                        .map(|hash| hash.as_bytes().as_slice()),
                     i64::try_from(record.size).context("Audio file size exceeds database range")?,
                     record.modified_ns,
                     media.title,
@@ -140,7 +137,7 @@ mod tests {
             path: path.into(),
             size: 1,
             modified_ns: 2,
-            fingerprint: Some(blake3::hash(path.as_bytes()).to_hex().to_string()),
+            fingerprint: Some(blake3::hash(path.as_bytes())),
             media: MediaInfo {
                 title: path.into(),
                 artist: String::new(),
@@ -610,7 +607,7 @@ mod tests {
         let mut updated = record("/outside/existing.wav");
         updated.size = 1234;
         updated.modified_ns = 5678;
-        updated.fingerprint = Some(blake3::hash(b"fresh encoded content").to_hex().to_string());
+        updated.fingerprint = Some(blake3::hash(b"fresh encoded content"));
         let media = &mut updated.media;
         media.title = "Fresh raw title".into();
         media.artist = "Fresh raw artist".into();

@@ -28,7 +28,7 @@ pub struct KnownFile {
     pub size: u64,
     /// Signed Unix nanoseconds; i64::MIN is reserved for uncacheable mtimes.
     pub modified_ns: i64,
-    pub fingerprint: Option<String>,
+    pub fingerprint: Option<blake3::Hash>,
     pub media: Option<MediaInfo>,
     pub cue: Option<CueSegment>,
 }
@@ -57,7 +57,7 @@ pub struct ScanRecord {
     pub size: u64,
     /// Signed Unix nanoseconds; i64::MIN is reserved for uncacheable mtimes.
     pub modified_ns: i64,
-    pub fingerprint: Option<String>,
+    pub fingerprint: Option<blake3::Hash>,
     pub media: MediaInfo,
 }
 
@@ -160,7 +160,6 @@ impl ScanRecord {
     pub(super) fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.path.as_os_str().len()
-            + self.fingerprint.as_ref().map_or(0, String::len)
             + media_retained_bytes(&self.media)
     }
 }
@@ -264,7 +263,7 @@ struct PendingSource {
     known: Option<KnownFile>,
     initialized: bool,
     media: Option<MediaInfo>,
-    fingerprint: Option<String>,
+    fingerprint: Option<blake3::Hash>,
     hasher: Option<blake3::Hasher>,
     hashed: u64,
 }
@@ -353,9 +352,7 @@ impl PendingSource {
                 .hasher
                 .as_ref()
                 .context("Audio hash was not initialized")?
-                .finalize()
-                .to_hex()
-                .to_string(),
+                .finalize(),
         };
         Ok(Some(ScanRecord {
             path: std::mem::take(&mut self.path),

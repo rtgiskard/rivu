@@ -361,7 +361,7 @@ fn incomplete_scan_preserves_absent_identities_and_avoids_relocation() {
 }
 
 #[test]
-fn invalid_fingerprints_roll_back_complete_and_incomplete_scans() {
+fn failed_inserts_roll_back_complete_and_incomplete_scans() {
     for incomplete in [false, true] {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let mut original = rec("/music/old.wav", "old", "Original", 10.0);
@@ -373,8 +373,8 @@ fn invalid_fingerprints_roll_back_complete_and_incomplete_scans() {
         store.set_favorite(&[id], true).unwrap();
         let before = store.track(id).unwrap().unwrap();
         original.media.title = "Uncommitted".into();
-        let mut invalid = rec("/music/new.wav", "new", "New", 10.0);
-        invalid.fingerprint = Some("not-a-fingerprint".into());
+        store.conn.execute_batch("CREATE TEMP TRIGGER reject_new BEFORE INSERT ON tracks WHEN NEW.title='New' BEGIN SELECT RAISE(ABORT,'rejected scan insert'); END").unwrap();
+        let invalid = rec("/music/new.wav", "new", "New", 10.0);
         let mut result = scan(vec![original, invalid]);
         result.scan_incomplete = incomplete;
         assert!(store.apply_scan(&result).is_err());

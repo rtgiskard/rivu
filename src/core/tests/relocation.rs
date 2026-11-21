@@ -27,7 +27,7 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
                         .as_nanos(),
                 )
                 .unwrap(),
-                fingerprint: Some(blake3::hash(b"same complete content").to_hex().to_string()),
+                fingerprint: Some(blake3::hash(b"same complete content")),
                 media: media.clone(),
             }
         })
@@ -371,11 +371,7 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
                     path: known.path,
                     size: known.size,
                     modified_ns: known.modified_ns,
-                    fingerprint: Some(
-                        blake3::hash(b"different historical identity")
-                            .to_hex()
-                            .to_string(),
-                    ),
+                    fingerprint: Some(blake3::hash(b"different historical identity")),
                     media: known.media.unwrap(),
                 }])
                 .into_iter()

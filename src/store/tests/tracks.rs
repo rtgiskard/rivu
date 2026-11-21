@@ -223,7 +223,7 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     drop(store);
     let store = Store::open(&database).unwrap();
     assert!(store.track(track.id).unwrap().unwrap().bitrate_exact);
-    record.fingerprint = Some(blake3::hash(b"replacement").to_hex().to_string());
+    record.fingerprint = Some(blake3::hash(b"replacement"));
     record.modified_ns += 1;
     record.media.bitrate_bps = Some(64_000);
     assert!(
@@ -574,7 +574,7 @@ fn metadata_refresh_preserves_favorites_and_unknown_values() {
     store.increment_play_count(id).unwrap();
     record.media.track_number = Some(3);
     record.media.bitrate_bps = None;
-    record.fingerprint = Some(blake3::hash(b"replacement").to_hex().to_string());
+    record.fingerprint = Some(blake3::hash(b"replacement"));
     store.apply_scan(&scan(vec![record])).unwrap();
     let track = all_tracks(&store).remove(0);
     assert!(track.favorite);

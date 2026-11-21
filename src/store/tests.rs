@@ -104,7 +104,7 @@ fn rec(path: &str, hash: &str, title: &str, dur: f64) -> ScanRecord {
         path: path.into(),
         size: 1,
         modified_ns: 1,
-        fingerprint: Some(blake3::hash(hash.as_bytes()).to_hex().to_string()),
+        fingerprint: Some(blake3::hash(hash.as_bytes())),
         media: MediaInfo {
             title: title.into(),
             artist: String::new(),

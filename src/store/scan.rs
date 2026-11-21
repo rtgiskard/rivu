@@ -1,4 +1,4 @@
-use super::rows::{cue_from_row, fingerprint_from_row};
+use super::rows::{cue_from_row, fingerprint_hash_from_row};
 use super::{CatalogChanges, Store};
 use crate::library::{CueRecord, KnownFile, RegisteredCueMetadata, ScanResult, ScanUncertainty};
 use crate::library::{ImportBudget, ImportBudgetScope, is_audio_path};
@@ -370,7 +370,7 @@ impl std::io::Write for ScopeJson {
 struct Existing {
     id: i64,
     path: PathBuf,
-    hash: Option<String>,
+    hash: Option<blake3::Hash>,
     cue: Option<CueSegment>,
     independent: bool,
 }
@@ -390,12 +390,12 @@ fn identity<'a>(path: &'a Path, cue: Option<crate::library::CueView<'a>>) -> Tra
 
 #[derive(Hash, PartialEq, Eq)]
 enum RelocationKey<'a> {
-    File(&'a str),
-    Cue(&'a str, u32, u64, Option<u64>),
+    File(&'a blake3::Hash),
+    Cue(&'a blake3::Hash, u32, u64, Option<u64>),
 }
 
 fn relocation_key<'a>(
-    hash: &'a str,
+    hash: &'a blake3::Hash,
     cue: Option<crate::library::CueView<'_>>,
 ) -> RelocationKey<'a> {
     match cue {
@@ -415,7 +415,7 @@ fn known_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownFile> {
     Ok(KnownFile {
         size: r.get::<_, i64>(0)? as u64,
         modified_ns: r.get(1)?,
-        fingerprint: fingerprint_from_row(r, 2)?,
+        fingerprint: fingerprint_hash_from_row(r, 2)?,
         cue: cue_from_row(r, 10)?,
         media: if r.get::<_, i64>(14)? == PROBE_VERSION {
             Some(MediaInfo {
@@ -447,7 +447,7 @@ pub(crate) struct StoredScanFile {
     pub path: PathBuf,
     pub size: u64,
     pub modified_ns: i64,
-    pub fingerprint: Option<String>,
+    pub fingerprint: Option<blake3::Hash>,
     pub media: Option<MediaInfo>,
     pub cue: Option<CueSegment>,
 }
@@ -824,7 +824,7 @@ impl Store {
             Ok(Existing {
                 id: r.get(0)?,
                 path: PathBuf::from(r.get::<_, String>(1)?),
-                hash: fingerprint_from_row(r, 2)?,
+                hash: fingerprint_hash_from_row(r, 2)?,
                 cue: cue_from_row(r, 3)?,
                 independent: r.get(7)?,
             })
@@ -858,7 +858,7 @@ impl Store {
                 .map(|record| identity(&record.path, record.cue.as_ref().map(Into::into)))
                 .collect();
             for record in &records {
-                if let Some(hash) = record.source.fingerprint.as_deref()
+                if let Some(hash) = record.source.fingerprint.as_ref()
                     && !existing_identities.contains(&identity(&record.source.path, record.cue))
                 {
                     candidate_hashes.insert(hash);
@@ -876,8 +876,6 @@ impl Store {
                  FROM tracks INDEXED BY tracks_fingerprint WHERE fingerprint=?1",
             )?;
             for hash in &candidate_hashes {
-                let hash =
-                    blake3::Hash::from_hex(hash).context("Invalid scan BLAKE3 fingerprint")?;
                 let mut rows = q.query([hash.as_bytes().as_slice()])?;
                 while let Some(row) = rows.next()? {
                     let id = row.get::<_, i64>(0)?;
@@ -983,7 +981,7 @@ impl Store {
                     .as_ref()
                     .map_or(record.path.as_path(), |cue| cue.sheet.as_path())
             };
-            if let Some(hash) = record.hash.as_deref()
+            if let Some(hash) = record.hash.as_ref()
                 && candidate_hashes.contains(hash)
                 && !identities.contains(&key)
                 && !unconfirmed(record)
@@ -1015,7 +1013,7 @@ impl Store {
         };
         for record in destinations {
             let destination = identity(&record.source.path, record.cue);
-            if let Some(hash) = record.source.fingerprint.as_deref()
+            if let Some(hash) = record.source.fingerprint.as_ref()
                 && !byidentity.contains_key(&destination)
             {
                 new_destinations
@@ -1046,7 +1044,7 @@ impl Store {
         for r in &records {
             let key = identity(&r.source.path, r.cue);
             let id = byidentity.get(&key).copied().or_else(|| {
-                r.source.fingerprint.as_deref().and_then(|hash| {
+                r.source.fingerprint.as_ref().and_then(|hash| {
                     let relocation = relocation_key(hash, r.cue);
                     if !new_destinations
                         .get(&relocation)
@@ -1085,17 +1083,13 @@ impl Store {
                 .map(i64::try_from)
                 .transpose()
                 .context("Audio bitrate exceeds database range")?;
-            let fingerprint = r
-                .source
-                .fingerprint
-                .as_deref()
-                .map(blake3::Hash::from_hex)
-                .transpose()
-                .context("Invalid scan BLAKE3 fingerprint")?;
             stage.execute(params![
                 id,
                 r.source.path.to_str(),
-                fingerprint.as_ref().map(|hash| hash.as_bytes().as_slice()),
+                r.source
+                    .fingerprint
+                    .as_ref()
+                    .map(|hash| hash.as_bytes().as_slice()),
                 r.source.size as i64,
                 r.source.modified_ns,
                 m.title,

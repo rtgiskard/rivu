@@ -7,7 +7,7 @@ fn cached_midi_source(path: &Path) -> Result<std::sync::Arc<ScanRecord>> {
         size: metadata.len(),
         modified_ns: cache_modified_ns(metadata.modified().ok()),
         // Deliberately different from the file hash: reuse must not rehash.
-        fingerprint: Some(blake3::hash(b"retained fingerprint").to_hex().to_string()),
+        fingerprint: Some(blake3::hash(b"retained fingerprint")),
         media: rivu_audio::MediaInfo {
             title: "Cached MIDI".into(),
             artist: "Cached artist".into(),
@@ -103,7 +103,10 @@ fn midi_warm_cache_matches_build_capability_for_ordinary_and_cue_admission() -> 
                 let retained = store.track(id)?.context("retained MIDI identity")?;
                 assert!(!retained.missing);
                 assert!(retained.favorite);
-                assert_eq!(retained.fingerprint, cached.fingerprint);
+                assert_eq!(
+                    retained.fingerprint,
+                    cached.fingerprint.map(|hash| hash.to_hex().to_string())
+                );
             }
         }
     }
@@ -200,7 +203,10 @@ fn version_four_midi_cache_revalidates_ports_without_losing_fingerprints() -> Re
             .context("retained invalid MIDI")?;
         let retained = store.track(id)?.context("retained invalid MIDI row")?;
         assert!(!retained.missing);
-        assert_eq!(retained.fingerprint, records[1].fingerprint);
+        assert_eq!(
+            retained.fingerprint,
+            records[1].fingerprint.map(|hash| hash.to_hex().to_string())
+        );
         let cached = store
             .known_source(&invalid)?
             .context("retained fingerprint")?;
@@ -619,11 +625,7 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
             "Cached {}",
             record.path.file_stem().unwrap().to_str().unwrap()
         );
-        record.fingerprint = Some(
-            blake3::hash(record.media.artist.as_bytes())
-                .to_hex()
-                .to_string(),
-        );
+        record.fingerprint = Some(blake3::hash(record.media.artist.as_bytes()));
     }
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&baseline)?;
@@ -1495,7 +1497,9 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
     );
     assert_eq!(
         store.track(id)?.unwrap().fingerprint,
-        rescanned.records[0].fingerprint
+        rescanned.records[0]
+            .fingerprint
+            .map(|hash| hash.to_hex().to_string())
     );
     Ok(())
 }

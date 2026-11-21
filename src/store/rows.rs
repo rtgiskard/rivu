@@ -6,6 +6,13 @@ pub(super) fn fingerprint_from_row(
     row: &rusqlite::Row<'_>,
     offset: usize,
 ) -> rusqlite::Result<Option<String>> {
+    Ok(fingerprint_hash_from_row(row, offset)?.map(|hash| hash.to_hex().to_string()))
+}
+
+pub(super) fn fingerprint_hash_from_row(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Option<blake3::Hash>> {
     let value = row.get_ref(offset)?;
     if value == rusqlite::types::ValueRef::Null {
         return Ok(None);
@@ -21,7 +28,7 @@ pub(super) fn fingerprint_from_row(
             .into(),
         )
     })?;
-    Ok(Some(blake3::Hash::from_bytes(*bytes).to_hex().to_string()))
+    Ok(Some(blake3::Hash::from_bytes(*bytes)))
 }
 
 pub(super) fn cue_from_row(
