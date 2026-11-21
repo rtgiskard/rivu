@@ -90,7 +90,7 @@ impl CoreLifecycle {
         let _ = self.request_shutdown();
     }
 
-    pub(super) fn take_service_failure(&self) -> Option<anyhow::Error> {
+    pub(crate) fn take_service_failure(&self) -> Option<anyhow::Error> {
         self.completion.state.lock().service_failure.take()
     }
 

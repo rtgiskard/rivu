@@ -310,14 +310,10 @@ impl App {
         Ok(app)
     }
     pub fn run(mut self) -> Result<()> {
-        let joined = self.runtime.join();
-        if let Err(error) = &joined {
-            tracing::error!(error = %format_args!("{error:#}"), "core_service_failed");
-        }
-        self.stop_services();
-        joined
+        self.finish()
     }
-    fn stop_services(&mut self) {
+    fn finish(&mut self) -> Result<()> {
+        let joined = self.runtime.join();
         #[cfg(feature = "gui")]
         {
             drop(self.tray.take());
@@ -328,9 +324,22 @@ impl App {
         drop(self.audio.take());
         drop(self.visual.take());
         drop(self.signals.take());
+        // Core may already have accepted shutdown when the IPC supervisor
+        // reports failure. Only retirement closes that reporting window.
+        let result = match (joined, self.runtime.control.take_service_failure()) {
+            (core, None) => core,
+            (Ok(()), Some(service)) => Err(service),
+            (Err(core), Some(service)) => {
+                Err(core.context(format!("Service also failed: {service:#}")))
+            }
+        };
+        if let Err(error) = &result {
+            tracing::error!(error = %format_args!("{error:#}"), "core_service_failed");
+        }
         if let Some(mut session) = self.session.take() {
             session.shutdown();
         }
+        result
     }
 }
 impl Drop for App {
@@ -338,8 +347,7 @@ impl Drop for App {
         if !self.runtime.is_finished() {
             let _ = self.handle.request_shutdown();
         }
-        let _ = self.runtime.join();
-        self.stop_services();
+        let _ = self.finish();
     }
 }
 
@@ -436,12 +444,7 @@ mod tests {
         assert!(app.raise().is_err());
     }
 
-    fn running_service() -> (
-        crate::test_support::ipc::SocketTestDirectory,
-        thread::JoinHandle<Result<()>>,
-    ) {
-        let directory = crate::test_support::ipc::socket_test_directory();
-        let data_dir = directory.path().to_path_buf();
+    fn start_service(data_dir: &Path) -> Result<App> {
         let config_path = data_dir.join("config.toml");
         crate::config::Config {
             media_read_buffer_mib: 1,
@@ -450,11 +453,19 @@ mod tests {
             tray_enabled: false,
             ..Default::default()
         }
-        .save(&config_path)
-        .unwrap();
+        .save(&config_path)?;
+        App::start(data_dir.to_owned(), config_path, Vec::new())
+    }
+
+    fn running_service() -> (
+        crate::test_support::ipc::SocketTestDirectory,
+        thread::JoinHandle<Result<()>>,
+    ) {
+        let directory = crate::test_support::ipc::socket_test_directory();
+        let data_dir = directory.path().to_path_buf();
         let (ready, started) = bounded(1);
         let worker = thread::spawn(move || {
-            let app = App::start(data_dir, config_path, Vec::new());
+            let app = start_service(&data_dir);
             ready
                 .send(
                     app.as_ref()
@@ -469,6 +480,46 @@ mod tests {
             .unwrap()
             .unwrap();
         (directory, worker)
+    }
+
+    #[test]
+    fn late_service_failure_keeps_the_issued_receipt_and_any_core_error() {
+        if run_socket_retirement_test_in_child() {
+            return;
+        }
+        for fail_save in [false, true] {
+            let directory = crate::test_support::ipc::socket_test_directory();
+            let path = directory.path();
+            let app = start_service(path).unwrap();
+            if fail_save {
+                std::fs::write(path.join("config.toml"), "[invalid").unwrap();
+                assert!(
+                    rivu_client::request_command(path, Command::Volume { value: 0.25 })
+                        .unwrap()
+                        .is_success()
+                );
+            }
+            // Waiting for the real receipt puts this report strictly after
+            // Core's shutdown read. App still owns the serving transport.
+            let ack = rivu_client::request_command(path, AppCommand::Shutdown).unwrap();
+            assert!(ack.is_success());
+            app.handle.fail_service(anyhow::anyhow!("Late IPC failure"));
+            let recorded = rivu_client::request_command(path, AppCommand::Shutdown).unwrap();
+            assert_eq!(recorded.status(), ack.status());
+            assert_eq!(
+                recorded.receipt().unwrap().revision,
+                ack.receipt().unwrap().revision
+            );
+
+            let error = app.run().unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("Late IPC failure"), "{message}");
+            assert_eq!(
+                message.contains("Saving configuration"),
+                fail_save,
+                "{message}"
+            );
+        }
     }
 
     #[test]
