@@ -580,126 +580,10 @@ fn write_ack_revision(
     )
 }
 
-fn status_json(response: &StateResponse) -> Result<String> {
-    use rivu_format::config::*;
-    use rivu_protocol::model::{
-        LibrarySnapshot, PlaybackState, ProcessingAudition, QueueState, SystemState, Track,
-    };
-    use rivu_protocol::response::ProcessingState;
-    use serde::Serialize;
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::path::PathBuf;
-
-    #[derive(Serialize)]
-    struct StatusRevisions {
-        playback: u64,
-        queue: u64,
-        library: u64,
-        system: u64,
-        configuration: u64,
-        processing: u64,
-    }
-    #[derive(Serialize)]
-    struct StatusPlayback<'a> {
-        playback: &'a PlaybackState,
-        current_track: Option<&'a Track>,
-        source_generation: u64,
-        processing_audition: Option<ProcessingAudition>,
-        processing_selection: Option<ProcessingAudition>,
-    }
-    macro_rules! status_config {
-        ($( $(#[$attr:meta])* pub $field:ident : $ty:ty, )*) => {
-            #[derive(Serialize)]
-            struct StatusConfig<'a> {
-                $( $(#[$attr])* $field: &'a $ty, )*
-            }
-            impl<'a> StatusConfig<'a> {
-                fn new(settings: &'a ConfigSettings, playback: &'a PlaybackState, system: &'a SystemState) -> Self {
-                    macro_rules! value {
-                        (volume) => { &playback.volume };
-                        (shuffle) => { &playback.shuffle };
-                        (repeat) => { &playback.repeat };
-                        (output_device) => { &system.selected_device };
-                        ($field_name:ident) => { &settings.$field_name };
-                    }
-                    Self { $( $field: value!($field), )* }
-                }
-            }
-        };
-    }
-    rivu_format::config_fields!(status_config);
-
-    #[derive(Serialize)]
-    struct StatusConfiguration<'a> {
-        config: StatusConfig<'a>,
-        config_path: &'a Path,
-    }
-    #[derive(Serialize)]
-    struct Status<'a> {
-        revisions: StatusRevisions,
-        playback: StatusPlayback<'a>,
-        queue: Option<&'a QueueState>,
-        library: Option<&'a LibrarySnapshot>,
-        system: &'a SystemState,
-        configuration: Option<StatusConfiguration<'a>>,
-        processing: Option<&'a ProcessingState>,
-    }
-
-    // Keep the CLI schema independent of the IPC section layout.
-    let playback = response
-        .playback
-        .as_ref()
-        .context("State omitted playback section")?;
-    let source = response
-        .current_track
-        .as_ref()
-        .context("State omitted current-track section")?;
-    let system = response
-        .system
-        .as_ref()
-        .context("State omitted system section")?;
-    // Hash only the values the CLI adds to the cold settings projection.
-    let mut configuration = DefaultHasher::new();
-    response.revisions.configuration.hash(&mut configuration);
-    playback.playback.volume.to_bits().hash(&mut configuration);
-    playback.playback.shuffle.hash(&mut configuration);
-    (playback.playback.repeat as u8).hash(&mut configuration);
-    system.selected_device.hash(&mut configuration);
-    // Keep this opaque equality token exactly representable by JSON number consumers.
-    let configuration_revision = configuration.finish() & ((1 << 53) - 1);
-    Ok(serde_json::to_string_pretty(&Status {
-        revisions: StatusRevisions {
-            // CLI playback still includes current-track data. Both IPC tokens
-            // only advance, so their wrapping sum invalidates either change.
-            playback: response
-                .revisions
-                .playback
-                .wrapping_add(response.revisions.current_track),
-            queue: response.revisions.queue,
-            library: response.revisions.library,
-            system: response.revisions.system,
-            configuration: configuration_revision,
-            processing: response.revisions.processing,
-        },
-        playback: StatusPlayback {
-            playback: &playback.playback,
-            current_track: source.track.as_deref(),
-            source_generation: source.source_generation,
-            processing_audition: playback.processing_audition,
-            processing_selection: playback.processing_selection,
-        },
-        queue: response.queue.as_ref(),
-        library: response.library.as_ref(),
-        system,
-        configuration: response
-            .configuration
-            .as_ref()
-            .map(|settings| StatusConfiguration {
-                config: StatusConfig::new(&settings.config, &playback.playback, system),
-                config_path: &settings.config_path,
-            }),
-        processing: response.processing.as_ref(),
-    })?)
+fn write_status_json(output: &mut impl Write, response: &StateResponse) -> Result<()> {
+    serde_json::to_writer_pretty(&mut *output, response)?;
+    writeln!(output)?;
+    Ok(())
 }
 
 pub(super) fn show_state(
@@ -709,7 +593,7 @@ pub(super) fn show_state(
 ) -> Result<()> {
     let mut output = io::stdout().lock();
     if mode == OutputMode::Json {
-        writeln!(output, "{}", status_json(response)?)?;
+        write_status_json(&mut output, response)?;
         output.flush()?;
         return Ok(());
     }
@@ -867,9 +751,15 @@ mod tests {
     use super::{show_history, write_error};
 
     #[test]
-    fn status_json_keeps_legacy_track_and_config_shape_with_live_values() {
+    fn status_json_uses_protocol_sections_and_tokens() {
         use rivu_protocol::{model::RepeatMode, response::*};
-        let mut response = StateResponse {
+        let response = StateResponse {
+            revisions: StateRevisions {
+                playback: 7,
+                current_track: 11,
+                configuration: 19,
+                ..Default::default()
+            },
             playback: Some(PlaybackSnapshot {
                 playback: rivu_protocol::model::PlaybackState {
                     volume: 0.25,
@@ -891,60 +781,16 @@ mod tests {
             }),
             ..Default::default()
         };
-        let json: serde_json::Value =
-            serde_json::from_str(&super::status_json(&response).unwrap()).unwrap();
-        assert!(json.get("current_track").is_none());
-        assert!(json["revisions"].get("current_track").is_none());
-        assert_eq!(json["playback"]["current_track"], serde_json::Value::Null);
-        assert_eq!(json["playback"]["source_generation"], 13);
-        let config = &json["configuration"]["config"];
-        assert_eq!(config["volume"], 0.25);
-        assert_eq!(config["shuffle"], true);
-        assert_eq!(
-            config["repeat"],
-            serde_json::to_value(RepeatMode::All).unwrap()
-        );
-        assert_eq!(config["output_device"], "live output");
-        response.system.as_mut().unwrap().selected_device = None;
-        let json: serde_json::Value =
-            serde_json::from_str(&super::status_json(&response).unwrap()).unwrap();
-        assert!(
-            json["configuration"]["config"]
-                .get("output_device")
-                .is_none()
-        );
-        let revision = |response: &StateResponse| {
-            let json: serde_json::Value =
-                serde_json::from_str(&super::status_json(response).unwrap()).unwrap();
-            json["revisions"]["configuration"].as_u64().unwrap()
-        };
-        let baseline = revision(&response);
-        let mut changed = response.clone();
-        changed.revisions.playback += 1;
-        changed.playback.as_mut().unwrap().playback.position = 10.0;
-        assert_eq!(revision(&changed), baseline);
-        for change in [
-            (|p: &mut rivu_protocol::model::PlaybackState| p.volume = 0.5) as fn(&mut _),
-            |p| p.shuffle = false,
-            |p| p.repeat = RepeatMode::One,
-        ] {
-            let mut changed = response.clone();
-            change(&mut changed.playback.as_mut().unwrap().playback);
-            assert_ne!(revision(&changed), baseline);
-        }
-        changed.system.as_mut().unwrap().selected_device = Some("another device".into());
-        assert_ne!(revision(&changed), baseline);
-        let mut changed = response.clone();
-        changed.revisions.configuration += 1;
-        assert_ne!(revision(&changed), baseline);
-        response.revisions.current_track += 1;
-        response.current_track.as_mut().unwrap().source_generation += 1;
-        let changed: serde_json::Value =
-            serde_json::from_str(&super::status_json(&response).unwrap()).unwrap();
-        assert_ne!(
-            changed["revisions"]["playback"],
-            json["revisions"]["playback"]
-        );
+        let mut bytes = Vec::new();
+        super::write_status_json(&mut bytes, &response).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["revisions"]["playback"], 7);
+        assert_eq!(json["revisions"]["current_track"], 11);
+        assert_eq!(json["revisions"]["configuration"], 19);
+        assert_eq!(json["current_track"]["source_generation"], 13);
+        assert_eq!(json["playback"]["playback"]["volume"], 0.25);
+        assert_eq!(json["system"]["selected_device"], "live output");
+        assert!(json["configuration"]["config"].get("volume").is_none());
     }
 
     #[test]
