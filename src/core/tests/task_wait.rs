@@ -236,14 +236,32 @@ fn shutdown_publishes_processing_cancellation_before_reply() {
         .start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     let (handle, requests) = wait_handle(&core);
-    let mut wait = Box::pin(handle.wait_task(TaskTarget::Processing { id }));
-    assert!(wait.as_mut().now_or_never().is_none());
-    dispatch_wait(&mut core, &requests);
+    let target = TaskTarget::Processing { id };
+    let mut waits = Vec::new();
+    for _ in 0..3 {
+        let mut wait = Box::pin(handle.wait_task(target));
+        assert!(wait.as_mut().now_or_never().is_none());
+        dispatch_wait(&mut core, &requests);
+        waits.push(wait);
+    }
+    let mut undispatched = Box::pin(handle.wait_task(target));
+    assert!(undispatched.as_mut().now_or_never().is_none());
     core.shutdown_processing();
-    assert!(wait.as_mut().now_or_never().is_none());
+    drop(waits.pop().unwrap()); // Cancel one marked waiter before publication.
+    for wait in &mut waits {
+        assert!(wait.as_mut().now_or_never().is_none());
+    }
     core.publish();
+    for wait in waits {
+        assert!(
+            matches!(wait.now_or_never(), Some(Ok(TaskOutcome::Processing(status)))
+            if status.phase == ProcessingPhase::Cancelled)
+        );
+    }
+    assert!(undispatched.as_mut().now_or_never().is_none());
+    dispatch_wait(&mut core, &requests);
     assert!(
-        matches!(wait.now_or_never(), Some(Ok(TaskOutcome::Processing(status)))
+        matches!(undispatched.now_or_never(), Some(Ok(TaskOutcome::Processing(status)))
         if status.phase == ProcessingPhase::Cancelled)
     );
     assert_eq!(

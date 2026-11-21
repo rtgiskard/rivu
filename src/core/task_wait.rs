@@ -59,12 +59,11 @@ impl TaskWaiters {
         Ok((id, receiver))
     }
 
-    fn take_ready(&mut self) -> Option<PendingWait> {
-        let id = self
-            .pending
-            .iter()
-            .find_map(|(id, pending)| pending.ready.then_some(*id))?;
-        self.pending.remove(&id)
+    fn take_ready(&mut self) -> Vec<PendingWait> {
+        self.pending
+            .extract_if(|_, pending| pending.ready)
+            .map(|(_, pending)| pending)
+            .collect()
     }
 }
 
@@ -225,9 +224,8 @@ impl Core {
         if !std::mem::take(&mut self.task_completions_pending) {
             return;
         }
-        loop {
-            let pending = self.task_waiters.lock().take_ready();
-            let Some(pending) = pending else { break };
+        let ready = self.task_waiters.lock().take_ready();
+        for pending in ready {
             let outcome = self
                 .task_outcome(pending.target.unwrap())
                 .map(|outcome| outcome.expect("Task completion follows the terminal owner commit"));
