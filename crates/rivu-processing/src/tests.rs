@@ -1276,6 +1276,89 @@ fn model_preparation_provenance_survives_graph_decode_failure() {
 }
 
 #[test]
+fn first_model_prefix_failures_keep_source_and_node_errors_distinct() {
+    use rivu_dsp::equalizer::config::{EqBand, EqualizerConfig};
+
+    let eq = |frequency_hz| GraphNodeKind::Equalizer {
+        config: EqualizerConfig {
+            enabled: true,
+            bands: vec![EqBand {
+                frequency_hz,
+                gain_db: 1.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        implementation: EqImplementation::Iir,
+    };
+    for (kind, sample, limit, failed_node, message) in [
+        (
+            eq(10_000.0),
+            0.125,
+            MEMORY_LIMIT,
+            Some(3),
+            "rate-dependent maximum",
+        ),
+        (
+            GraphNodeKind::Mix {
+                gains_db: vec![0.0; 2],
+                muted: vec![false; 2],
+                solo: vec![false; 2],
+            },
+            f32::MAX,
+            MEMORY_LIMIT,
+            Some(3),
+            "Nonfinite graph output",
+        ),
+        (eq(1_000.0), 0.125, 1, None, "PCM memory budget exceeded"),
+    ] {
+        let (directory, track, _) = source_fixture(2, 8_000, [sample; 16]);
+        let mut config = graph_config(vec![
+            kind,
+            GraphNodeKind::Equalizer {
+                config: Default::default(),
+                implementation: EqImplementation::Iir,
+            },
+            GraphNodeKind::Speech {
+                config: preparation_only_model(directory.path(), "prepared-model", "python"),
+            },
+        ]);
+        let graph = &mut Arc::get_mut(&mut config).unwrap().processing_graph;
+        if matches!(graph.node(3).unwrap().kind, GraphNodeKind::Mix { .. }) {
+            graph.edges.push(GraphEdge {
+                from: GraphPort { node: 1, port: 0 },
+                to: GraphPort { node: 3, port: 1 },
+            });
+        }
+        let mut service = Service::with_memory_limit(limit);
+        let (status, nodes) = failed_prepared_graph(&mut service, track, config);
+        assert!(status.error.as_deref().unwrap().contains(message));
+        let model = failed_prepared_node(&status, &nodes, 5, "prepared-model");
+        assert!(model.error.is_none());
+        let running: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.phase == ProcessingPhase::Processing)
+            .map(|node| node.node)
+            .collect();
+        assert_eq!(running.as_slice(), failed_node.as_slice());
+        let failures: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.phase == ProcessingPhase::Failed)
+            .collect();
+        assert_eq!(failures.len(), failed_node.as_slice().len());
+        if let Some(node) = failed_node {
+            assert_eq!(failures[0].node, node);
+            assert_eq!(failures[0].error, status.error);
+            assert_eq!(
+                status.graph_nodes.iter().find(|entry| entry.node == node),
+                Some(failures[0])
+            );
+        }
+        assert_eq!(service.memory_bytes(), 0);
+    }
+}
+
+#[test]
 fn model_preparation_provenance_survives_standalone_decode_failure() {
     let (directory, track, mut config) = preparation_fixture();
     let mut service = Service::with_memory_limit(1);
@@ -1503,7 +1586,7 @@ fn retained_graph_failures_report_the_responsible_node_once() {
         implementation: EqImplementation::Iir,
     };
     for (kind, limit, failed_node) in [
-        (eq(10_000.0), MEMORY_LIMIT, 2),
+        (eq(10_000.0), MEMORY_LIMIT, 3),
         (eq(1_000.0), 1, 2),
         (
             GraphNodeKind::Denoise {

@@ -273,53 +273,49 @@ pub(super) fn run(
         graph_outputs = native_output.outputs;
         pending_export = native_output.pending_export;
         AudioOutputs::default()
+    } else if status.operation == ProcessingOperation::Graph {
+        let rendered = graph::execute(
+            execution
+                .as_ref()
+                .context("Missing admitted graph execution")?,
+            renderer,
+            Arc::clone(&budget),
+            status,
+            cancellation,
+            &mut progress,
+            models,
+        )?;
+        graph_outputs = rendered.outputs;
+        pending_export = rendered.pending_export;
+        AudioOutputs::default()
     } else {
-        // Whole-signal model boundaries require seekable input. Native-only
-        // paths above never allocate a complete decoded source alongside output.
         let input = renderer.render_pcm(Arc::clone(&budget), cancel)?;
         status.frames = Some(input.frames());
-        if status.operation == ProcessingOperation::Graph {
-            let rendered = graph::execute(
-                execution
-                    .as_ref()
-                    .context("Missing admitted graph execution")?,
-                input,
-                Arc::clone(&budget),
-                status,
-                cancellation,
-                &mut progress,
-                models,
-            )?;
-            graph_outputs = rendered.outputs;
-            pending_export = rendered.pending_export;
-            AudioOutputs::default()
-        } else {
-            let outcome = neural::run(
-                ModelRequest {
-                    task_id: status.id,
-                    operation: status.operation,
-                    retain: if status.operation == ProcessingOperation::Speech {
-                        ModelOutputRetention::Speech
-                    } else {
-                        ModelOutputRetention::BothStems
-                    },
-                    input: &input,
-                    config: &config.neural,
-                    budget: Arc::clone(&budget),
-                    cancel: cancellation,
+        let outcome = neural::run(
+            ModelRequest {
+                task_id: status.id,
+                operation: status.operation,
+                retain: if status.operation == ProcessingOperation::Speech {
+                    ModelOutputRetention::Speech
+                } else {
+                    ModelOutputRetention::BothStems
                 },
-                model.context("Missing admitted model")?,
-                &mut progress,
-            );
-            status.model_id.clone_from(&outcome.provenance.id);
-            status.model_sha256.clone_from(&outcome.provenance.sha256);
-            // Reliable provenance precedes terminal failure, unlike best-effort progress.
-            let _ = tx.send_blocking(Event::Model {
-                id: status.id,
-                provenance: outcome.provenance,
-            });
-            outcome.result?
-        }
+                input: &input,
+                config: &config.neural,
+                budget: Arc::clone(&budget),
+                cancel: cancellation,
+            },
+            model.context("Missing admitted model")?,
+            &mut progress,
+        );
+        status.model_id.clone_from(&outcome.provenance.id);
+        status.model_sha256.clone_from(&outcome.provenance.sha256);
+        // Reliable provenance precedes terminal failure, unlike best-effort progress.
+        let _ = tx.send_blocking(Event::Model {
+            id: status.id,
+            provenance: outcome.provenance,
+        });
+        outcome.result?
     };
     let frames = status
         .frames

@@ -33,6 +33,33 @@ impl<'a> ExecutionGraph<'a> {
             })
         })
     }
+
+    /// First model and required ports beyond it, if original PCM is consumed in one pass.
+    fn first_model_streaming_cut(&self) -> Result<Option<(u64, BTreeSet<GraphPort>)>> {
+        for &id in &self.order {
+            match &self.graph.node(id)?.kind {
+                // A separate profile pass reuses the retained source instead of re-decoding it.
+                GraphNodeKind::Denoise { config, .. } if config.mode == DenoiseMode::Profile => {
+                    return Ok(None);
+                }
+                GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. } => {
+                    // The first model must be the last consumer of original PCM. A walk
+                    // cut at that model still finds any branch that needs the source later.
+                    let mut needed = BTreeSet::new();
+                    let source_reachable = visit_pcm_ports(
+                        self.graph,
+                        self.target,
+                        &BTreeMap::new(),
+                        &mut needed,
+                        Some(id),
+                    )?;
+                    return Ok((!source_reachable).then_some((id, needed)));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
 }
 
 pub(super) fn prepare(
@@ -117,6 +144,16 @@ struct GraphPcm {
     start_frame: i64,
 }
 
+// Attach node identity only to graph work, not decoder or PCM storage failures.
+#[derive(Debug)]
+struct EvaluatingNode(u64);
+
+impl std::fmt::Display for EvaluatingNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Evaluating graph node {}", self.0)
+    }
+}
+
 struct Edge {
     node: usize,
     gain: f64,
@@ -125,6 +162,7 @@ struct Edge {
 }
 
 struct Node {
+    id: u64,
     inputs: Vec<Edge>,
     source: Option<audio::PcmAudio>,
     // None is an immutable source boundary or the streaming decoder input.
@@ -199,6 +237,24 @@ impl Engine {
             return Ok(index);
         }
         check_cancel(cancel)?;
+        self.compile_node(graph, port, boundaries, profiles, cancel)
+            .map_err(|error| {
+                if error.is::<EvaluatingNode>() {
+                    error
+                } else {
+                    error.context(EvaluatingNode(port.node))
+                }
+            })
+    }
+
+    fn compile_node(
+        &mut self,
+        graph: &ProcessingGraph,
+        port: GraphPort,
+        boundaries: &BTreeMap<GraphPort, GraphPcm>,
+        profiles: &BTreeMap<u64, NoiseProfile>,
+        cancel: &AtomicBool,
+    ) -> Result<usize> {
         let kind = &graph.node(port.node)?.kind;
         let mut inputs = Vec::new();
         let mut latency = 0;
@@ -295,6 +351,7 @@ impl Engine {
             index
         };
         self.nodes.push(Node {
+            id: port.node,
             inputs,
             source,
             processor,
@@ -390,18 +447,23 @@ impl Engine {
                             // Finite sources and DSP outputs can overflow when
                             // mixed, including at the f64-to-f32 boundary.
                             *sample = *sum as f32;
-                            ensure!(sample.is_finite(), "Nonfinite graph output");
+                            if !sample.is_finite() {
+                                return Err(anyhow::anyhow!("Nonfinite graph output")
+                                    .context(EvaluatingNode(node.id)));
+                            }
                         }
                     }
                     let input_frames = input_end.map_or(frames, |end| {
                         end.saturating_sub(position).min(frames as u64) as usize
                     });
-                    processor.process(
-                        output,
-                        input_frames * self.channels,
-                        input_end.is_some_and(|end| position + count as u64 >= end),
-                        &mut || cancel.load(Ordering::Acquire),
-                    )?;
+                    processor
+                        .process(
+                            output,
+                            input_frames * self.channels,
+                            input_end.is_some_and(|end| position + count as u64 >= end),
+                            &mut || cancel.load(Ordering::Acquire),
+                        )
+                        .with_context(|| EvaluatingNode(node.id))?;
                 }
             }
         }
@@ -505,6 +567,38 @@ impl Engine {
     }
     fn alias(&self, target: usize) -> Option<&audio::PcmAudio> {
         self.nodes[self.nodes[target].output_node].source.as_ref()
+    }
+    fn decode_pcm(
+        mut self,
+        target: usize,
+        renderer: audio::SourceRenderer,
+        budget: Arc<audio::PcmBudget>,
+        cancel: &AtomicBool,
+        on_processing: impl FnOnce(),
+    ) -> Result<(GraphPcm, u64)> {
+        let node = &self.nodes[target];
+        let start_frame = -i64::try_from(node.latency)?;
+        let physical = &self.nodes[node.output_node];
+        if self.streaming && physical.processor.is_none() && physical.source.is_none() {
+            // The compiled prefix aliases the decoder. Preserve its original PCM
+            // fast path (including renderers backed by already-retained PCM).
+            let pcm = renderer.render_pcm(budget, cancel)?;
+            let frames = pcm.frames();
+            return Ok((GraphPcm { pcm, start_frame }, frames));
+        }
+        renderer.finish(cancel)?;
+        on_processing();
+        let mut builder = audio::PcmBuilder::new(self.rate, Arc::clone(&self.layout), budget)?;
+        let frames = self.decode(target, renderer, None, cancel, |_, block, _| {
+            builder.push(block)
+        })?;
+        Ok((
+            GraphPcm {
+                pcm: builder.finish()?,
+                start_frame,
+            },
+            frames,
+        ))
     }
     fn render(
         mut self,
@@ -655,9 +749,42 @@ pub(super) fn prepare_models(
     Ok(models)
 }
 
+// Keep the single owned decoder on the worker stack.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum GraphInput {
+    Retained(audio::PcmAudio),
+    Decoder(audio::SourceRenderer),
+}
+
+impl From<audio::PcmAudio> for GraphInput {
+    fn from(input: audio::PcmAudio) -> Self {
+        Self::Retained(input)
+    }
+}
+
+impl From<audio::SourceRenderer> for GraphInput {
+    fn from(renderer: audio::SourceRenderer) -> Self {
+        Self::Decoder(renderer)
+    }
+}
+
+fn validate_profile_end(kind: &GraphNodeKind, rate: u32, frames: u64) -> Result<()> {
+    if let GraphNodeKind::Denoise {
+        profile: Some(selection),
+        ..
+    } = kind
+    {
+        ensure!(
+            (selection.end_seconds * f64::from(rate)).floor() <= frames as f64,
+            "Noise profile selection lies outside the source"
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn execute(
     execution: &ExecutionGraph<'_>,
-    input: audio::PcmAudio,
+    input: impl Into<GraphInput>,
     budget: Arc<audio::PcmBudget>,
     status: &mut ProcessingTaskStatus,
     cancellation: &Cancellation,
@@ -669,13 +796,58 @@ pub(super) fn execute(
     let graph = execution.graph;
     let target = execution.target;
     let order = &execution.order;
-    let rate = input.sample_rate();
-    let layout = Arc::clone(input.layout());
-    let frames = input.frames();
-    let channels = input.channels();
-    let mut input = Some(input);
+    let (mut input, decoder) = match input.into() {
+        GraphInput::Retained(pcm) => (Some(pcm), None),
+        GraphInput::Decoder(renderer) => match execution.first_model_streaming_cut()? {
+            Some((model, needed)) => (None, Some((renderer, model, needed))),
+            None => (
+                Some(renderer.render_pcm(Arc::clone(&budget), cancel)?),
+                None,
+            ),
+        },
+    };
+    let (rate, layout, frames) = if let Some((renderer, _, _)) = &decoder {
+        let format = renderer.format();
+        (format.sample_rate, Arc::clone(&format.layout), None)
+    } else {
+        let pcm = input.as_ref().context("Missing original PCM")?;
+        (
+            pcm.sample_rate(),
+            Arc::clone(pcm.layout()),
+            Some(pcm.frames()),
+        )
+    };
+    status.frames = frames;
+    let channels = layout.len();
     let mut boundaries = BTreeMap::new();
     let mut profiles = BTreeMap::new();
+    // Decode before model execution. Only failures from compiled graph work
+    // carry node identity; source and PCM allocation failures stay task-level.
+    let mut streamed_input = if let Some((renderer, model, needed)) = decoder {
+        let outcome = (|| {
+            let mut engine = Engine::for_decoder(rate, Arc::clone(&layout));
+            let upstream = engine.compile(
+                graph,
+                input_port(graph, model)?,
+                &boundaries,
+                &profiles,
+                cancel,
+            )?;
+            engine.decode_pcm(upstream, renderer, Arc::clone(&budget), cancel, || {
+                progress.report(ProcessingPhase::Processing, 0, Some(order.len() as u64));
+            })
+        })();
+        let (upstream, frames) = outcome.inspect_err(|error| {
+            if let Some(&EvaluatingNode(node)) = error.downcast_ref::<EvaluatingNode>() {
+                node_event(status, node, ProcessingPhase::Processing, None, tx);
+                node_failure(status, node, error, cancel, tx);
+            }
+        })?;
+        status.frames = Some(frames);
+        Some((upstream, needed))
+    } else {
+        None
+    };
     for (index, &id) in order.iter().enumerate() {
         check_cancel(cancel)?;
         progress.report(
@@ -685,18 +857,11 @@ pub(super) fn execute(
         );
         node_event(status, id, ProcessingPhase::Processing, None, tx);
         let outcome = (|| -> Result<()> {
-            if let GraphNodeKind::Denoise {
-                profile: Some(selection),
-                ..
-            } = &graph.node(id)?.kind
-            {
-                selection.validate()?;
-                ensure!(
-                    (selection.end_seconds * f64::from(rate)).floor() <= frames as f64,
-                    "Noise profile selection lies outside the source"
-                );
+            let kind = &graph.node(id)?.kind;
+            if let Some(frames) = status.frames {
+                validate_profile_end(kind, rate, frames)?;
             }
-            match &graph.node(id)?.kind {
+            match kind {
                 GraphNodeKind::Denoise { config, profile }
                     if config.mode == DenoiseMode::Profile =>
                 {
@@ -705,6 +870,9 @@ pub(super) fn execute(
                     selection.validate()?;
                     let start = (selection.start_seconds * f64::from(rate)).floor() as u64;
                     let end = (selection.end_seconds * f64::from(rate)).floor() as u64;
+                    let frames = status
+                        .frames
+                        .context("Missing decoded source frame count")?;
                     ensure!(
                         start < end && end <= frames,
                         "Noise profile selection lies outside the source"
@@ -723,7 +891,6 @@ pub(super) fn execute(
                         .checked_add(offset)
                         .context("Profile offset overflow")?;
                     let end = end.checked_add(offset).context("Profile offset overflow")?;
-                    let channels = usize::from(channels);
                     let mut collector =
                         ProfileCollector::new(rate, channels, config.fft_size, end - start)?;
                     engine.stream(upstream, Some(end), cancel, |position, samples| {
@@ -741,32 +908,35 @@ pub(super) fn execute(
                     profiles.insert(id, collector.finish()?);
                 }
                 GraphNodeKind::Speech { config } | GraphNodeKind::Separate { config } => {
-                    let operation = if matches!(graph.node(id)?.kind, GraphNodeKind::Speech { .. })
-                    {
+                    let operation = if matches!(kind, GraphNodeKind::Speech { .. }) {
                         ProcessingOperation::Speech
                     } else {
                         ProcessingOperation::Separate
                     };
-                    let mut engine =
-                        Engine::for_retained(input.as_ref(), rate, Arc::clone(&layout));
-                    let upstream = engine.compile(
-                        graph,
-                        input_port(graph, id)?,
-                        &boundaries,
-                        &profiles,
-                        cancel,
-                    )?;
-                    let upstream = engine.render(upstream, Arc::clone(&budget), cancel)?;
-                    // This model now owns its materialized input. Future graph
-                    // traversals stop at its outputs before inference allocates
-                    // them; a bypass alias still retains its own PCM storage.
-                    let needed = release_unreachable_pcm(
-                        graph,
-                        target,
-                        &mut boundaries,
-                        Some(id),
-                        &mut input,
-                    )?;
+                    let (upstream, needed) = if let Some(streamed) = streamed_input.take() {
+                        streamed
+                    } else {
+                        let mut engine =
+                            Engine::for_retained(input.as_ref(), rate, Arc::clone(&layout));
+                        let upstream = engine.compile(
+                            graph,
+                            input_port(graph, id)?,
+                            &boundaries,
+                            &profiles,
+                            cancel,
+                        )?;
+                        let upstream = engine.render(upstream, Arc::clone(&budget), cancel)?;
+                        // Drop graph PCM that won't be needed after this model before
+                        // inference allocates its output. Bypass aliases keep their storage.
+                        let needed = release_unreachable_pcm(
+                            graph,
+                            target,
+                            &mut boundaries,
+                            Some(id),
+                            &mut input,
+                        )?;
+                        (upstream, needed)
+                    };
                     let retain = model_output_retention(&needed, id, operation)?;
                     let outcome = neural::run(
                         ModelRequest {
@@ -834,6 +1004,9 @@ pub(super) fn execute(
             release_unreachable_pcm(graph, target, &mut boundaries, None, &mut input)?;
         }
     }
+    let frames = status
+        .frames
+        .context("Missing decoded source frame count")?;
     enum FinalStage {
         Graph,
         Export,
@@ -1307,6 +1480,9 @@ fn node_failure(
     cancel: &AtomicBool,
     tx: &Sender<Event>,
 ) {
+    let node = error
+        .downcast_ref::<EvaluatingNode>()
+        .map_or(node, |failure| failure.0);
     node_event(
         status,
         node,
@@ -1437,6 +1613,200 @@ mod tests {
         engine
             .render(index, Arc::clone(budget), &AtomicBool::new(false))
             .unwrap()
+    }
+
+    #[test]
+    fn first_model_identity_prefix_reuses_selected_source_pcm() {
+        let input = pcm(
+            &(0..701).map(|i| i as f32 / 701.0).collect::<Vec<_>>(),
+            &audio::PcmBudget::new(MEMORY_LIMIT),
+        )
+        .slice_frames(31, 613)
+        .unwrap();
+        let metadata = fs::metadata(std::env::current_exe().unwrap()).unwrap();
+        let identity = audio::source_identity_from_metadata(&metadata);
+        let cancel = AtomicBool::new(false);
+        for mut prefix in [
+            vec![],
+            vec![
+                GraphNodeKind::Equalizer {
+                    config: Default::default(),
+                    implementation: EqImplementation::LinearPhase { taps: 65 },
+                },
+                GraphNodeKind::Denoise {
+                    config: rivu_dsp::denoise::DenoiseConfig {
+                        mode: DenoiseMode::Adaptive,
+                        wet: 0.0,
+                        ..Default::default()
+                    },
+                    profile: None,
+                },
+            ],
+        ] {
+            prefix.push(GraphNodeKind::Speech {
+                config: Default::default(),
+            });
+            let graph = chain(prefix);
+            let execution =
+                ExecutionGraph::new(&graph.validated().unwrap(), GraphPort { node: 2, port: 0 })
+                    .unwrap();
+            let (model, _) = execution.first_model_streaming_cut().unwrap().unwrap();
+            let renderer = audio::SourceRenderer::from_pcm(input.clone(), identity).unwrap();
+            let mut engine = Engine::for_decoder(input.sample_rate(), Arc::clone(input.layout()));
+            let upstream = engine
+                .compile(
+                    &graph,
+                    input_port(&graph, model).unwrap(),
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &cancel,
+                )
+                .unwrap();
+            // Only the original storage is admitted; rebuilding the prefix PCM fails.
+            let (output, frames) = engine
+                .decode_pcm(upstream, renderer, audio::PcmBudget::new(0), &cancel, || {})
+                .unwrap();
+            assert_eq!(frames, input.frames());
+            assert_eq!(output.start_frame, 0);
+            assert_eq!(output.pcm.sample_rate(), input.sample_rate());
+            assert_eq!(output.pcm.layout(), input.layout());
+            assert_eq!(samples(&output.pcm), samples(&input));
+        }
+    }
+
+    #[test]
+    fn first_model_streams_causal_prefix_with_only_one_pcm_budget() {
+        use rivu_dsp::equalizer::config::{EqBand, EqualizerConfig, FilterKind};
+
+        if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(30)) {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.wav");
+        let data: Vec<f32> = (0..8191)
+            .flat_map(|i| {
+                let sample = (i as f32 * 0.017).sin() * 0.3;
+                [sample, -sample]
+            })
+            .collect();
+        audio::test_support::write_float_wav(&path, 2, 48_000, data.iter().copied()).unwrap();
+        let track = rivu_protocol::test_support::artwork_track(path);
+        let (model, _) = crate::tests::real_dry_speech_bundle(directory.path());
+        let fir = GraphNodeKind::Equalizer {
+            config: EqualizerConfig {
+                enabled: true,
+                bands: vec![EqBand {
+                    kind: FilterKind::LowPass,
+                    frequency_hz: 1500.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            implementation: EqImplementation::LinearPhase { taps: 65 },
+        };
+        let reference_budget = audio::PcmBudget::new(MEMORY_LIMIT);
+        let mut builder = audio::PcmBuilder::new(
+            48000,
+            Arc::from([audio::Channel::FrontLeft, audio::Channel::FrontRight]),
+            Arc::clone(&reference_budget),
+        )
+        .unwrap();
+        builder.push(&data).unwrap();
+        let source = builder.finish().unwrap();
+        let source_frames = source.frames();
+        let reference = render(&chain(vec![fir.clone()]), &source, &reference_budget);
+        assert!(reference.start_frame < 0 && reference.pcm.frames() > source_frames);
+        // Dry speech aliases its input. Admit the causal FIR PCM, but not a
+        // second allocation for the original; the retained-prefix path needs both.
+        let limit = reference.pcm.retained_bytes();
+        assert_eq!(
+            reference_budget.used_bytes(),
+            source.retained_bytes() + limit
+        );
+        let mut service = Service::with_memory_limit(limit);
+        let target = GraphPort { node: 2, port: 0 };
+        let id = service
+            .start_graph(
+                track,
+                Arc::new(Config {
+                    processing_graph: chain(vec![fir, GraphNodeKind::Speech { config: model }]),
+                    ..Default::default()
+                }),
+                GraphRequest {
+                    target,
+                    mode: GraphExecutionMode::Offline,
+                    export_path: None,
+                    source_run: None,
+                    cached_output: None,
+                    audio_export: None,
+                },
+            )
+            .unwrap();
+        let result = loop {
+            if let Event::Finished { result, .. } = service.receiver.recv_blocking().unwrap() {
+                assert_eq!(service.finish_task(id), Some(false));
+                break result.unwrap();
+            }
+        };
+        assert_eq!(result.status.frames, Some(source_frames));
+        let output = &result.graph_outputs[&target];
+        assert_eq!(output.pcm.frames(), source_frames);
+        let context = output.context.as_ref().unwrap();
+        assert_eq!(context.start_frame, reference.start_frame);
+        assert_eq!(context.pcm.frames(), reference.pcm.frames());
+        for (actual, expected) in samples(&context.pcm)
+            .into_iter()
+            .zip(samples(&reference.pcm))
+        {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+        assert_eq!(service.memory_bytes(), limit);
+    }
+
+    #[test]
+    fn first_model_streaming_requires_no_source_bypass_or_earlier_profile_pass() {
+        let speech = GraphNodeKind::Speech {
+            config: Default::default(),
+        };
+        let target = GraphPort { node: 2, port: 0 };
+        let can_stream = |graph: &ProcessingGraph, target| {
+            ExecutionGraph::new(&graph.validated().unwrap(), target)
+                .unwrap()
+                .first_model_streaming_cut()
+                .unwrap()
+                .is_some()
+        };
+        let mut fork = chain(vec![
+            speech.clone(),
+            GraphNodeKind::Mix {
+                gains_db: vec![0.0; 2],
+                muted: vec![false; 2],
+                solo: vec![false; 2],
+            },
+        ]);
+        fork.edges.push(GraphEdge {
+            from: GraphPort { node: 1, port: 0 },
+            to: GraphPort { node: 4, port: 1 },
+        });
+        assert!(!can_stream(&fork, target));
+        assert!(can_stream(&fork, GraphPort { node: 3, port: 0 }));
+
+        let profile = GraphNodeKind::Denoise {
+            config: rivu_dsp::denoise::DenoiseConfig {
+                mode: DenoiseMode::Profile,
+                wet: 0.0,
+                ..Default::default()
+            },
+            profile: Some(NoiseSelection {
+                start_seconds: 0.0,
+                end_seconds: 0.2,
+            }),
+        };
+        assert!(!can_stream(
+            &chain(vec![profile.clone(), speech.clone()]),
+            target
+        ));
+        assert!(can_stream(&chain(vec![speech, profile]), target));
     }
 
     #[test]
