@@ -38,7 +38,6 @@ rivu-metadata = { path = "crates/rivu-metadata", features = ["artwork"] }
 rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
 rivu-protocol = { path = "crates/rivu-protocol" }
 rivu-client = { path = "crates/rivu-client" }
-hound = "3.5"
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "string"] }
@@ -67,6 +66,7 @@ url = "2"
 
 [dev-dependencies]
 crossbeam-channel = "0.5"
+hound = "3.5"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 rivu-audio = { path = "crates/rivu-audio", default-features = false, features = ["test-support"] }
 rivu-metadata = { path = "crates/rivu-metadata", features = ["test-support"] }
