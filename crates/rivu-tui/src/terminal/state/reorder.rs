@@ -528,6 +528,8 @@ mod tests {
     fn catalog_unknown_before_revision_restores_picked_id_after_page_reset() {
         let mut snapshot = TuiSnapshot::default();
         Arc::make_mut(&mut snapshot.configuration).query_batch_size = 4;
+        Arc::make_mut(&mut snapshot.library.playlist_entry_revisions)
+            .extend((71..75).map(|id| (id, 1)));
         let mut tui = TuiState::new(snapshot, Arc::new(Localizer::for_terminal("en-US")));
         let mut catalog = PagedList::default();
         catalog.insert(0, 4, 4, (71..75).map(summary).collect());
@@ -589,13 +591,15 @@ mod tests {
     fn catalog_save_checks_destination_page_then_falls_back_by_id() {
         for ack_first in [true, false] {
             for first_page_hit in [true, false] {
-                let snapshot = TuiSnapshot::default();
+                let mut snapshot = TuiSnapshot::default();
                 let limit = snapshot.configuration.query_batch_size as usize;
+                let total = 2 * limit + 2;
+                Arc::make_mut(&mut snapshot.library.playlist_entry_revisions)
+                    .extend((70..70 + total as i64).map(|id| (id, 1)));
                 let mut tui = TuiState::new(snapshot, Arc::new(Localizer::for_terminal("en-US")));
                 let mut catalog = PagedList::default();
                 catalog.selection.select(Some(limit));
                 catalog.set_viewport(4);
-                let total = 2 * limit + 2;
                 catalog.insert(limit, limit, total, vec![summary(71), summary(72)]);
                 tui.ui.view = View::Playlists(catalog);
                 input(&mut tui, KeyCode::Char('M'));
@@ -614,6 +618,10 @@ mod tests {
                 let mut next = tui.snapshot.clone();
                 // A coalesced watch update need not be the move's exact revision.
                 next.library.playlist_revision += 2;
+                if !first_page_hit {
+                    Arc::make_mut(&mut next.library.playlist_entry_revisions)
+                        .retain(|id, _| *id < 73);
+                }
                 tui.apply_snapshot(next);
                 let request = tui.ui.query_request(&tui.snapshot).unwrap();
                 assert_eq!(request.demand.offset, limit);

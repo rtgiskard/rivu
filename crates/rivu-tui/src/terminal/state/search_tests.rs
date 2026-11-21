@@ -1197,6 +1197,79 @@ fn container_revision_refresh_restarts_pending_identity_scan() {
 }
 
 #[test]
+fn deleted_playlist_selection_falls_back_without_scanning_the_catalog() {
+    for (hidden, scanning) in [(false, false), (true, false), (false, true)] {
+        let (mut ui, mut snapshot) = container_fixture(true);
+        Arc::make_mut(&mut snapshot.library.playlist_entry_revisions)
+            .extend((10..18).map(|id| (id, 1)));
+        let View::Playlists(rows) = &mut ui.view else {
+            unreachable!();
+        };
+        rows.insert(
+            0,
+            2,
+            9,
+            [(10, "row-0"), (1, "target")]
+                .map(|(id, name)| PlaylistSummary {
+                    id,
+                    name: name.into(),
+                    entry_count: 0,
+                })
+                .into(),
+        );
+        rows.selection.select(Some(1));
+        rows.set_viewport(1);
+        let pending = if scanning {
+            replace_query(&mut ui, &snapshot, "row");
+            let first = ui.query_request(&snapshot).unwrap();
+            assert!(ui.apply_query(
+                &snapshot,
+                &first,
+                Ok(container_page(&first, true, false, 8))
+            ));
+            let pending = ui.query_request(&snapshot).unwrap();
+            assert_eq!(pending.demand.offset, 2);
+            Some(pending)
+        } else {
+            None
+        };
+        if hidden {
+            ui.cached_playlists = Some(std::mem::replace(&mut ui.view, View::Queue));
+        }
+        let mut tui = TuiState { snapshot, ui };
+        let mut next = tui.snapshot.clone();
+        next.library.playlist_revision += 1;
+        Arc::make_mut(&mut next.library.playlist_entry_revisions).remove(&1);
+        tui.apply_snapshot(next.clone());
+        if let Some(pending) = pending {
+            assert!(!tui.ui.apply_query(
+                &next,
+                &pending,
+                Ok(container_page(&pending, true, false, 8))
+            ));
+        }
+        if hidden {
+            tui.ui.view = tui.ui.cached_playlists.take().unwrap();
+        }
+        // Refill the viewport and its normal neighboring batch, not the catalog.
+        for offset in [0, 2] {
+            let request = tui.ui.query_request(&next).unwrap();
+            assert_eq!(request.demand.offset, offset);
+            assert!(tui.ui.apply_query(
+                &next,
+                &request,
+                Ok(container_page(&request, true, false, 8))
+            ));
+        }
+        assert!(tui.ui.query_request(&next).is_none());
+        let View::Playlists(rows) = &tui.ui.view else {
+            unreachable!();
+        };
+        assert_eq!(rows.selected().unwrap().id, 10);
+    }
+}
+
+#[test]
 fn container_search_scans_bounded_pages_and_finishes_found_missing_or_empty() {
     for catalog in [false, true] {
         for (found, total) in [(true, 4), (false, 4), (false, 0)] {

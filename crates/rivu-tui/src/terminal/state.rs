@@ -689,7 +689,7 @@ impl View {
         if rows_changed && !coordinates_changed && !page_size_changed {
             self.invalidate_payload(retain_display);
         } else if coordinates_changed && matches!(self, Self::Tree(_) | Self::Playlists(_)) {
-            self.retain_container_identity(page_size_changed, retain_display);
+            self.retain_container_identity(next, page_size_changed, retain_display);
         } else if rows_changed || page_size_changed {
             match self {
                 Self::LibraryResults(results) => {
@@ -1034,7 +1034,12 @@ impl View {
 }
 
 impl View {
-    fn retain_container_identity(&mut self, reset_lookup: bool, retain_display: bool) {
+    fn retain_container_identity(
+        &mut self,
+        state: &TuiSnapshot,
+        reset_lookup: bool,
+        retain_display: bool,
+    ) {
         match self {
             View::Tree(tree) => {
                 let container = tree
@@ -1071,11 +1076,14 @@ impl View {
                 let identity = rows
                     .identity_lookup
                     .as_ref()
-                    .map(|(id, _, _)| id.clone())
-                    .or_else(|| {
-                        rows.selected()
-                            .map(|row| ContainerIdentity::Playlist(row.id))
-                    });
+                    .and_then(|(identity, _, _)| match identity {
+                        ContainerIdentity::Playlist(id) => Some(*id),
+                        _ => None,
+                    })
+                    .or_else(|| rows.selected().map(|row| row.id))
+                    // An extant playlist can still be excluded by the filter.
+                    .filter(|id| state.library.playlist_entry_revisions.contains_key(id))
+                    .map(ContainerIdentity::Playlist);
                 if reset_lookup {
                     rows.retain_identity(identity);
                 } else {
@@ -1090,7 +1098,9 @@ impl View {
         match self {
             View::Queue => queue.refilter(state),
             View::LibraryResults(results) => results.refilter(),
-            View::Tree(_) | View::Playlists(_) => self.retain_container_identity(true, false),
+            View::Tree(_) | View::Playlists(_) => {
+                self.retain_container_identity(state, true, false)
+            }
             View::PlaylistDetail { detail, .. } => {
                 detail.entry_anchor = detail
                     .entry_anchor
