@@ -4,6 +4,7 @@ use rand::RngExt;
 
 pub(in crate::core) enum QueueRefresh {
     Projection,
+    ProjectionAndHistory,
     Reload,
 }
 
@@ -31,6 +32,11 @@ impl Core {
         self.advance_queue_revision();
         match refresh {
             QueueRefresh::Projection => self.refresh_queue_projection(),
+            QueueRefresh::ProjectionAndHistory => {
+                self.transport.projection_stale = true;
+                self.prune_queue_history()
+                    .and_then(|()| self.refresh_queue_projection())
+            }
             QueueRefresh::Reload => self.reload_queue(),
         }
         .context(QueueSyncError)
@@ -306,7 +312,7 @@ impl Core {
     pub(in crate::core) fn deduplicate_queue(&mut self) -> Result<()> {
         self.ensure_queue_control_ready()?;
         if self.store.deduplicate_queue()? {
-            self.queue_mutation_committed(QueueRefresh::Reload)?;
+            self.queue_mutation_committed(QueueRefresh::ProjectionAndHistory)?;
         }
         Ok(())
     }
