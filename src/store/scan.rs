@@ -240,18 +240,19 @@ pub(super) fn staged_catalog_changes(
 
 // Keep equality and descendant branches separate so both path indexes can seek.
 // A slash-terminated prefix has the exclusive BINARY upper bound ending in '0'.
+// The outer IN handles overlaps between path and CUE-sheet matches.
 const SCAN_SCOPE_IDS: &str = "
     SELECT t.id FROM json_each(?1) AS scope
     CROSS JOIN tracks AS t INDEXED BY tracks_path WHERE t.path=scope.value
-    UNION
+    UNION ALL
     SELECT t.id FROM json_each(?2) AS scope
     CROSS JOIN tracks AS t INDEXED BY tracks_path
     WHERE t.path>=scope.value AND t.path<(rtrim(scope.value,'/')||'0')
-    UNION
+    UNION ALL
     SELECT t.id FROM json_each(?1) AS scope
     CROSS JOIN tracks AS t INDEXED BY tracks_cue
     WHERE t.cue_sheet IS NOT NULL AND t.cue_sheet=scope.value
-    UNION
+    UNION ALL
     SELECT t.id FROM json_each(?2) AS scope
     CROSS JOIN tracks AS t INDEXED BY tracks_cue
     WHERE t.cue_sheet IS NOT NULL
@@ -831,7 +832,7 @@ impl Store {
         let scope_ids = if exact_sources {
             "SELECT t.id FROM json_each(?1) AS scope
              CROSS JOIN tracks AS t INDEXED BY tracks_path WHERE t.path=scope.value
-             UNION SELECT t.id FROM json_each(?2) AS scope
+             UNION ALL SELECT t.id FROM json_each(?2) AS scope
              CROSS JOIN tracks AS t INDEXED BY tracks_path WHERE t.path=scope.value"
         } else {
             SCAN_SCOPE_IDS

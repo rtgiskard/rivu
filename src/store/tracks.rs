@@ -56,7 +56,21 @@ const TRACK_SEARCH_FILTER: &str = concat!(
     search_filter!("tracks", "?1", "tracks.path"),
     " AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)"
 );
-pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2) UNION SELECT scoped.id FROM json_each(?1,'$.directories') AS directory CROSS JOIN tracks AS scoped INDEXED BY tracks_path WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0') UNION SELECT id FROM tracks WHERE EXISTS(SELECT 1 FROM json_each(?1,'$.directories') WHERE value='') UNION SELECT id FROM tracks WHERE json_type(?1,'$.roots')='array' AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.roots') AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0')))";
+// IN deduplicates the selected IDs. Read the whole library only for an empty prefix.
+pub(super) const SOURCE_FILTER: &str = "tracks.id IN (
+    SELECT value FROM json_each(?2)
+    UNION ALL
+    SELECT scoped.id FROM json_each(?1,'$.directories') AS directory
+    CROSS JOIN tracks AS scoped INDEXED BY tracks_path
+    WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0')
+    UNION ALL
+    SELECT tracks.id FROM json_each(?1,'$.directories') AS whole
+    CROSS JOIN tracks WHERE whole.value=''
+    UNION ALL
+    SELECT id FROM tracks WHERE json_type(?1,'$.roots')='array' AND NOT EXISTS(
+        SELECT 1 FROM json_each(?1,'$.roots') AS root
+        WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0'))
+)";
 // Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
 // '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
 const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/')||'0')";
@@ -882,9 +896,19 @@ impl Store {
                 bool_key(missing),
             ],
             || {
+                // For a fixed prefix, the relative first component identifies a
+                // child directory (the empty component denotes absolute '/').
                 Ok(self
                     .conn
-                    .prepare_cached(&format!("{children} SELECT COUNT(*) FROM children"))?
+                    .prepare_cached(&format!(
+                        "WITH sources AS (
+                            SELECT substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}
+                         ), classified AS (
+                            SELECT rest,instr(rest,'/') AS slash FROM sources
+                         ) SELECT COUNT(*) FILTER (WHERE slash=0)
+                            + COUNT(DISTINCT CASE WHEN slash>0 THEN substr(rest,1,slash-1) END)
+                         FROM classified"
+                    ))?
                     .query_row(params![query, favorite, missing, prefix], |row| {
                         row.get::<_, i64>(0)
                     })? as usize)
