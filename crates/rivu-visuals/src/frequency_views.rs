@@ -381,8 +381,8 @@ impl FrequencyViews {
         data.spectrogram.latest_sample_time = Some(time);
     }
 
-    pub fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
-        self.collect(frame);
+    /// Present the staged frame without advancing the independently collected history.
+    pub fn present(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
         let mut data = self.data.borrow_mut();
         if !data.enabled || (!data.spectrum.visible && !data.spectrogram.collecting) {
             return;
@@ -990,6 +990,11 @@ impl FrequencyViews {
 }
 #[cfg(test)]
 mod tests {
+    fn collect_and_present(views: &mut FrequencyViews, frame: &AnalysisFrame, time: Duration) {
+        views.collect(frame);
+        views.present(frame, time);
+    }
+
     use super::*;
     use rivu_format::config::Config;
 
@@ -998,7 +1003,7 @@ mod tests {
         for hide_window in [false, true] {
             let mut visuals = configured_visuals();
             let first = frame(1.0, -30.0);
-            visuals.update(&first, first.sample_time);
+            collect_and_present(&mut visuals, &first, first.sample_time);
             publish_analysis_views(&visuals, 1);
             assert_eq!(
                 visuals.data.borrow().spectrogram.frequency_labels[1].as_ref(),
@@ -1039,7 +1044,7 @@ mod tests {
     fn analysis_collection_does_not_commit_the_display_between_capped_frames() {
         let mut visuals = configured_visuals();
         let initial = frame(1.0, -60.0);
-        visuals.update(&initial, initial.sample_time);
+        collect_and_present(&mut visuals, &initial, initial.sample_time);
         publish_analysis_views(&visuals, 1);
         let (retained, deadlines, db_labels) = {
             let data = visuals.data.borrow();
@@ -1072,7 +1077,7 @@ mod tests {
             data.spectrogram.len
         };
         let latest = frame(2.0, -3.0);
-        visuals.update(&latest, latest.sample_time);
+        visuals.present(&latest, latest.sample_time);
         publish_analysis_views(&visuals, 1);
         let data = visuals.data.borrow();
         assert_eq!(data.display_time, Some(latest.sample_time));
@@ -1088,8 +1093,12 @@ mod tests {
     #[test]
     fn hidden_spectrogram_collects_bounded_history_without_publishing_until_return() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-        visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+        collect_and_present(&mut visuals, &frame(1.0, -10.0), Duration::from_secs(1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -20.0),
+            Duration::from_millis(1100),
+        );
         publish_analysis_views(&visuals, 1);
         let (retained, dimensions, capacity) = {
             let data = visuals.data.borrow();
@@ -1176,21 +1185,21 @@ mod tests {
         let peak = (40_000.0 * fft as f32 / 96_000.0).round() as usize - 1;
         bins[peak] = -3.0;
         high_rate.visualizer.spectrogram = bins.into();
-        visuals.update(&high_rate, high_rate.sample_time);
+        collect_and_present(&mut visuals, &high_rate, high_rate.sample_time);
         visuals.invalidate_signal();
         let mut low_rate = frame(1.1, -40.0);
         low_rate.generation = 2;
         low_rate.audio_epoch = 2;
         low_rate.audio_intent = 100;
         low_rate.sample_rate = 8_000;
-        visuals.update(&low_rate, low_rate.sample_time);
+        collect_and_present(&mut visuals, &low_rate, low_rate.sample_time);
         visuals.invalidate_signal();
         let mut returned_rate = frame(1.2, -60.0);
         returned_rate.sample_rate = 96_000;
         returned_rate.generation = 3;
         returned_rate.audio_epoch = 3;
         returned_rate.audio_intent = 200;
-        visuals.update(&returned_rate, returned_rate.sample_time);
+        collect_and_present(&mut visuals, &returned_rate, returned_rate.sample_time);
         publish_analysis_views(&visuals, 1);
         let data = visuals.data.borrow();
         assert_eq!(data.spectrogram.len, 3);
@@ -1236,8 +1245,8 @@ mod tests {
             ..Config::default()
         });
         let start = Duration::from_secs(1);
-        visuals.update(&frame(1.0, -10.0), start);
-        visuals.update(&frame(1.2, -80.0), start);
+        collect_and_present(&mut visuals, &frame(1.0, -10.0), start);
+        collect_and_present(&mut visuals, &frame(1.2, -80.0), start);
         let (history, sample_time, deadlines) = {
             let data = visuals.data.borrow();
             (
@@ -1270,9 +1279,13 @@ mod tests {
         visuals.set_spectrum_visible(false);
         visuals.animate(Duration::from_millis(1190));
         visuals.set_spectrum_visible(true);
-        visuals.update(&frame(1.2, -80.0), Duration::from_millis(1190));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.2, -80.0),
+            Duration::from_millis(1190),
+        );
         assert_eq!(visuals.data.borrow().spectrum.peaks, vec![-80.0; 4]);
-        visuals.update(&frame(1.4, -5.0), Duration::from_millis(1190));
+        collect_and_present(&mut visuals, &frame(1.4, -5.0), Duration::from_millis(1190));
         assert_eq!(visuals.data.borrow().spectrum.peaks, vec![-5.0; 4]);
     }
 
@@ -1287,8 +1300,8 @@ mod tests {
             ..Config::default()
         });
         let start = Duration::from_secs(1);
-        visuals.update(&frame(1.0, -10.0), start);
-        visuals.update(&frame(1.2, -80.0), start);
+        collect_and_present(&mut visuals, &frame(1.0, -10.0), start);
+        collect_and_present(&mut visuals, &frame(1.2, -80.0), start);
         visuals.animate(Duration::from_millis(1099));
         assert_eq!(visuals.data.borrow().spectrum.peaks, vec![-10.0; 4]);
         assert!(visuals.animate(Duration::from_millis(1100)));
@@ -1306,11 +1319,19 @@ mod tests {
         let mut visuals = configured_visuals();
         let mut config = Config::default();
         visuals.data.borrow_mut().resize_history(100);
-        visuals.update(&frame(10.010, -10.0), Duration::from_secs_f64(10.010));
+        collect_and_present(
+            &mut visuals,
+            &frame(10.010, -10.0),
+            Duration::from_secs_f64(10.010),
+        );
         config.visualization_background = "#202020".parse().unwrap();
         config.spectrogram_db_range = Some(100.0);
         visuals.configure_config(&config);
-        visuals.update(&frame(10.020, -60.0), Duration::from_secs_f64(10.020));
+        collect_and_present(
+            &mut visuals,
+            &frame(10.020, -60.0),
+            Duration::from_secs_f64(10.020),
+        );
         let data = visuals.data.borrow();
         assert_eq!(data.spectrogram.len, 1);
         assert_eq!(
@@ -1324,9 +1345,13 @@ mod tests {
         let mut visuals = configured_visuals();
         let mut invalid = frame(1.0, -20.0);
         invalid.spectrum_db.pop();
-        visuals.update(&invalid, invalid.sample_time);
+        collect_and_present(&mut visuals, &invalid, invalid.sample_time);
         assert!(visuals.data.borrow().error.is_some());
-        visuals.update(&frame(1.1, -30.0), Duration::from_secs_f64(1.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -30.0),
+            Duration::from_secs_f64(1.1),
+        );
         let data = visuals.data.borrow();
         assert!(data.error.is_none());
         assert_eq!(data.latest_levels, vec![-30.0; 4]);
@@ -1341,13 +1366,13 @@ mod tests {
         audio.spectrum_requested = false;
         audio.frequencies_hz.clear();
         audio.spectrum_db.clear();
-        visuals.update(&audio, audio.sample_time);
+        collect_and_present(&mut visuals, &audio, audio.sample_time);
         audio.sequence += 1;
         audio.sample_time = Duration::from_millis(1100);
         audio.visualizer.spectrogram =
             vec![-3.0; Config::default().analysis_fft_size as usize / 2].into();
         visuals.collect(&audio);
-        visuals.update(&audio, Duration::from_secs(1));
+        visuals.present(&audio, Duration::from_secs(1));
         publish_analysis_views(&visuals, 1);
         let before = {
             let data = visuals.data.borrow();
@@ -1372,12 +1397,12 @@ mod tests {
     #[test]
     fn omitted_spectrum_keeps_live_levels_while_full_bins_update_history() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -20.0), Duration::from_secs(1));
+        collect_and_present(&mut visuals, &frame(1.0, -20.0), Duration::from_secs(1));
         let mut omitted = frame(1.1, -40.0);
         omitted.spectrum_requested = false;
         omitted.frequencies_hz.clear();
         omitted.spectrum_db.clear();
-        visuals.update(&omitted, omitted.sample_time);
+        collect_and_present(&mut visuals, &omitted, omitted.sample_time);
         {
             let data = visuals.data.borrow();
             assert_eq!(data.latest_levels, vec![-20.0; 4]);
@@ -1394,7 +1419,7 @@ mod tests {
             ));
         }
         omitted.settings = None;
-        visuals.update(&omitted, omitted.sample_time);
+        collect_and_present(&mut visuals, &omitted, omitted.sample_time);
         assert!(visuals.data.borrow().latest_levels.is_empty());
     }
 
@@ -1444,7 +1469,11 @@ mod tests {
                         spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 4 },
                         ..Config::default()
                     });
-                    visuals.update(&frame(1.0, level), Duration::from_secs_f64(1.0));
+                    collect_and_present(
+                        &mut visuals,
+                        &frame(1.0, level),
+                        Duration::from_secs_f64(1.0),
+                    );
                     let body = prepared_body(&visuals, 1, 100.0, 100.0).unwrap();
                     let gpui::GpuContent::Path { path, params } = body.content() else {
                         panic!("expected continuous spectrum path")
@@ -1493,7 +1522,7 @@ mod tests {
                     spectrum_bar_layout: SpectrumBarLayout::Fixed { count: 4 },
                     ..Config::default()
                 });
-                visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+                collect_and_present(&mut visuals, &frame(1.0, -30.0), Duration::from_secs(1));
                 let plot = Bounds::new(point(px(13.25), px(21.5)), size(px(120.5), px(80.25)));
                 let moved = Bounds::new(point(px(331.75), px(217.125)), plot.size);
                 let mut data = visuals.data.borrow_mut();
@@ -1628,7 +1657,11 @@ mod tests {
                 spectrum_gap: 2.0,
                 ..Config::default()
             });
-            visuals.update(&frame(1.0, height - 100.0), Duration::from_secs_f64(1.0));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.0, height - 100.0),
+                Duration::from_secs_f64(1.0),
+            );
             let body = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
             let gpui::GpuContent::Rectangles { rectangles, params } = body.content() else {
                 unreachable!()
@@ -1693,7 +1726,7 @@ mod tests {
                 spectrum_db_range: Some(100.0),
                 ..Config::default()
             });
-            visuals.update(&frame(1.0, 0.0), Duration::from_secs(1));
+            collect_and_present(&mut visuals, &frame(1.0, 0.0), Duration::from_secs(1));
             let body = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
             let gpui::GpuContent::Rectangles { rectangles, .. } = body.content() else {
                 unreachable!()
@@ -1720,7 +1753,11 @@ mod tests {
                     spectrum_gap: 2.0,
                     ..Config::default()
                 });
-                visuals.update(&frame(1.0, height - 100.0), Duration::from_secs_f64(1.0));
+                collect_and_present(
+                    &mut visuals,
+                    &frame(1.0, height - 100.0),
+                    Duration::from_secs_f64(1.0),
+                );
                 let body = prepared_body(&visuals, 1, 100.0, 100.0);
                 if height == 0.0 {
                     assert!(body.is_none());
@@ -1781,7 +1818,7 @@ mod tests {
                     spectrum_interpolate: true,
                     ..Config::default()
                 });
-                visuals.update(&frame(1.0, 0.0), Duration::from_secs_f64(1.0));
+                collect_and_present(&mut visuals, &frame(1.0, 0.0), Duration::from_secs_f64(1.0));
                 let frame = rectangle_frame(prepared_body(&visuals, 1, width, 77.125));
                 let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
                     unreachable!()
@@ -1814,14 +1851,26 @@ mod tests {
             spectrum_style: SpectrumStyle::Bars,
             ..Config::default()
         });
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -30.0),
+            Duration::from_secs_f64(1.0),
+        );
         visuals.retain_spectrum_panels(&[]);
         visuals.set_spectrum_visible(false);
-        visuals.update(&frame(1.1, -60.0), Duration::from_secs_f64(1.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -60.0),
+            Duration::from_secs_f64(1.1),
+        );
         assert!(visuals.data.borrow().spectrum_render_range().is_none());
         visuals.set_spectrum_visible(true);
         assert!(visuals.data.borrow().spectrum_render_range().is_none());
-        visuals.update(&frame(1.2, -60.0), Duration::from_secs_f64(1.2));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.2, -60.0),
+            Duration::from_secs_f64(1.2),
+        );
         let restored = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
         let gpui::GpuContent::Rectangles { rectangles, .. } = restored.content() else {
             unreachable!()
@@ -1854,7 +1903,11 @@ mod tests {
             spectrum_style: SpectrumStyle::Bars,
             ..Config::default()
         });
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -30.0),
+            Duration::from_secs_f64(1.0),
+        );
         let lut = PaletteLut::new(VisualizationPalette::Deadbeef);
         lut.gpu_palette
             .set(Err("palette allocation failed".into()))
@@ -1920,17 +1973,17 @@ mod tests {
     fn invalidated_source_hides_spectrum_and_restarts_envelopes_on_fresh_audio() {
         let mut visuals = configured_visuals();
         let mut audio = frame(1.0, -10.0);
-        visuals.update(&audio, audio.sample_time);
+        collect_and_present(&mut visuals, &audio, audio.sample_time);
         assert!(visuals.data.borrow().spectrum_render_range().is_some());
 
         audio.settings = None;
         audio.generation += 1;
-        visuals.update(&audio, audio.sample_time);
+        collect_and_present(&mut visuals, &audio, audio.sample_time);
         assert!(visuals.data.borrow().spectrum_render_range().is_none());
 
         let mut fresh = frame(1.1, -60.0);
         fresh.generation = audio.generation;
-        visuals.update(&fresh, fresh.sample_time);
+        collect_and_present(&mut visuals, &fresh, fresh.sample_time);
         let data = visuals.data.borrow();
         assert!(data.spectrum_render_range().is_some());
         assert_eq!(data.spectrum.peaks, vec![-60.0; 4]);
@@ -1942,8 +1995,12 @@ mod tests {
     fn playing_signal_invalidation_releases_final_bodies_and_peaks_without_a_source_change() {
         let mut visuals = configured_visuals();
         let mut audio = frame(1.0, -10.0);
-        visuals.update(&audio, audio.sample_time);
-        visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+        collect_and_present(&mut visuals, &audio, audio.sample_time);
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -20.0),
+            Duration::from_millis(1100),
+        );
         publish_analysis_views(&visuals, 1);
         let (body, tile) = {
             let data = visuals.data.borrow();
@@ -1956,7 +2013,7 @@ mod tests {
         // Worker continuity loss can invalidate settings while the GUI's
         // playback/source/seek/config identities remain unchanged.
         audio.settings = None;
-        visuals.update(&audio, audio.sample_time);
+        collect_and_present(&mut visuals, &audio, audio.sample_time);
         publish_analysis_views(&visuals, 1);
         assert!(body.upgrade().is_none());
         assert!(tile.upgrade().is_some());
@@ -1966,7 +2023,7 @@ mod tests {
             assert!(!data.spectrogram.presentations.is_empty());
         }
         let fresh = frame(1.2, -60.0);
-        visuals.update(&fresh, fresh.sample_time);
+        collect_and_present(&mut visuals, &fresh, fresh.sample_time);
         publish_analysis_views(&visuals, 1);
         let data = visuals.data.borrow();
         assert!(data.spectrum.presentations[&1].body.is_some());
@@ -1977,10 +2034,14 @@ mod tests {
     #[test]
     fn same_rate_seek_starts_new_bucket_and_resets_hold_and_smoothing() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.02, -10.0), Duration::from_secs_f64(1.02));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.02, -10.0),
+            Duration::from_secs_f64(1.02),
+        );
         let mut next = frame(1.03, -60.0);
         next.generation = 2;
-        visuals.update(&next, next.sample_time);
+        collect_and_present(&mut visuals, &next, next.sample_time);
         let data = visuals.data.borrow();
         assert_eq!(data.spectrogram.len, 2);
         assert_eq!(
@@ -2013,9 +2074,17 @@ mod tests {
             },
         ] {
             let mut visuals = configured_visuals();
-            visuals.update(&frame(1.0, -10.0), Duration::from_secs_f64(1.0));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.0, -10.0),
+                Duration::from_secs_f64(1.0),
+            );
             visuals.configure_config(&config);
-            visuals.update(&frame(2.0, -20.0), Duration::from_secs_f64(2.0));
+            collect_and_present(
+                &mut visuals,
+                &frame(2.0, -20.0),
+                Duration::from_secs_f64(2.0),
+            );
             assert!(visuals.data.borrow().latest_levels.is_empty());
             assert_eq!(visuals.data.borrow().spectrogram.len, 0);
             let mut fresh = frame(2.1, -60.0);
@@ -2023,10 +2092,14 @@ mod tests {
             fresh.generation = 2;
             fresh.visualizer.spectrogram =
                 vec![-60.0; config.analysis_fft_size as usize / 2].into();
-            visuals.update(&fresh, fresh.sample_time);
+            collect_and_present(&mut visuals, &fresh, fresh.sample_time);
             assert_eq!(visuals.data.borrow().spectrum.peaks, vec![-60.0; 4]);
             let before = visuals.data.borrow().latest_sample_time;
-            visuals.update(&frame(2.2, -5.0), Duration::from_secs_f64(2.2));
+            collect_and_present(
+                &mut visuals,
+                &frame(2.2, -5.0),
+                Duration::from_secs_f64(2.2),
+            );
             assert_eq!(visuals.data.borrow().latest_sample_time, before);
         }
     }
@@ -2034,8 +2107,16 @@ mod tests {
     #[test]
     fn signal_switch_clears_history_and_rejects_stale_frames_but_eq_preserves_history() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -10.0), Duration::from_secs_f64(1.0));
-        visuals.update(&frame(1.1, -20.0), Duration::from_secs_f64(1.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -10.0),
+            Duration::from_secs_f64(1.0),
+        );
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -20.0),
+            Duration::from_secs_f64(1.1),
+        );
         assert_eq!(visuals.data.borrow().spectrogram.len, 2);
 
         let mut config = Config {
@@ -2053,14 +2134,18 @@ mod tests {
             assert!(data.spectrum.smoothed_levels.is_empty());
             assert!(data.spectrum.mappings.is_empty());
         }
-        visuals.update(&frame(1.2, -5.0), Duration::from_secs_f64(1.2));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.2, -5.0),
+            Duration::from_secs_f64(1.2),
+        );
         assert_eq!(visuals.data.borrow().spectrogram.len, 0);
         assert!(visuals.data.borrow().latest_levels.is_empty());
 
         // Reusing a sequence is valid after switching the selected signal.
         let mut before = frame(1.1, -40.0);
         before.settings = Some(rivu_analysis::AnalysisSettings::from(&config));
-        visuals.update(&before, before.sample_time);
+        collect_and_present(&mut visuals, &before, before.sample_time);
         assert_eq!(visuals.data.borrow().spectrogram.len, 1);
         assert_eq!(visuals.data.borrow().latest_levels, vec![-40.0; 4]);
 
@@ -2078,7 +2163,7 @@ mod tests {
         before.spectrum_db.fill(-50.0);
         before.visualizer.spectrogram =
             vec![-50.0; Config::default().analysis_fft_size as usize / 2].into();
-        visuals.update(&before, before.sample_time);
+        collect_and_present(&mut visuals, &before, before.sample_time);
         let data = visuals.data.borrow();
         assert_eq!(data.spectrogram.len, 2);
         assert_eq!(
@@ -2113,7 +2198,7 @@ mod tests {
                 let time = Duration::from_secs_f64(step as f64 / fps as f64);
                 audio.sequence = time.as_nanos() as u64;
                 audio.sample_time = time;
-                visuals.update(&audio, time);
+                collect_and_present(&mut visuals, &audio, time);
             }
             let data = visuals.data.borrow();
             assert_eq!(data.spectrogram.len, history_column_count(60, fps));
@@ -2148,7 +2233,11 @@ mod tests {
         let mut visuals = FrequencyViews::new();
         let mut config = Config::default();
         visuals.configure_config(&config);
-        visuals.update(&frame(1.0, -10.0), Duration::from_secs_f64(1.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -10.0),
+            Duration::from_secs_f64(1.0),
+        );
         assert_eq!(visuals.data.borrow().spectrogram.columns.capacity(), 0);
         assert_eq!(visuals.data.borrow().spectrum.peaks, vec![-10.0; 4]);
 
@@ -2160,10 +2249,18 @@ mod tests {
             .panel_sizes
             .insert(2, (400, 100));
         visuals.configure_config(&config);
-        visuals.update(&frame(1.1, -20.0), Duration::from_secs_f64(1.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -20.0),
+            Duration::from_secs_f64(1.1),
+        );
         visuals.retain_spectrogram_panels(&[2]);
         assert_eq!(visuals.data.borrow().spectrogram.len, 1);
-        visuals.update(&frame(1.2, -30.0), Duration::from_secs_f64(1.2));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.2, -30.0),
+            Duration::from_secs_f64(1.2),
+        );
         assert_eq!(visuals.data.borrow().spectrogram.len, 2);
         {
             let mut data = visuals.data.borrow_mut();
@@ -2175,7 +2272,11 @@ mod tests {
         {
             config.analysis_rate_hz += 1;
             visuals.configure_config(&config);
-            visuals.update(&frame(2.0, -40.0), Duration::from_secs_f64(2.0));
+            collect_and_present(
+                &mut visuals,
+                &frame(2.0, -40.0),
+                Duration::from_secs_f64(2.0),
+            );
             let data = visuals.data.borrow();
             assert_eq!(data.spectrogram.columns.capacity(), 0);
             assert_eq!(data.spectrogram.heat_samples.capacity(), 0);
@@ -2190,9 +2291,17 @@ mod tests {
         visuals.configure_config(&config);
         // A settings refresh can replay the current analysis publication.
         // It must not resurrect the last hidden frame as new history.
-        visuals.update(&frame(2.0, -40.0), Duration::from_secs_f64(2.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(2.0, -40.0),
+            Duration::from_secs_f64(2.0),
+        );
         assert_eq!(visuals.data.borrow().spectrogram.len, 0);
-        visuals.update(&frame(3.0, -50.0), Duration::from_secs_f64(3.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(3.0, -50.0),
+            Duration::from_secs_f64(3.0),
+        );
         let data = visuals.data.borrow();
         assert_eq!(data.spectrogram.len, 1);
         let newest = &data.spectrogram.columns[data.spectrogram.latest.unwrap()];
@@ -2203,9 +2312,17 @@ mod tests {
     #[test]
     fn hidden_spectrum_preserves_history_and_resumes_with_latest_levels() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -10.0), Duration::from_secs_f64(1.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -10.0),
+            Duration::from_secs_f64(1.0),
+        );
         visuals.set_spectrum_visible(false);
-        visuals.update(&frame(1.1, -60.0), Duration::from_secs_f64(1.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -60.0),
+            Duration::from_secs_f64(1.1),
+        );
         {
             let data = visuals.data.borrow();
             assert_eq!(data.spectrum.peaks.capacity(), 0);
@@ -2215,7 +2332,11 @@ mod tests {
             assert_eq!(data.spectrogram.len, 2);
         }
         visuals.set_spectrum_visible(true);
-        visuals.update(&frame(1.1, -60.0), Duration::from_secs_f64(1.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -60.0),
+            Duration::from_secs_f64(1.1),
+        );
         let data = visuals.data.borrow();
         assert_eq!(data.spectrum.peaks, vec![-60.0; 4]);
         assert_eq!(data.spectrum.bar_levels, vec![-60.0; 4]);
@@ -2227,14 +2348,18 @@ mod tests {
     fn hidden_frequency_shape_change_withholds_rendering_until_real_envelopes_return() {
         for count in [2, 8] {
             let mut visuals = configured_visuals();
-            visuals.update(&frame(1.0, -10.0), Duration::from_secs_f64(1.0));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.0, -10.0),
+                Duration::from_secs_f64(1.0),
+            );
             visuals.set_spectrum_visible(false);
             let mut changed = frame(1.1, -60.0);
             changed.frequencies_hz = (0..count)
                 .map(|index| 20.0 * 1000.0_f32.powf(index as f32 / (count - 1) as f32))
                 .collect();
             changed.spectrum_db = vec![-60.0; count];
-            visuals.update(&changed, changed.sample_time);
+            collect_and_present(&mut visuals, &changed, changed.sample_time);
             assert!(visuals.set_spectrum_visible(true));
             {
                 let data = visuals.data.borrow();
@@ -2253,7 +2378,7 @@ mod tests {
                 assert!(data.spectrum_render_range().is_none());
             }
             changed.sample_time = Duration::from_secs_f64(1.2);
-            visuals.update(&changed, changed.sample_time);
+            collect_and_present(&mut visuals, &changed, changed.sample_time);
             let data = visuals.data.borrow();
             let (first, end, low, high) = data.spectrum_render_range().unwrap();
             for index in first..end {
@@ -2271,7 +2396,11 @@ mod tests {
     #[test]
     fn differently_sized_spectrum_panels_keep_independent_bands_and_release_them() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -30.0),
+            Duration::from_secs_f64(1.0),
+        );
         {
             let mut data = visuals.data.borrow_mut();
             let (_, _, low, high) = data.spectrum_render_range().unwrap();
@@ -2339,10 +2468,18 @@ mod tests {
             },
         ] {
             let mut visuals = configured_visuals();
-            visuals.update(&frame(1.0, -10.0), Duration::from_secs_f64(1.0));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.0, -10.0),
+                Duration::from_secs_f64(1.0),
+            );
             visuals.set_enabled(false);
             visuals.configure_config(&config);
-            visuals.update(&frame(2.0, -20.0), Duration::from_secs_f64(2.0));
+            collect_and_present(
+                &mut visuals,
+                &frame(2.0, -20.0),
+                Duration::from_secs_f64(2.0),
+            );
             visuals.finish_prepaint();
             {
                 let data = visuals.data.borrow();
@@ -2358,7 +2495,7 @@ mod tests {
             assert!(visuals.configure_config(&config));
             let mut fresh = frame(3.0, -60.0);
             fresh.generation = 2;
-            visuals.update(&fresh, fresh.sample_time);
+            collect_and_present(&mut visuals, &fresh, fresh.sample_time);
             let data = visuals.data.borrow();
             assert_eq!(data.spectrogram.len, 1);
             assert_eq!(data.latest_sample_time, Some(fresh.sample_time));
@@ -2378,8 +2515,12 @@ mod tests {
                 data.resize_history(columns);
                 data.spectrogram.panel_height = height;
             }
-            visuals.update(&frame(1.0, -20.0), Duration::from_secs(1));
-            visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+            collect_and_present(&mut visuals, &frame(1.0, -20.0), Duration::from_secs(1));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.1, -20.0),
+                Duration::from_millis(1100),
+            );
             let mut data = visuals.data.borrow_mut();
             data.prepare_spectrogram_presentation(1).unwrap();
             let rows = data.spectrogram.sample_height;
@@ -2417,8 +2558,8 @@ mod tests {
     #[test]
     fn spectrogram_panels_share_assembly_and_scroll_without_rebuilding_tiles() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
-        visuals.update(&frame(1.1, -30.0), Duration::from_secs(1));
+        collect_and_present(&mut visuals, &frame(1.0, -30.0), Duration::from_secs(1));
+        collect_and_present(&mut visuals, &frame(1.1, -30.0), Duration::from_secs(1));
         let initial = {
             let mut data = visuals.data.borrow_mut();
             data.prepare_spectrogram_presentation(1).unwrap();
@@ -2484,7 +2625,7 @@ mod tests {
     fn spectrogram_assembly_tracks_interval_content_and_sampling_changes() {
         let mut visuals = configured_visuals();
         visuals.data.borrow_mut().resize_history(2);
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+        collect_and_present(&mut visuals, &frame(1.0, -30.0), Duration::from_secs(1));
         let initial = {
             let mut data = visuals.data.borrow_mut();
             data.prepare_spectrogram_presentation(1).unwrap();
@@ -2492,7 +2633,7 @@ mod tests {
         };
         // All these samples share one time bucket. An unchanged level still
         // extends its interval, even while presentation time remains fixed.
-        visuals.update(&frame(1.1, -30.0), Duration::from_secs(1));
+        collect_and_present(&mut visuals, &frame(1.1, -30.0), Duration::from_secs(1));
         let extended = {
             let mut data = visuals.data.borrow_mut();
             data.prepare_spectrogram_presentation(1).unwrap();
@@ -2506,7 +2647,7 @@ mod tests {
         // content without changing any layer placement.
         let mut louder = frame(1.1, -6.0);
         louder.sequence += 1;
-        visuals.update(&louder, Duration::from_secs(1));
+        collect_and_present(&mut visuals, &louder, Duration::from_secs(1));
         let louder_publication = {
             let mut data = visuals.data.borrow_mut();
             data.prepare_spectrogram_presentation(1).unwrap();
@@ -2522,7 +2663,7 @@ mod tests {
         // Reaccepting identical levels at the same sample time changes neither
         // history nor placement and must not allocate another layer assembly.
         louder.sequence += 1;
-        visuals.update(&louder, Duration::from_secs(1));
+        collect_and_present(&mut visuals, &louder, Duration::from_secs(1));
         let mut data = visuals.data.borrow_mut();
         data.prepare_spectrogram_presentation(1).unwrap();
         assert!(Arc::ptr_eq(
@@ -2548,14 +2689,14 @@ mod tests {
     #[test]
     fn empty_spectrogram_assembly_keeps_each_panels_retained_publication() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+        collect_and_present(&mut visuals, &frame(1.0, -30.0), Duration::from_secs(1));
         let retained = {
             let mut data = visuals.data.borrow_mut();
             data.prepare_spectrogram_presentation(1).unwrap();
             data.prepare_spectrogram_presentation(2).unwrap();
             data.spectrogram.presentations[&1].clone()
         };
-        visuals.update(&frame(2.0, -30.0), Duration::ZERO);
+        collect_and_present(&mut visuals, &frame(2.0, -30.0), Duration::ZERO);
         let mut data = visuals.data.borrow_mut();
         data.prepare_spectrogram_presentation(1).unwrap();
         let empty = data.spectrogram.assembly.as_ref().unwrap().1.clone();
@@ -2579,7 +2720,7 @@ mod tests {
     #[test]
     fn combined_background_and_palette_change_recolors_shared_spectrogram_cache() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs(1));
+        collect_and_present(&mut visuals, &frame(1.0, -30.0), Duration::from_secs(1));
         publish_analysis_views(&visuals, 1);
         let previous = visuals.data.borrow().spectrogram.presentations[&1].clone();
         let config = Config {
@@ -2652,11 +2793,11 @@ mod tests {
         };
         visuals.configure_config(&config);
         let start = Duration::from_secs(1);
-        visuals.update(&frame(1.0, -12.0), start);
+        collect_and_present(&mut visuals, &frame(1.0, -12.0), start);
         let high = published_spectrum_rectangles(&visuals, 1, retention_plot());
         assert!(high.iter().all(|bounds| (bounds[3] - 0.88).abs() < 1e-6));
         let quieter = frame(1.2, -48.0);
-        visuals.update(&quieter, start);
+        collect_and_present(&mut visuals, &quieter, start);
         assert_eq!(
             high,
             published_spectrum_rectangles(&visuals, 1, retention_plot())
@@ -2676,7 +2817,7 @@ mod tests {
         );
 
         let mut boosted = frame(1.3, 10.0);
-        visuals.update(&boosted, boosted.sample_time);
+        collect_and_present(&mut visuals, &boosted, boosted.sample_time);
         let scaled = published_spectrum_rectangles(&visuals, 1, retention_plot());
         assert!(scaled.iter().all(|bounds| (bounds[3] - 0.98).abs() < 1e-6));
         assert_eq!(
@@ -2687,7 +2828,7 @@ mod tests {
             .labels
             .clone();
         boosted.frequencies_hz = vec![40.0, 400.0, 4000.0, 16_000.0];
-        visuals.update(&boosted, boosted.sample_time);
+        collect_and_present(&mut visuals, &boosted, boosted.sample_time);
         let regrouped = published_spectrum_rectangles(&visuals, 1, retention_plot());
         assert!(
             regrouped
@@ -2720,13 +2861,13 @@ mod tests {
             ..Config::default()
         });
         let audio = frame(1.0, -12.0);
-        visuals.update(&audio, audio.sample_time);
+        collect_and_present(&mut visuals, &audio, audio.sample_time);
         let first = published_spectrum_rectangles(&visuals, 1, retention_plot());
         visuals.retain_presentation_panels(&[1], &[1]);
         visuals.set_spectrum_visible(false);
         visuals.retain_spectrogram_panels(&[]);
         let hidden = frame(2.0, -48.0);
-        visuals.update(&hidden, hidden.sample_time);
+        collect_and_present(&mut visuals, &hidden, hidden.sample_time);
         assert!(!visuals.animate(hidden.sample_time));
         assert_eq!(
             visuals.data.borrow().last_analysis_sequence,
@@ -2739,7 +2880,7 @@ mod tests {
         assert!(visuals.set_spectrum_visible(true));
         // Restoration accepts the retained frame even though its sequence has
         // not advanced since the last accepted input.
-        visuals.update(&audio, audio.sample_time);
+        collect_and_present(&mut visuals, &audio, audio.sample_time);
         let restored = published_spectrum_rectangles(&visuals, 1, retention_plot());
         assert!(
             restored
@@ -2839,8 +2980,12 @@ mod tests {
         for &(name, change, revoke_spectrum, revoke_spectrogram) in cases {
             for disabled in [false, true] {
                 let mut visuals = configured_visuals();
-                visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-                visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+                collect_and_present(&mut visuals, &frame(1.0, -10.0), Duration::from_secs(1));
+                collect_and_present(
+                    &mut visuals,
+                    &frame(1.1, -20.0),
+                    Duration::from_millis(1100),
+                );
                 publish_analysis_views(&visuals, 1);
                 let (body, tile) = {
                     let data = visuals.data.borrow();
@@ -2905,8 +3050,12 @@ mod tests {
     fn palette_and_heat_mapping_changes_recolor_only_compatible_publications() {
         for disabled in [false, true] {
             let mut visuals = configured_visuals();
-            visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-            visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+            collect_and_present(&mut visuals, &frame(1.0, -10.0), Duration::from_secs(1));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.1, -20.0),
+                Duration::from_millis(1100),
+            );
             publish_analysis_views(&visuals, 1);
             if disabled {
                 visuals.set_enabled(false);
@@ -2936,8 +3085,12 @@ mod tests {
         for disabled in [false, true] {
             let mut visuals = configured_visuals();
             let mut config = Config::default();
-            visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-            visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+            collect_and_present(&mut visuals, &frame(1.0, -10.0), Duration::from_secs(1));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.1, -20.0),
+                Duration::from_millis(1100),
+            );
             publish_analysis_views(&visuals, 1);
             publish_analysis_views(&visuals, 2);
             if disabled {
@@ -3075,8 +3228,12 @@ mod tests {
     fn rate_change_preserves_retained_views_and_live_spectrum_envelopes() {
         for disabled in [false, true] {
             let mut visuals = configured_visuals();
-            visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-            visuals.update(&frame(1.1, -20.0), Duration::from_millis(1100));
+            collect_and_present(&mut visuals, &frame(1.0, -10.0), Duration::from_secs(1));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.1, -20.0),
+                Duration::from_millis(1100),
+            );
             publish_analysis_views(&visuals, 1);
             if disabled {
                 visuals.set_enabled(false);
@@ -3120,8 +3277,16 @@ mod tests {
         let mut visuals = configured_visuals();
         let config = Config::default();
         visuals.configure_config(&config);
-        visuals.update(&frame(1.0, -10.0), Duration::from_secs_f64(1.0));
-        visuals.update(&frame(1.1, -20.0), Duration::from_secs_f64(1.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -10.0),
+            Duration::from_secs_f64(1.0),
+        );
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -20.0),
+            Duration::from_secs_f64(1.1),
+        );
         publish_analysis_views(&visuals, 1);
         let (body, tile, peaks, placement) = {
             let data = visuals.data.borrow();
@@ -3148,7 +3313,7 @@ mod tests {
         visuals.retain_spectrogram_panels(&[]);
         visuals.set_enabled(false);
         visuals.set_enabled(false);
-        visuals.update(&frame(2.0, -60.0), Duration::from_secs(2));
+        collect_and_present(&mut visuals, &frame(2.0, -60.0), Duration::from_secs(2));
         assert!(!visuals.animate(Duration::from_secs(2)));
         publish_analysis_views(&visuals, 1);
         {
@@ -3180,10 +3345,14 @@ mod tests {
         publish_analysis_views(&visuals, 1);
         assert!(body.upgrade().is_some());
         assert!(tile.upgrade().is_some());
-        visuals.update(&frame(3.0, -60.0), Duration::from_secs(3));
+        collect_and_present(&mut visuals, &frame(3.0, -60.0), Duration::from_secs(3));
         publish_analysis_views(&visuals, 1);
         assert!(body.upgrade().is_none());
-        visuals.update(&frame(3.1, -50.0), Duration::from_secs_f64(3.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(3.1, -50.0),
+            Duration::from_secs_f64(3.1),
+        );
         publish_analysis_views(&visuals, 1);
         assert!(tile.upgrade().is_none());
         let data = visuals.data.borrow();
@@ -3197,8 +3366,12 @@ mod tests {
     #[test]
     fn inactive_tab_publications_survive_other_tabs_and_removed_panels_are_released() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-        visuals.update(&frame(1.1, -20.0), Duration::from_secs_f64(1.1));
+        collect_and_present(&mut visuals, &frame(1.0, -10.0), Duration::from_secs(1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, -20.0),
+            Duration::from_secs_f64(1.1),
+        );
         publish_analysis_views(&visuals, 1);
         publish_analysis_views(&visuals, 2);
         let (body, tile) = {
@@ -3235,8 +3408,12 @@ mod tests {
     fn hidden_semantic_invalidation_clears_both_publications_without_restarting_work() {
         for explicit in [false, true] {
             let mut visuals = configured_visuals();
-            visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-            visuals.update(&frame(1.1, -20.0), Duration::from_secs_f64(1.1));
+            collect_and_present(&mut visuals, &frame(1.0, -10.0), Duration::from_secs(1));
+            collect_and_present(
+                &mut visuals,
+                &frame(1.1, -20.0),
+                Duration::from_secs_f64(1.1),
+            );
             publish_analysis_views(&visuals, 1);
             visuals.set_enabled(false);
             if explicit {
@@ -3272,9 +3449,17 @@ mod tests {
             spectrum_peaks: false,
             ..Config::default()
         });
-        visuals.update(&frame(1.1, 12.0), Duration::from_secs_f64(1.1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.1, 12.0),
+            Duration::from_secs_f64(1.1),
+        );
         assert_eq!(visuals.data.borrow().spectrum.top_db, 12.0);
-        visuals.update(&frame(1.2, -50.0), Duration::from_secs_f64(1.2));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.2, -50.0),
+            Duration::from_secs_f64(1.2),
+        );
         let data = visuals.data.borrow();
         assert_eq!(data.spectrogram.len, 2);
         assert!(
@@ -3290,8 +3475,16 @@ mod tests {
     #[test]
     fn history_preserves_gaps_and_stream_changes() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -20.0), Duration::from_secs_f64(1.0));
-        visuals.update(&frame(6.0, -30.0), Duration::from_secs_f64(6.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -20.0),
+            Duration::from_secs_f64(1.0),
+        );
+        collect_and_present(
+            &mut visuals,
+            &frame(6.0, -30.0),
+            Duration::from_secs_f64(6.0),
+        );
         {
             let data = visuals.data.borrow();
             assert_eq!(data.spectrogram.len, 2);
@@ -3306,7 +3499,7 @@ mod tests {
         }
         let mut changed_rate = frame(6.5, -40.0);
         changed_rate.sample_rate = 44_100;
-        visuals.update(&changed_rate, changed_rate.sample_time);
+        collect_and_present(&mut visuals, &changed_rate, changed_rate.sample_time);
         assert_eq!(visuals.data.borrow().spectrogram.len, 3);
     }
 
@@ -3322,7 +3515,11 @@ mod tests {
                 let mut visuals = FrequencyViews::new();
                 visuals.retain_spectrogram_panels(&[1]);
                 visuals.configure_config(&config);
-                visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
+                collect_and_present(
+                    &mut visuals,
+                    &frame(1.0, -30.0),
+                    Duration::from_secs_f64(1.0),
+                );
 
                 config.visualization_db_range = 100.0;
                 visuals.configure_config(&config);
@@ -3346,7 +3543,11 @@ mod tests {
     #[test]
     fn radial_range_override_does_not_invalidate_spectrum_or_spectrogram() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -30.0),
+            Duration::from_secs_f64(1.0),
+        );
         visuals.configure_config(&Config {
             reactive_db_range: Some(40.0),
             ..Config::default()
@@ -3362,7 +3563,11 @@ mod tests {
     #[test]
     fn per_panel_spectrogram_labels_change_geometry_without_resetting_history() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.0, -30.0),
+            Duration::from_secs_f64(1.0),
+        );
         let mut data = visuals.data.borrow_mut();
         let available = size(px(416.0), px(112.0));
         assert!(data.prepaint_panel_with_labels(1, FrequencyKind::Spectrogram, available, true));
@@ -3419,7 +3624,8 @@ mod tests {
     fn multiple_panel_sizes_preserve_wide_history_across_frames() {
         let mut visuals = configured_visuals();
         for time in 1..=10 {
-            visuals.update(
+            collect_and_present(
+                &mut visuals,
                 &frame(time as f64, -30.0),
                 Duration::from_secs_f64(time as f64),
             );
@@ -3515,7 +3721,8 @@ mod tests {
                 assert!(visuals.finish_prepaint());
                 let measured = visuals.data.borrow().spectrogram.panel_sizes.clone();
                 for time in 1..=5 {
-                    visuals.update(
+                    collect_and_present(
+                        &mut visuals,
                         &frame(time as f64, -30.0),
                         Duration::from_secs_f64(time as f64),
                     );
@@ -3598,7 +3805,8 @@ mod tests {
         assert!(visuals.finish_prepaint());
         let measured = visuals.data.borrow().spectrogram.panel_sizes[&1];
         for time in 1..=5 {
-            visuals.update(
+            collect_and_present(
+                &mut visuals,
                 &frame(time as f64, -30.0),
                 Duration::from_secs_f64(time as f64),
             );
@@ -3663,7 +3871,11 @@ mod tests {
         ));
         assert!(visuals.finish_prepaint());
         assert!(!visuals.finish_prepaint());
-        visuals.update(&frame(6.0, -20.0), Duration::from_secs_f64(6.0));
+        collect_and_present(
+            &mut visuals,
+            &frame(6.0, -20.0),
+            Duration::from_secs_f64(6.0),
+        );
         let data = visuals.data.borrow();
         assert_eq!(data.spectrogram.panel_sizes.len(), 1);
         assert_eq!(data.spectrogram.panel_sizes[&1], measured);
@@ -3702,7 +3914,11 @@ mod tests {
             visuals.finish_prepaint();
             for tick in 0..=800 {
                 let time = tick as f64 / 20.0;
-                visuals.update(&frame(time, -30.0), Duration::from_secs_f64(time));
+                collect_and_present(
+                    &mut visuals,
+                    &frame(time, -30.0),
+                    Duration::from_secs_f64(time),
+                );
             }
             let now = Duration::from_secs(40);
             let retained_start = Duration::from_secs(30);
@@ -3750,7 +3966,8 @@ mod tests {
     fn shrinking_history_keeps_the_newest_columns() {
         let mut visuals = configured_visuals();
         for time in 1..=5 {
-            visuals.update(
+            collect_and_present(
+                &mut visuals,
                 &frame(time as f64, -30.0),
                 Duration::from_secs_f64(time as f64),
             );
@@ -3825,14 +4042,14 @@ mod tests {
                     ..Config::default()
                 });
                 let start = Duration::from_secs(1);
-                visuals.update(&frame(1.0, -10.0), start);
-                visuals.update(&frame(1.001, -80.0), start);
+                collect_and_present(&mut visuals, &frame(1.0, -10.0), start);
+                collect_and_present(&mut visuals, &frame(1.001, -80.0), start);
                 let mut accepted = 0;
                 for tick in 1..=display_hz {
                     let now = start + Duration::from_secs_f64(tick as f64 / display_hz as f64);
                     let publication = tick * analysis_hz / display_hz;
                     if publication != accepted {
-                        visuals.update(&frame(now.as_secs_f64(), -80.0), now);
+                        collect_and_present(&mut visuals, &frame(now.as_secs_f64(), -80.0), now);
                         accepted = publication;
                     }
                     visuals.animate(now);
@@ -3848,7 +4065,7 @@ mod tests {
                     }
                 }
                 // A fresh attack still takes effect immediately after release.
-                visuals.update(&frame(2.1, -5.0), Duration::from_millis(2100));
+                collect_and_present(&mut visuals, &frame(2.1, -5.0), Duration::from_millis(2100));
                 let data = visuals.data.borrow();
                 assert_eq!(data.spectrum.peaks, vec![-5.0; 4]);
                 assert_eq!(data.spectrum.bar_levels, vec![-5.0; 4]);
@@ -3867,15 +4084,23 @@ mod tests {
             spectrum_smoothing_ms: 1000,
             ..Config::default()
         });
-        visuals.update(&frame(1.0, -10.0), Duration::from_secs(1));
-        visuals.update(&frame(1.5, -80.0), Duration::from_millis(1500));
+        collect_and_present(&mut visuals, &frame(1.0, -10.0), Duration::from_secs(1));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.5, -80.0),
+            Duration::from_millis(1500),
+        );
         {
             let data = visuals.data.borrow();
             assert_eq!(data.spectrum.peaks, vec![-10.0; 4]);
             assert_eq!(data.spectrum.bar_levels, vec![-10.0; 4]);
             assert_eq!(data.spectrum.smoothed_levels, vec![-10.0; 4]);
         }
-        visuals.update(&frame(1.6, -80.0), Duration::from_millis(1600));
+        collect_and_present(
+            &mut visuals,
+            &frame(1.6, -80.0),
+            Duration::from_millis(1600),
+        );
         let data = visuals.data.borrow();
         for index in 0..4 {
             // Gravity follows the original hold deadline; smoothing follows
@@ -3973,7 +4198,7 @@ mod tests {
         let mut visuals = FrequencyViews::new();
         let mut transient = frame(1.0, -60.0);
         transient.spectrum_db[1] = 0.0;
-        visuals.update(&transient, transient.sample_time);
+        collect_and_present(&mut visuals, &transient, transient.sample_time);
         let data = visuals.data.borrow();
         let sample = heat_sample(
             &data.frequencies,
@@ -4013,7 +4238,7 @@ mod tests {
         bins[679] = -6.0;
         bins[693] = -12.0;
         input.visualizer.spectrogram = bins.into();
-        visuals.update(&input, input.sample_time);
+        collect_and_present(&mut visuals, &input, input.sample_time);
         let mut data = visuals.data.borrow_mut();
         data.prepare_spectrogram_presentation(1).unwrap();
         let values = &data.spectrogram.tile_values;
@@ -4057,7 +4282,7 @@ mod tests {
             .map(|i| -140.0 + ((i * 7919) % 14000) as f32 / 100.0)
             .collect();
         input.visualizer.spectrogram = bins.clone().into();
-        visuals.update(&input, input.sample_time);
+        collect_and_present(&mut visuals, &input, input.sample_time);
         let axis: Vec<_> = (1..=4096).map(|i| i as f32 * 48000.0 / 8192.0).collect();
         let initial_rows = sampling::frequency_rows(&axis, 16.0, 24000.0, 1024, false);
         let mut logical: Vec<_> = initial_rows
@@ -4109,7 +4334,7 @@ mod tests {
         input.sequence += 1;
         input.sample_time = Duration::from_millis(1200);
         input.sample_rate = 44100;
-        visuals.update(&input, input.sample_time);
+        collect_and_present(&mut visuals, &input, input.sample_time);
         let data = visuals.data.borrow();
         let retained = &data.spectrogram.columns[0].levels;
         let expanded: Vec<_> = data
@@ -4124,8 +4349,8 @@ mod tests {
     #[test]
     fn startup_and_physical_resize_keep_the_same_audio_time_scale() {
         let mut visuals = configured_visuals();
-        visuals.update(&frame(0.1, -30.0), Duration::from_millis(100));
-        visuals.update(&frame(0.2, -30.0), Duration::from_millis(200));
+        collect_and_present(&mut visuals, &frame(0.1, -30.0), Duration::from_millis(100));
+        collect_and_present(&mut visuals, &frame(0.2, -30.0), Duration::from_millis(200));
         let mut data = visuals.data.borrow_mut();
         data.prepare_spectrogram_presentation(1).unwrap();
         let before = data.spectrogram.presentations[&1].layers[0].0;
@@ -4158,18 +4383,18 @@ mod tests {
                 audio.frequencies_hz.clear();
                 audio.spectrum_db.clear();
             }
-            visuals.update(&audio, audio.sample_time);
+            collect_and_present(&mut visuals, &audio, audio.sample_time);
             let mut missing = audio.clone();
             missing.sequence += 1;
             missing.sample_time = Duration::from_millis(1100);
             missing.visualizer.spectrogram = Default::default();
-            visuals.update(&missing, missing.sample_time);
+            collect_and_present(&mut visuals, &missing, missing.sample_time);
             assert_eq!(visuals.data.borrow().spectrogram.len, 1);
             audio.sequence += 2;
             audio.sample_time = Duration::from_millis(1200);
             audio.visualizer.spectrogram =
                 vec![-50.0; Config::default().analysis_fft_size as usize / 2].into();
-            visuals.update(&audio, audio.sample_time);
+            collect_and_present(&mut visuals, &audio, audio.sample_time);
             let data = visuals.data.borrow();
             assert_eq!(data.spectrogram.len, 2);
             let latest = &data.spectrogram.columns[data.spectrogram.latest.unwrap()];
@@ -4184,7 +4409,11 @@ mod tests {
         for tick in 0..=400 {
             let time = tick as f64 / 20.0;
             let level = if tick == 20 { -3.0 } else { -80.0 };
-            visuals.update(&frame(time, level), Duration::from_secs_f64(time));
+            collect_and_present(
+                &mut visuals,
+                &frame(time, level),
+                Duration::from_secs_f64(time),
+            );
         }
         let mut data = visuals.data.borrow_mut();
         data.resize_history(3);
