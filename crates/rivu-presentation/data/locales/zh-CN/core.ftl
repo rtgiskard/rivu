@@ -9,6 +9,10 @@ core-processing-resume-target = 恢复目标
 core-processing-active-source = 生效的处理源
 core-processing-no-source = 无
 core-processing-source-port = 节点/端口
+processing-graph-auto-short = 自动
+processing-graph-offline = 离线
+processing-graph-realtime = 实时
+processing-graph-hybrid = 预计算＋实时
 core-stats = 曲目：{ $tracks }
     播放次数：{ $plays }
 core-listing-changed = 列表未完成：读取期间数据已更改，请重试命令。

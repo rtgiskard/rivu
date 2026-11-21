@@ -9,6 +9,10 @@ core-processing-resume-target = Resume target
 core-processing-active-source = Active processed source
 core-processing-no-source = None
 core-processing-source-port = Node/port
+processing-graph-auto-short = Auto
+processing-graph-offline = Offline
+processing-graph-realtime = Real-time
+processing-graph-hybrid = Precompute + live
 core-stats = Tracks: { $tracks }
     Plays: { $plays }
 core-listing-changed = Listing incomplete: data changed while reading; retry the command.
