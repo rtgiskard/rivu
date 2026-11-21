@@ -100,10 +100,12 @@ impl Metadata {
         cx: &mut Context<Self>,
     ) -> Self {
         let state = context.snapshot();
+        let mut metadata = MetadataSession::default();
+        metadata.observe_source_recovery(state.system.source_tag_recovery.as_ref());
         let mut this = Self {
             context,
             state,
-            metadata: MetadataSession::default(),
+            metadata,
             metadata_read: MetadataReadCoordinator::default(),
             source_peak: None,
             source_peak_reading: false,
@@ -147,7 +149,11 @@ impl Metadata {
             query.stamp(self.state.query_revisions_for(&query))
                 != query.stamp(state.query_revisions_for(&query))
         });
-        let display_changed = current_changed
+        let recovery_changed = self
+            .metadata
+            .observe_source_recovery(state.system.source_tag_recovery.as_ref());
+        let display_changed = recovery_changed
+            || current_changed
             || query_changed
             || !Arc::ptr_eq(&self.state.system.config, &state.system.config)
             || self.state.playback.status != state.playback.status

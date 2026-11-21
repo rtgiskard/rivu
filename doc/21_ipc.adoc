@@ -389,8 +389,16 @@ numeric values must be finite. It does not write the source file.
 mutation. `SyncTrackTags` commits the displayed tag values, including ReplayGain,
 against an expected database baseline.
 `SaveSourceTags` writes the file on a worker, then synchronizes verified values.
-ACK fields `source_tags` and `source_file_saved` distinguish physical success from
-database failure; retry only synchronization after partial success.
+Its ACK includes `source_tags` and sets `source_file_saved` once the file is
+verified, including when its bytes were unchanged. After a database failure,
+`SystemState.source_tag_recovery` exposes the one pending save's track ID,
+verified tags and database error, even to clients that did not receive the save
+ACK. The snapshot lives in the running Core until database commit.
+`RetrySourceTagSync` matches the track ID and verified values and retries only
+the database writes. An ordinary `SyncTrackTags` cannot override the pending
+save for that track.
+After commit the ACK reports success even if projection refresh failed, with
+the warning in `source_refresh_error`; do not retry the write in that case.
 
 Exact positional schemas and adapters are defined in
 link:../crates/rivu-protocol/src/wire.rs[wire.rs];

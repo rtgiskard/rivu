@@ -393,21 +393,23 @@ library database are not synchronized automatically.
 |Inspect loaded text before choosing a save operation.
 
 |Track details: synchronize to database
-|Displayed tag fields
-|Uses the displayed values
+|Displayed tag fields, or the verified save for a track awaiting database synchronization
+|Uses the displayed values, or restores the verified file tags for recovery
 |Yes
 |No
-|Retry database synchronization if it fails.
+|Retry a failed database write. If synchronization committed but refresh failed, do not repeat the write.
 
 |Track details: save to source file, then database
 |Displayed tag fields and existing source tags
 |Uses the displayed values
 |After successful file save, including verified fingerprint, size and modification time
 |Yes
-|These are separate writes, not a cross-store transaction. A synchronization error
-can follow a successful file replacement and database fingerprint update. Inspect
-the result and retry only database synchronization; the UI blocks another file
-write until resolved.
+|The file and database writes are separate. If the file was verified but a
+database write failed, return to the saved track and use *Sync to database*.
+This retries only the database writes using the verified file tags, even after
+changing selection or reopening the window while Core is still running.
+Further file saves are blocked until recovery commits.
+If only refresh failed, the file and database are already saved.
 
 |Offline CLI: `library tags`
 |Source tags and supplied options

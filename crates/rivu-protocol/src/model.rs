@@ -12,6 +12,7 @@ pub use audio_output::*;
 pub use rivu_format::config::Config;
 
 use rivu_format::decoder_hint::DecoderHint;
+use rivu_format::tags::TagValues;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -503,6 +504,14 @@ pub struct ConfigurationState {
     pub config_path: PathBuf,
 }
 
+/// The one verified file save still awaiting database synchronization in this Core.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SourceTagRecovery {
+    pub track_id: i64,
+    pub tags: TagValues,
+    pub error: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SystemState {
     pub scanning: bool,
@@ -522,6 +531,8 @@ pub struct SystemState {
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
     pub relocation_task: Option<RelocationTaskStatus>,
+    #[serde(default)]
+    pub source_tag_recovery: Option<Arc<SourceTagRecovery>>,
 }
 impl Default for SystemState {
     fn default() -> Self {
@@ -541,6 +552,7 @@ impl Default for SystemState {
             database_optimization: None,
             shutting_down: false,
             relocation_task: None,
+            source_tag_recovery: None,
         }
     }
 }
@@ -946,6 +958,11 @@ pub enum Command {
         track_id: i64,
         tags: rivu_format::tags::TagValues,
         expected: Box<rivu_format::tags::TagValues>,
+    },
+    /// Retry only the database phase for this track and verified save payload.
+    RetrySourceTagSync {
+        track_id: i64,
+        tags: rivu_format::tags::TagValues,
     },
     RemoveTracks {
         track_ids: Vec<i64>,

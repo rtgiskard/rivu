@@ -629,7 +629,7 @@ fn scan_task_status_wire_round_trip_preserves_all_phases() {
 #[test]
 fn current_page_schema_has_contiguous_query_and_response_tags() {
     use crate::{model::Page, response::ViewResponse};
-    assert_eq!(PROTOCOL_VERSION, 48);
+    assert_eq!(PROTOCOL_VERSION, 50);
     let query = WireQuery::DirectoryPage {
         path: std::path::PathBuf::new(),
         query: None,
@@ -928,6 +928,7 @@ fn ack_wire_round_trip_has_explicit_response_type() {
         database_optimization: None,
         source_tags: None,
         source_file_saved: false,
+        source_refresh_error: None,
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
@@ -940,6 +941,42 @@ fn ack_wire_round_trip_has_explicit_response_type() {
     assert_eq!(decoded.error, ack.error);
     assert_eq!(decoded.scan_id, ack.scan_id);
     assert_eq!(decoded.database_optimization, ack.database_optimization);
+}
+
+#[test]
+fn source_refresh_warning_round_trips_as_success() {
+    let mut ack = Ack::new(rivu_protocol::response::AckStatus::Succeeded, None, 42);
+    ack.source_file_saved = true;
+    ack.source_tags = Some(rivu_format::tags::TagValues {
+        title: "Verified".into(),
+        ..Default::default()
+    });
+    ack.source_refresh_error = Some("File and database saved; refresh failed".into());
+    let mut encoded = Vec::new();
+    encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
+    let WireResponse::Ack(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected ack")
+    };
+    assert!(decoded.is_success());
+    assert!(decoded.source_file_saved);
+    assert_eq!(decoded.source_tags, ack.source_tags);
+    assert_eq!(decoded.source_refresh_error, ack.source_refresh_error);
+}
+
+#[test]
+fn retry_source_tag_sync_round_trips_the_track_and_verified_values() {
+    assert_command_round_trip(
+        &mut Vec::new(),
+        Command::RetrySourceTagSync {
+            track_id: 7,
+            tags: rivu_format::tags::TagValues {
+                title: "Verified".into(),
+                track_number: Some(4),
+                replaygain_track_gain: Some(-4.5),
+                ..Default::default()
+            },
+        },
+    );
 }
 
 #[test]
@@ -1093,6 +1130,39 @@ fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
         assert_eq!(system.scan_task_id, scan_task_id);
         assert_eq!(system.scanning, scan_task_id.is_some());
     }
+}
+
+#[test]
+fn system_state_wire_round_trip_preserves_pending_source_tag_recovery() {
+    let recovery = Arc::new(crate::model::SourceTagRecovery {
+        track_id: 7,
+        tags: rivu_format::tags::TagValues {
+            title: "Verified".into(),
+            track_number: Some(4),
+            replaygain_track_gain: Some(-4.5),
+            ..Default::default()
+        },
+        error: "Database write failed".into(),
+    });
+    let mut encoded = Vec::new();
+    encode_response_frame_into(
+        &WireResponse::State(wire_state(StateResponse {
+            system: Some(crate::model::SystemState {
+                source_tag_recovery: Some(Arc::clone(&recovery)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        &mut encoded,
+    )
+    .unwrap();
+    let WireResponse::State(state) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected state");
+    };
+    assert_eq!(
+        state_response(state).system.unwrap().source_tag_recovery,
+        Some(recovery)
+    );
 }
 
 #[test]

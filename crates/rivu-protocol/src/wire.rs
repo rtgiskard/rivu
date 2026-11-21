@@ -17,7 +17,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 48;
+pub const PROTOCOL_VERSION: u8 = 50;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -434,6 +434,10 @@ pub enum WireCommand {
         track_id: i64,
         tags: rivu_format::tags::TagValues,
         expected: Box<rivu_format::tags::TagValues>,
+    },
+    RetrySourceTagSync {
+        track_id: i64,
+        tags: rivu_format::tags::TagValues,
     },
     RemoveTracks {
         track_ids: Vec<i64>,
@@ -1326,6 +1330,9 @@ impl From<Command> for WireCommand {
                 tags,
                 expected,
             },
+            Command::RetrySourceTagSync { track_id, tags } => {
+                Self::RetrySourceTagSync { track_id, tags }
+            }
             Command::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             Command::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },
             Command::Device { name } => Self::Device { name },
@@ -1656,6 +1663,9 @@ impl TryFrom<WireCommand> for Command {
                 tags,
                 expected,
             },
+            WireCommand::RetrySourceTagSync { track_id, tags } => {
+                Self::RetrySourceTagSync { track_id, tags }
+            }
             WireCommand::RemoveTracks { track_ids } => Self::RemoveTracks { track_ids },
             WireCommand::RemoveHistory { track_ids } => Self::RemoveHistory { track_ids },
             WireCommand::Device { name } => Self::Device { name },

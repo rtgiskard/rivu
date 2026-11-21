@@ -211,7 +211,7 @@ gl-tags-staged = 文件标签已暂存；加载操作不改动数据库。Enter 
 gl-tags-synced = 标签已同步到数据库，文件标签未改动。
 gl-tags-saved = 标签已保存到文件并同步到数据库。
 gl-tags-sync-only = 文件已保存，请重试同步数据库。
-gl-tags-file-saved-db-failed = 文件已保存，但数据库同步失败：{ $error }。暂存值已保留，请仅重试“同步到数据库”。
+gl-tags-file-saved-db-failed = 文件已保存，但数据库同步失败：{ $error }。已验证的文件标签已保留，请仅重试“同步到数据库”。
 gl-tags-failed = 标签操作失败：{ $error }
 gl-tags-response-invalid = 标签操作未返回标签值。
 

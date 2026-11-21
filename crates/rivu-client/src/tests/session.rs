@@ -54,6 +54,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
                 database_optimization: None,
                 source_tags: None,
                 source_file_saved: false,
+                source_refresh_error: None,
             },
         );
         assert!(matches!(
@@ -124,6 +125,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 database_optimization: None,
                 source_tags: None,
                 source_file_saved: false,
+                source_refresh_error: None,
             }),
             &mut frame,
         )
@@ -149,6 +151,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 database_optimization: None,
                 source_tags: None,
                 source_file_saved: false,
+                source_refresh_error: None,
             },
         );
     });
@@ -323,6 +326,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
                 database_optimization: None,
                 source_tags: None,
                 source_file_saved: false,
+                source_refresh_error: None,
             },
         );
     });

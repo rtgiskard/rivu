@@ -6,17 +6,18 @@ use super::{
 };
 use gpui::{prelude::*, *};
 use rivu_format::tags::{TagEncoding, TagValues};
-use rivu_protocol::model::{Query, Track};
+use rivu_protocol::model::{Query, SourceTagRecovery, Track};
 use rivu_ui::{
     FocusScope, IconButton, IconButtonDensity, IconButtonStyle, Popover, caption, column,
     disabled_control, menu_item,
 };
-use std::{cell::Cell, collections::HashMap, rc::Rc, time::Instant};
+use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SourceAction {
     Load(TagEncoding),
     Sync,
+    RetrySync,
     Save,
 }
 
@@ -33,7 +34,6 @@ pub(super) enum SourceStatus {
     Staged,
     Synced,
     Saved,
-    FileSavedDatabaseFailed(String),
     Failed(String),
 }
 
@@ -50,8 +50,8 @@ pub(super) struct SourceTags {
     pending: Option<SourceToken>,
     overlay: Option<Overlay>,
     pub status: Option<SourceStatus>,
-    /// A physical save already happened. Recovery must not replay that write.
-    pub sync_only: bool,
+    // Observed Core state, not a receipt owned by this window.
+    recovery: Option<Arc<SourceTagRecovery>>,
 }
 
 fn field_bit(field: Field) -> u8 {
@@ -82,19 +82,72 @@ impl SourceTags {
         self.pending.is_some()
     }
 
+    pub(super) fn recovery(&self, track_id: i64) -> Option<&SourceTagRecovery> {
+        self.recovery
+            .as_deref()
+            .filter(|save| save.track_id == track_id)
+    }
+
+    pub(super) fn allows(&self, track_id: i64, action: SourceAction) -> bool {
+        match action {
+            SourceAction::Load(_) => self.recovery(track_id).is_none(),
+            SourceAction::Save => self.recovery.is_none(),
+            SourceAction::Sync => true,
+            SourceAction::RetrySync => self.recovery(track_id).is_some(),
+        }
+    }
+
+    pub(super) fn change_selection(&mut self) {
+        // Keep accepted writes busy until their acknowledgement, even after leaving the editor.
+        if self.pending.is_some_and(|token| {
+            !matches!(token.action, SourceAction::Save | SourceAction::RetrySync)
+        }) {
+            self.pending = None;
+        }
+        self.edited();
+        self.overlay = None;
+        self.status = None;
+    }
+
+    pub(super) fn observe_recovery(
+        &mut self,
+        track_id: Option<i64>,
+        recovery: Option<&Arc<SourceTagRecovery>>,
+    ) -> bool {
+        if self.recovery.as_ref().map(Arc::as_ptr) == recovery.map(Arc::as_ptr) {
+            return false;
+        }
+        let was_recovering = track_id.is_some_and(|id| self.recovery(id).is_some());
+        self.recovery = recovery.cloned();
+        let is_recovering = track_id.is_some_and(|id| self.recovery(id).is_some());
+        if was_recovering != is_recovering {
+            // Discard the editor's old staging and fence any in-flight file read.
+            self.committed();
+            self.edited();
+            self.status = None;
+        }
+        true
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
-    fn staged_field(&self, field: Field) -> Option<&TagValues> {
-        self.overlay
-            .as_ref()
-            .filter(|overlay| overlay.fields & field_bit(field) != 0)
-            .map(|overlay| &overlay.values)
+    fn staged_field(&self, track_id: i64, field: Field) -> Option<&TagValues> {
+        let bit = field_bit(field);
+        if bit == 0 {
+            return None;
+        }
+        self.recovery(track_id).map(|save| &save.tags).or_else(|| {
+            self.overlay
+                .as_ref()
+                .filter(|overlay| overlay.fields & bit != 0)
+                .map(|overlay| &overlay.values)
+        })
     }
 
     pub fn field_text(&self, field: Field, track: &Track) -> String {
-        let staged = self.staged_field(field);
+        let staged = self.staged_field(track.id, field);
         match field {
             Field::Title => staged.map_or(&track.title, |values| &values.title).clone(),
             Field::Artist => staged
@@ -115,6 +168,9 @@ impl SourceTags {
     }
 
     pub fn numbers(&self, track: &Track) -> (Option<u32>, Option<u32>) {
+        if let Some(save) = self.recovery(track.id) {
+            return (save.tags.track_number, save.tags.disc_number);
+        }
         let overlay = self.overlay.as_ref();
         (
             overlay
@@ -137,13 +193,13 @@ impl SourceTags {
             artist: self.field_text(Field::Artist, track),
             album: self.field_text(Field::Album, track),
             release_date: self
-                .staged_field(Field::ReleaseDate)
+                .staged_field(track.id, Field::ReleaseDate)
                 .map_or(&track.release_date, |tags| &tags.release_date)
                 .clone(),
             track_number,
             disc_number,
             replaygain_track_gain: self
-                .staged_field(Field::ReplayGainTrackGain)
+                .staged_field(track.id, Field::ReplayGainTrackGain)
                 .map_or(track.replaygain_track_gain, |v| v.replaygain_track_gain),
         }
     }
@@ -154,7 +210,7 @@ impl SourceTags {
         action: SourceAction,
         database_serial: u64,
     ) -> Option<SourceToken> {
-        if self.busy() || (self.sync_only && matches!(action, SourceAction::Save)) {
+        if self.busy() || !self.allows(identity.track_id, action) {
             return None;
         }
         self.edited();
@@ -198,7 +254,6 @@ impl SourceTags {
     pub fn committed(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.overlay = None;
-        self.sync_only = false;
     }
 }
 
@@ -346,21 +401,28 @@ impl Metadata {
 
     pub(super) fn source_status(&self) -> Option<SharedString> {
         let source = &self.metadata.source;
-        if source.busy() {
+        let track_id = self.metadata.identity()?;
+        if source
+            .pending
+            .is_some_and(|token| token.identity.track_id == track_id)
+        {
             return Some(self.tr("gl-tags-working"));
+        }
+        if let Some(recovery) = source.recovery(track_id) {
+            return Some(
+                self.context
+                    .i18n
+                    .format(
+                        "gl-tags-file-saved-db-failed",
+                        &[("error", recovery.error.as_str().into())],
+                    )
+                    .into(),
+            );
         }
         source.status.as_ref().map(|status| match status {
             SourceStatus::Staged => self.tr("gl-tags-staged"),
             SourceStatus::Synced => self.tr("gl-tags-synced"),
             SourceStatus::Saved => self.tr("gl-tags-saved"),
-            SourceStatus::FileSavedDatabaseFailed(error) => self
-                .context
-                .i18n
-                .format(
-                    "gl-tags-file-saved-db-failed",
-                    &[("error", error.as_str().into())],
-                )
-                .into(),
             SourceStatus::Failed(error) => self
                 .context
                 .i18n
@@ -434,6 +496,11 @@ impl Metadata {
         let reason = self.source_reason();
         let supported = reason.is_none();
         let enabled = self.source_menu_enabled();
+        let allows = |action| {
+            identity.is_some_and(|identity| self.metadata.source.allows(identity.track_id, action))
+        };
+        let load_action = SourceAction::Load(TagEncoding::Declared);
+        let load_enabled = enabled && supported && allows(load_action);
         // Only action rows contribute to the menu's intrinsic width.
         let notice = |text| {
             div().w_0().min_w_full().child(
@@ -477,13 +544,18 @@ impl Metadata {
                         if this.metadata.editor_identity() == identity
                             && this.source_menu_enabled()
                             && this.source_reason().is_none()
+                            && identity.is_some_and(|id| {
+                                this.metadata
+                                    .source
+                                    .allows(id.track_id, SourceAction::Load(encoding))
+                            })
                         {
                             this.close_source_menu(window, cx);
                             this.run_source_action(SourceAction::Load(encoding), cx);
                         }
                     },
                 );
-                menu = menu.child(disabled_control(theme, control, !enabled || !supported));
+                menu = menu.child(disabled_control(theme, control, !load_enabled));
             }
         } else {
             let load = menu_item(
@@ -494,6 +566,8 @@ impl Metadata {
                     if this.metadata.editor_identity() == identity
                         && this.source_menu_enabled()
                         && this.source_reason().is_none()
+                        && identity
+                            .is_some_and(|id| this.metadata.source.allows(id.track_id, load_action))
                     {
                         this.source_menu.encodings = true;
                         this.source_menu.scope.focus(window, cx);
@@ -502,14 +576,13 @@ impl Metadata {
                 },
             )
             .child(caption(theme, ""));
-            menu = menu.child(disabled_control(theme, load, !enabled || !supported));
+            menu = menu.child(disabled_control(theme, load, !load_enabled));
             for (action, key, id) in [
                 (SourceAction::Sync, "gl-tags-sync", "metadata-tags-sync"),
                 (SourceAction::Save, "gl-tags-save", "metadata-tags-save"),
             ] {
-                let allowed = enabled
-                    && (action == SourceAction::Sync
-                        || (supported && !self.metadata.source.sync_only));
+                let allowed =
+                    enabled && allows(action) && (action == SourceAction::Sync || supported);
                 let control = menu_item(id, self.tr(key), cx, move |this, window, cx| {
                     if this.metadata.editor_identity() == identity {
                         this.close_source_menu(window, cx);
@@ -521,7 +594,7 @@ impl Metadata {
             if let Some(reason) = reason {
                 menu = menu.child(notice(reason));
             }
-            if self.metadata.source.sync_only {
+            if identity.is_some_and(|id| self.metadata.source.recovery(id.track_id).is_some()) {
                 menu = menu.child(notice(self.tr("gl-tags-sync-only")));
             }
         }
@@ -552,7 +625,9 @@ impl Metadata {
         if !self.source_menu_enabled() {
             return;
         }
-        if !matches!(action, SourceAction::Sync) && self.source_reason().is_some() {
+        if matches!(action, SourceAction::Load(_) | SourceAction::Save)
+            && self.source_reason().is_some()
+        {
             return;
         }
         let Some((token, command)) = self.metadata.begin_source(action) else {
@@ -564,6 +639,7 @@ impl Metadata {
         cx.spawn(async move |this, cx| {
             let delivery = handle.request_ack(command).await;
             let _ = this.update(cx, |this, cx| {
+                this.refresh(cx);
                 this.finish_source_action(token, delivery, cx)
             });
         })
@@ -577,40 +653,46 @@ impl Metadata {
         delivery: crate::frontend::CommandDelivery,
         cx: &mut Context<Self>,
     ) {
-        if self.metadata.editor_identity() != Some(token.identity) {
-            return;
-        }
+        let same_editor = self.metadata.editor_identity() == Some(token.identity);
+        let track_id = token.identity.track_id;
         let Some(current) = self.metadata.source.finish(token) else {
             return;
         };
         let ack = &delivery.ack;
-        let error = if ack.is_success() {
-            None
-        } else {
-            Some(
-                delivery
-                    .observed_result()
-                    .expect_err("failed source command"),
-            )
-        };
-        if ack.source_file_saved && !ack.is_success() {
-            // Physical success is authoritative even if observation also failed.
-            // Keep the submitted overlay, and never automatically repeat Save.
-            if current && let Some(tags) = &ack.source_tags {
-                self.metadata.source.stage(tags.clone());
+        if !ack.is_success() {
+            let error = delivery
+                .observed_result()
+                .expect_err("failed source command");
+            let observed_save_failure = ack.source_file_saved
+                && delivery.observation == crate::frontend::CommandObservation::Refreshed;
+            if same_editor
+                && !observed_save_failure
+                && self.metadata.source.recovery(track_id).is_none()
+            {
+                self.metadata.source.status = Some(SourceStatus::Failed(error));
             }
-            self.metadata.source.sync_only = true;
-            self.metadata.source.status = Some(SourceStatus::FileSavedDatabaseFailed(
-                error.expect("failed save"),
-            ));
-        } else if ack.is_success() {
-            if let Some(tags) = &ack.source_tags {
-                match token.action {
-                    SourceAction::Load(_) if current => self.metadata.source.stage(tags.clone()),
-                    SourceAction::Load(_) => {}
-                    SourceAction::Sync | SourceAction::Save => {
+            cx.notify();
+            return;
+        }
+        if let Some(error) = &ack.source_refresh_error {
+            self.report_error(error.clone(), cx);
+        } else if let Err(error) = delivery.observed_result() {
+            self.report_error(error, cx);
+        }
+        if self.metadata.identity() != Some(track_id) {
+            // Never publish the other track's values or status in this editor.
+            cx.notify();
+            return;
+        }
+        if let Some(tags) = &ack.source_tags {
+            match token.action {
+                SourceAction::Load(_) if same_editor && current => {
+                    self.metadata.source.stage(tags.clone());
+                }
+                SourceAction::Load(_) => {}
+                SourceAction::Sync | SourceAction::RetrySync | SourceAction::Save => {
+                    if same_editor {
                         self.metadata.commit_tags(token, tags);
-                        self.metadata.source.sync_only = false;
                         if current {
                             self.metadata.source.committed();
                         }
@@ -619,30 +701,21 @@ impl Metadata {
                         } else {
                             SourceStatus::Synced
                         });
-                        let track_id = self.metadata.identity().expect("current source operation");
-                        let query = Query::Track { track_id };
-                        self.metadata_read.request(
-                            track_id,
-                            self.state.query_revisions_for(&query),
-                            Instant::now(),
-                        );
-                        self.demand_metadata(cx);
-                        cx.emit(MetadataEvent::TrackChanged);
                     }
+                    let query = Query::Track { track_id };
+                    self.metadata_read.request(
+                        track_id,
+                        self.state.query_revisions_for(&query),
+                        Instant::now(),
+                    );
+                    self.demand_metadata(cx);
+                    cx.emit(MetadataEvent::TrackChanged);
                 }
-                // A successful owner ACK may coexist with unavailable observation;
-                // retain authoritative values but surface that refresh problem.
-                if let Err(error) = delivery.observed_result() {
-                    self.report_error(error, cx);
-                }
-            } else {
-                self.metadata.source.status = Some(SourceStatus::Failed(
-                    self.tr("gl-tags-response-invalid").to_string(),
-                ));
             }
-        } else {
-            self.metadata.source.status =
-                Some(SourceStatus::Failed(error.expect("failed source command")));
+        } else if same_editor {
+            self.metadata.source.status = Some(SourceStatus::Failed(
+                self.tr("gl-tags-response-invalid").to_string(),
+            ));
         }
         cx.notify();
     }

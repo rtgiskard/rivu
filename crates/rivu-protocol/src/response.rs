@@ -467,8 +467,10 @@ pub struct Ack {
     pub database_optimization: Option<DatabaseOptimization>,
     /// Verified source values, also returned when the file saved but database sync failed.
     pub source_tags: Option<rivu_format::tags::TagValues>,
-    /// A successful physical file save is not rolled back by a database error.
+    /// The file save was verified, whether it replaced bytes or was unchanged.
     pub source_file_saved: bool,
+    /// Tags committed successfully, but refreshing Core projections failed.
+    pub source_refresh_error: Option<String>,
 }
 
 impl Ack {
@@ -490,6 +492,7 @@ impl Ack {
             database_optimization: None,
             source_tags: None,
             source_file_saved: false,
+            source_refresh_error: None,
         }
     }
 

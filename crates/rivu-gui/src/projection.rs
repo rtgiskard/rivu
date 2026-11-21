@@ -1,7 +1,7 @@
 use rivu_format::config::Config;
 use rivu_protocol::model::{
     ClientSnapshot, LibrarySnapshot, MediaTaskOwner, PlaybackState, ProcessingAudition, QueueState,
-    Track,
+    SourceTagRecovery, Track,
 };
 use std::sync::Arc;
 
@@ -47,6 +47,7 @@ pub struct GuiSystemSnapshot {
     pub export_formats: Option<Vec<rivu_protocol::model::AudioExportFormat>>,
     pub shutting_down: bool,
     pub relocation_task: Option<rivu_protocol::model::RelocationTaskStatus>,
+    pub(crate) source_tag_recovery: Option<Arc<SourceTagRecovery>>,
     pub processing: Option<Arc<rivu_protocol::model::ProcessingTaskStatus>>,
     pub processing_audition: Option<ProcessingAudition>,
     pub processing_selection: Option<ProcessingAudition>,
@@ -85,6 +86,7 @@ impl GuiSnapshot {
                 export_formats: state.system.export_formats.clone(),
                 shutting_down: state.system.shutting_down,
                 relocation_task: state.system.relocation_task.clone(),
+                source_tag_recovery: state.system.source_tag_recovery.clone(),
                 processing: state.processing.clone(),
                 processing_audition: state.processing_audition,
                 processing_selection: state.processing_selection,

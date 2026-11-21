@@ -95,6 +95,8 @@ impl CoreState {
                 || system.scan_task_id != old.scan_task_id
                 || self.scan_owner != previous.scan_owner
                 || system.relocation_task != old.relocation_task
+                || system.source_tag_recovery.as_ref().map(Arc::as_ptr)
+                    != old.source_tag_recovery.as_ref().map(Arc::as_ptr)
                 || system.last_error != old.last_error
                 || !Arc::ptr_eq(&system.devices, &old.devices)
                 || system.selected_device != old.selected_device

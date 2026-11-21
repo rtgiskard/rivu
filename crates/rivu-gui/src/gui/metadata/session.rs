@@ -6,7 +6,7 @@ use super::source::{SourceAction, SourceTags, SourceToken, database_tags};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_format::tags::TagValues;
 use rivu_presentation::refresh::RefreshDeadline;
-use rivu_protocol::model::{Command, Track};
+use rivu_protocol::model::{Command, SourceTagRecovery, Track};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -103,7 +103,7 @@ impl SavedValue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gui) struct EditorIdentity {
     epoch: u64,
-    track_id: i64,
+    pub(super) track_id: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,6 +257,13 @@ impl MetadataSession {
         }
     }
 
+    pub(super) fn observe_source_recovery(
+        &mut self,
+        recovery: Option<&Arc<SourceTagRecovery>>,
+    ) -> bool {
+        self.source.observe_recovery(self.identity, recovery)
+    }
+
     pub(super) fn begin_source(&mut self, action: SourceAction) -> Option<(SourceToken, Command)> {
         if !self.editable() || self.any_saving() {
             return None;
@@ -264,8 +271,20 @@ impl MetadataSession {
         let identity = self.editor_identity()?;
         let track = self.track()?;
         let track_id = track.id;
+        if !self.source.allows(track_id, action) {
+            return None;
+        }
+        let action = if action == SourceAction::Sync && self.source.recovery(track_id).is_some() {
+            SourceAction::RetrySync
+        } else {
+            action
+        };
         let command = match action {
             SourceAction::Load(encoding) => Command::LoadSourceTags { track_id, encoding },
+            SourceAction::RetrySync => Command::RetrySourceTagSync {
+                track_id,
+                tags: self.source.recovery(track_id)?.tags.clone(),
+            },
             SourceAction::Sync | SourceAction::Save => {
                 let tags = self.source.values(track);
                 let expected = Box::new(database_tags(track));
@@ -280,7 +299,7 @@ impl MetadataSession {
                         tags,
                         expected,
                     },
-                    SourceAction::Load(_) => unreachable!(),
+                    SourceAction::Load(_) | SourceAction::RetrySync => unreachable!(),
                 }
             }
         };
@@ -323,7 +342,7 @@ impl MetadataSession {
         self.retention.clear();
         self.details_expired = false;
         self.saves.clear();
-        self.source = SourceTags::default();
+        self.source.change_selection();
         self.read_state = MetadataReadState::Idle;
     }
 

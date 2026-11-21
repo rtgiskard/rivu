@@ -429,6 +429,7 @@ impl Core {
         if self.active_scan.is_some() || self.active_external_admission.is_some() {
             bail!("A library scan is already running");
         }
+        self.ensure_source_tag_scan_allowed()?;
         let config = Arc::clone(self.preferences.settings());
         let other_tracks_check = matches!(input, ScanInput::OtherTracks { .. });
         let owner = if matches!(input, ScanInput::Import { .. }) {

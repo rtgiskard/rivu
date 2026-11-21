@@ -15,6 +15,18 @@ fn finish(core: &mut Core) -> Ack {
     }
 }
 
+fn immediate_ack(core: &mut Core, command: Command) -> Ack {
+    let (reply, response) = oneshot::channel();
+    core.dispatch_request(Request {
+        operation: Operation::Command(command),
+        reply: Some(reply),
+    });
+    match futures::executor::block_on(response).unwrap() {
+        CoreResponse::Ack(ack) => ack,
+        _ => panic!("tag synchronization returned a query response"),
+    }
+}
+
 #[test]
 fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
     let (_directory, mut core) = fixture();
@@ -37,6 +49,7 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
         encoding: TagEncoding::Declared,
     })
     .unwrap();
+    core.ensure_source_tag_scan_allowed().unwrap();
     let ack = finish(&mut core);
     assert!(ack.is_success(), "{:?}", ack.error);
     let loaded = ack.source_tags.unwrap();
@@ -235,37 +248,6 @@ fn saving_unchanged_database_tags_refreshes_stopped_source_identity() {
 }
 
 #[test]
-fn physical_file_success_is_reported_when_database_write_fails() {
-    let (directory, mut core) = fixture();
-    let before = core.track(1).unwrap();
-    wav(&before.path);
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection.execute_batch("CREATE TRIGGER reject_source_sync BEFORE UPDATE OF title ON tracks BEGIN SELECT RAISE(ABORT,'reject database tags'); END;").unwrap();
-    let mut requested = source_tags::track_tags(&before);
-    requested.title = "File committed".into();
-    core.command(Command::SaveSourceTags {
-        track_id: 1,
-        tags: requested.clone(),
-        expected: Box::new(source_tags::track_tags(&before)),
-    })
-    .unwrap();
-    let ack = finish(&mut core);
-    assert!(!ack.is_success());
-    assert!(ack.source_file_saved);
-    assert_eq!(ack.source_tags, Some(requested));
-    assert!(
-        ack.error
-            .unwrap()
-            .contains("retry database synchronization only")
-    );
-    assert_eq!(core.track(1).unwrap().title, before.title);
-    let read = rivu_metadata::read_tags(&mut std::fs::File::open(&before.path).unwrap())
-        .unwrap()
-        .unwrap();
-    assert_eq!(read.title.as_deref(), Some("File committed"));
-}
-
-#[test]
 fn failed_file_write_does_not_commit_displayed_values_to_database() {
     let (_directory, mut core) = fixture();
     let before = core.track(1).unwrap();
@@ -284,76 +266,200 @@ fn failed_file_write_does_not_commit_displayed_values_to_database() {
 }
 
 #[test]
-fn failed_source_fact_commit_can_retry_without_rewriting_the_file() {
-    let (directory, mut core) = fixture();
-    let before = core.track(1).unwrap();
-    wav(&before.path);
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection.execute_batch("CREATE TRIGGER reject_facts BEFORE UPDATE OF fingerprint ON tracks BEGIN SELECT RAISE(ABORT,'reject source facts'); END;").unwrap();
-    let mut tags = source_tags::track_tags(&before);
-    tags.title = "Committed file".into();
-    core.command(Command::SaveSourceTags {
-        track_id: 1,
-        tags: tags.clone(),
-        expected: Box::new(source_tags::track_tags(&before)),
-    })
-    .unwrap();
-    let ack = finish(&mut core);
-    assert!(!ack.is_success());
-    assert!(ack.source_file_saved);
-    assert!(core.pending_written_source.is_some());
-    let saved = std::fs::read(&before.path).unwrap();
+fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
     use std::os::unix::fs::MetadataExt;
-    let inode = std::fs::metadata(&before.path).unwrap().ino();
-    connection
-        .execute_batch("DROP TRIGGER reject_facts;")
-        .unwrap();
-    let source_facts = || {
+
+    for column in ["fingerprint", "title"] {
+        let (directory, mut core) = fixture();
+        let before = core.track(1).unwrap();
+        let other = core.track(2).unwrap();
+        wav(&before.path);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         connection
-            .query_row(
-                "SELECT fingerprint,file_size,modified_ns,probe_version FROM tracks WHERE id=1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<Vec<u8>>>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .unwrap()
-    };
-    let facts_before_retry = source_facts();
-    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        let mut invalid_tags = tags.clone();
-        invalid_tags.replaygain_track_gain = Some(invalid);
-        assert!(
-            core.command(Command::SyncTrackTags {
-                track_id: 1,
-                tags: invalid_tags,
-                expected: Box::new(source_tags::track_tags(&before)),
-            })
-            .is_err()
-        );
-        assert!(core.pending_written_source.is_some());
-        assert_eq!(source_facts(), facts_before_retry);
-        assert_eq!(core.track(1).unwrap(), before);
-    }
-    core.command(Command::SyncTrackTags {
-        track_id: 1,
-        tags: tags.clone(),
-        expected: Box::new(source_tags::track_tags(&before)),
-    })
-    .unwrap();
-    assert!(core.pending_written_source.is_none());
-    assert_eq!(source_tags::track_tags(&core.track(1).unwrap()), tags);
-    let hash: Vec<u8> = connection
-        .query_row("SELECT fingerprint FROM tracks WHERE id=1", [], |row| {
-            row.get(0)
+            .execute_batch(&format!(
+                "CREATE TRIGGER reject_sync BEFORE UPDATE OF {column} ON tracks
+                 WHEN OLD.id=1 BEGIN SELECT RAISE(ABORT,'reject database sync'); END;"
+            ))
+            .unwrap();
+        let expected = source_tags::track_tags(&before);
+        let tags = TagValues {
+            title: "Verified file title".into(),
+            artist: "Verified artist".into(),
+            track_number: Some(7),
+            ..expected.clone()
+        };
+        core.command(Command::SaveSourceTags {
+            track_id: 1,
+            tags: tags.clone(),
+            expected: Box::new(expected.clone()),
         })
         .unwrap();
-    assert_eq!(hash, blake3::hash(&saved).as_bytes());
-    assert_eq!(std::fs::read(&before.path).unwrap(), saved);
-    assert_eq!(std::fs::metadata(&before.path).unwrap().ino(), inode);
+        assert!(core.ensure_source_tag_scan_allowed().is_err());
+        let ack = finish(&mut core);
+        assert!(core.ensure_source_tag_scan_allowed().is_err());
+        let recovery = core
+            .shared
+            .read()
+            .system
+            .source_tag_recovery
+            .clone()
+            .unwrap();
+        assert_eq!(recovery.track_id, 1);
+        assert_eq!(recovery.tags, tags);
+        assert!(recovery.error.contains("reject database sync"));
+        assert!(!ack.is_success(), "{column}");
+        assert!(ack.source_file_saved);
+        assert_eq!(ack.source_tags, Some(tags.clone()));
+        assert!(ack.source_refresh_error.is_none());
+        assert!(
+            ack.error
+                .unwrap()
+                .contains("retry database synchronization only")
+        );
+        let saved = std::fs::read(&before.path).unwrap();
+        let metadata = std::fs::metadata(&before.path).unwrap();
+        let persisted = core.track(1).unwrap();
+        assert_eq!(source_tags::track_tags(&persisted), expected);
+        let fingerprint = blake3::hash(&saved).to_hex().to_string();
+        assert_eq!(
+            persisted.fingerprint.as_deref(),
+            (column == "title").then_some(fingerprint.as_str())
+        );
+        let read = rivu_metadata::read_tags(&mut std::fs::File::open(&before.path).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.title.as_deref(), Some(tags.title.as_str()));
+
+        assert!(immediate_ack(&mut core, Command::DismissError).is_success());
+        let snapshot = core
+            .shared
+            .read()
+            .system
+            .source_tag_recovery
+            .clone()
+            .unwrap();
+        assert_eq!(snapshot, recovery);
+        let retry = || Command::RetrySourceTagSync {
+            track_id: snapshot.track_id,
+            tags: snapshot.tags.clone(),
+        };
+        assert!(
+            !immediate_ack(&mut core, retry()).is_success(),
+            "an unsuccessful retry must stay pending"
+        );
+        connection
+            .execute_batch("DROP TRIGGER reject_sync;")
+            .unwrap();
+        for command in [
+            Command::SaveSourceTags {
+                track_id: 1,
+                tags: expected.clone(),
+                expected: Box::new(expected.clone()),
+            },
+            Command::SyncTrackTags {
+                track_id: 1,
+                tags: expected.clone(),
+                expected: Box::new(expected.clone()),
+            },
+            Command::RetrySourceTagSync {
+                track_id: 1,
+                tags: expected,
+            },
+            Command::RetrySourceTagSync {
+                track_id: 2,
+                tags: tags.clone(),
+            },
+        ] {
+            assert!(core.command(command).is_err());
+            assert_eq!(core.track(1).unwrap(), persisted);
+            assert_eq!(core.track(2).unwrap(), other);
+        }
+        let mut other_tags = source_tags::track_tags(&other);
+        other_tags.title = "Ordinary database-only edit".into();
+        core.command(Command::SyncTrackTags {
+            track_id: 2,
+            tags: other_tags.clone(),
+            expected: Box::new(source_tags::track_tags(&other)),
+        })
+        .unwrap();
+
+        let ack = immediate_ack(&mut core, retry());
+        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(!ack.source_file_saved);
+        assert_eq!(ack.source_tags, Some(tags.clone()));
+        let recovered = core.track(1).unwrap();
+        assert_eq!(source_tags::track_tags(&recovered), tags);
+        assert_eq!(recovered.fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(source_tags::track_tags(&core.track(2).unwrap()), other_tags);
+        assert_eq!(std::fs::read(&before.path).unwrap(), saved);
+        assert_eq!(
+            std::fs::metadata(&before.path).unwrap().ino(),
+            metadata.ino()
+        );
+        assert!(core.pending_written_source.is_none());
+        assert!(core.shared.read().system.source_tag_recovery.is_none());
+        assert!(core.shared.read().system.last_error.is_none());
+        core.ensure_source_tag_scan_allowed().unwrap();
+        assert!(
+            core.command(retry()).is_err(),
+            "retry must not become ordinary Sync"
+        );
+    }
+}
+
+#[test]
+fn postcommit_refresh_failure_is_not_a_retryable_database_failure() {
+    for recover_first in [false, true] {
+        let (directory, mut core) = fixture();
+        let before = core.track(1).unwrap();
+        wav(&before.path);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        if recover_first {
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER reject_tags BEFORE UPDATE OF title ON tracks
+                     BEGIN SELECT RAISE(ABORT,'reject database tags'); END;",
+                )
+                .unwrap();
+        }
+        core.state.current_track = Some(Arc::new(before.clone()));
+        // The out-of-range queue ID fails projection refresh, not either track write.
+        core.state.queue.current_id = Some(u64::MAX);
+        let expected = source_tags::track_tags(&before);
+        let mut tags = expected.clone();
+        tags.title = "Committed before refresh".into();
+        core.command(Command::SaveSourceTags {
+            track_id: 1,
+            tags: tags.clone(),
+            expected: Box::new(expected),
+        })
+        .unwrap();
+        let mut ack = finish(&mut core);
+        if recover_first {
+            assert!(!ack.is_success());
+            assert!(ack.source_refresh_error.is_none());
+            connection
+                .execute_batch("DROP TRIGGER reject_tags;")
+                .unwrap();
+            ack = immediate_ack(
+                &mut core,
+                Command::RetrySourceTagSync {
+                    track_id: 1,
+                    tags: tags.clone(),
+                },
+            );
+        }
+        assert!(ack.is_success(), "{:?}", ack.error);
+        assert_eq!(ack.source_file_saved, !recover_first);
+        assert_eq!(ack.source_tags, Some(tags.clone()));
+        assert!(
+            ack.source_refresh_error
+                .unwrap()
+                .contains("File and database saved; refresh failed")
+        );
+        assert_eq!(source_tags::track_tags(&core.track(1).unwrap()), tags);
+        assert!(core.pending_written_source.is_none());
+        assert!(core.shared.read().system.source_tag_recovery.is_none());
+        assert!(core.projections.current_track);
+    }
 }

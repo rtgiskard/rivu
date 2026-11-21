@@ -11,7 +11,7 @@ pub(super) enum CommandOutcome {
     DeferredExport,
     DeferredOptimization,
     DeferredSourceTags,
-    SourceTags(rivu_format::tags::TagValues),
+    SourceTags(rivu_format::tags::TagValues, Option<String>),
 }
 
 #[derive(Debug)]
@@ -144,13 +144,19 @@ impl Core {
             }
             Command::SyncTrackTags {
                 track_id,
-                tags,
+                mut tags,
                 expected,
             } => {
-                self.sync_track_tags(track_id, &tags, &expected)?;
-                return Ok(CommandOutcome::SourceTags(source_tags::track_tags(
-                    &self.track(track_id)?,
-                )));
+                let warning = self.sync_track_tags(track_id, &tags, &expected)?;
+                // Match the store's normalization without a fallible post-commit read.
+                if tags.release_date.as_deref() == Some("") {
+                    tags.release_date = None;
+                }
+                return Ok(CommandOutcome::SourceTags(tags, warning));
+            }
+            Command::RetrySourceTagSync { track_id, tags } => {
+                let (tags, warning) = self.commit_saved_tags(track_id, Some(&tags))?;
+                return Ok(CommandOutcome::SourceTags(tags, warning));
             }
             Command::TransferCollection {
                 source,
@@ -541,9 +547,6 @@ impl Core {
                 )?;
             }
             Command::ImportPlaylist { path, name } => {
-                if self.active_scan.is_some() {
-                    bail!("A library scan is already running");
-                }
                 let name = name.unwrap_or_else(|| {
                     path.file_stem()
                         .unwrap_or_default()

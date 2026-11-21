@@ -211,7 +211,7 @@ gl-tags-staged = File tags are staged; loading does not change the database. Ent
 gl-tags-synced = Tag values synced to the database. File tags are unchanged.
 gl-tags-saved = Tags saved to the file and synced to the database.
 gl-tags-sync-only = File saved; retry database sync.
-gl-tags-file-saved-db-failed = File saved, but database sync failed: { $error }. Staged values are retained; retry Sync to database only.
+gl-tags-file-saved-db-failed = File saved, but database sync failed: { $error }. The verified file tags are retained; retry Sync to database only.
 gl-tags-failed = Tag operation failed: { $error }
 gl-tags-response-invalid = The tag operation returned no tag values.
 

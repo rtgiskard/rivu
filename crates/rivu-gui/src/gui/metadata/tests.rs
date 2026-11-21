@@ -330,6 +330,7 @@ fn ack(ok: bool) -> crate::frontend::CommandDelivery {
             database_optimization: None,
             source_tags: None,
             source_file_saved: false,
+            source_refresh_error: None,
         },
         observation: crate::frontend::CommandObservation::Refreshed,
     }
@@ -589,29 +590,136 @@ fn successful_inline_save_releases_only_its_staged_field_after_refresh(cx: &mut 
     });
 }
 
+fn project_recovery(owner: &mut Metadata, error: Option<&str>, cx: &mut Context<Metadata>) {
+    let mut state = (*owner.state).clone();
+    state.system.source_tag_recovery = error.map(|error| {
+        Arc::new(rivu_protocol::model::SourceTagRecovery {
+            track_id: 1,
+            tags: file_tags(),
+            error: error.into(),
+        })
+    });
+    owner.reconcile(Rc::new(state), cx);
+}
+
 #[gpui::test]
-fn physical_save_failure_retains_values_and_only_database_sync_can_retry(cx: &mut TestAppContext) {
+fn fresh_metadata_owner_routes_observed_save_to_database_only(cx: &mut TestAppContext) {
+    use rivu_format::tags::TagEncoding;
     use source::SourceAction;
+
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
-        let original = this.metadata.track().unwrap().clone();
-        this.metadata.source.stage(file_tags());
-        let (token, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
-        let mut delivery = source_ack(false, true);
-        delivery.observation = crate::frontend::CommandObservation::Unavailable("observation also failed".into());
-        this.finish_source_action(token, delivery, cx);
-        assert_eq!(this.metadata.track(), Some(&original));
-        assert_eq!(this.metadata.source.values(&original), file_tags());
-        assert!(this.metadata.source.sync_only);
-        assert!(matches!(&this.metadata.source.status, Some(source::SourceStatus::FileSavedDatabaseFailed(error)) if error == "save failed"));
+        // No local SaveSourceTags request or ACK: the recovery comes from state.
+        project_recovery(this, Some("database write failed"), cx);
+        let mut selected = track(1, "database title");
+        selected.missing = true;
+        artwork_selection(this, selected.clone(), cx);
+        assert_eq!(this.metadata.track(), Some(&selected));
+        assert_eq!(this.metadata.source.values(&selected), file_tags());
+        assert!(this.source_status().unwrap().contains("database write failed"));
+        assert!(
+            this.metadata
+                .begin_source(SourceAction::Load(TagEncoding::Declared))
+                .is_none()
+        );
         assert!(this.metadata.begin_source(SourceAction::Save).is_none());
-        let (retry, command) = this.metadata.begin_source(SourceAction::Sync).unwrap();
-        assert!(matches!(command, Command::SyncTrackTags { tags, expected, .. } if tags == file_tags() && *expected == source::database_tags(&original)));
-        this.finish_source_action(retry, source_ack(true, false), cx);
-        assert!(!this.metadata.source.sync_only);
-        assert_eq!(source::database_tags(this.metadata.track().unwrap()), file_tags());
-        assert_eq!(this.metadata.source.status, Some(source::SourceStatus::Synced));
+        let (token, command) = this.metadata.begin_source(SourceAction::Sync).unwrap();
+        assert!(
+            matches!(command, Command::RetrySourceTagSync { track_id: 1, tags } if tags == file_tags())
+        );
+        this.metadata.source.finish(token).unwrap();
+
+        // Another client can complete recovery without delivering this window an ACK.
+        project_recovery(this, None, cx);
+        assert!(this.source_status().is_none());
+        assert!(matches!(
+            this.metadata.begin_source(SourceAction::Sync).unwrap().1,
+            Command::SyncTrackTags { track_id: 1, .. }
+        ));
     });
+}
+
+#[gpui::test]
+fn projected_save_survives_selection_changes_before_or_after_ack(cx: &mut TestAppContext) {
+    use source::SourceAction;
+    let (_directory, _runtime, metadata) = fixture(cx);
+    for leave_before_ack in [false, true] {
+        metadata.update(cx, |this, cx| {
+            let original = track(1, "database title");
+            let other = track(2, "other track");
+            artwork_selection(this, original.clone(), cx);
+            let (save, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
+            let mut delivery = source_ack(false, true);
+            delivery.observation =
+                crate::frontend::CommandObservation::Unavailable("observation also failed".into());
+            if leave_before_ack {
+                artwork_selection(this, other.clone(), cx);
+                this.finish_source_action(save, delivery, cx);
+                assert!(this.metadata.source.recovery(1).is_none());
+                project_recovery(this, Some("save failed"), cx);
+            } else {
+                project_recovery(this, Some("save failed"), cx);
+                this.finish_source_action(save, delivery, cx);
+                artwork_selection(this, other.clone(), cx);
+            }
+            assert_eq!(this.metadata.track(), Some(&other));
+            assert_eq!(
+                this.metadata.source.values(&other),
+                source::database_tags(&other)
+            );
+            assert!(this.source_status().is_none());
+            assert!(this.metadata.source.recovery(2).is_none());
+            let (sync, command) = this.metadata.begin_source(SourceAction::Sync).unwrap();
+            assert!(
+                matches!(command, Command::SyncTrackTags { track_id: 2, tags, .. }
+                    if tags == source::database_tags(&other))
+            );
+            assert_eq!(this.metadata.source.finish(sync), Some(true));
+
+            artwork_selection(this, original.clone(), cx);
+            assert_eq!(this.metadata.track(), Some(&original));
+            assert_eq!(this.metadata.source.values(&original), file_tags());
+            assert!(this.source_status().unwrap().contains("save failed"));
+            assert!(this.metadata.begin_source(SourceAction::Save).is_none());
+            let (retry, command) = this.metadata.begin_source(SourceAction::Sync).unwrap();
+            assert!(
+                matches!(command, Command::RetrySourceTagSync { track_id: 1, tags }
+                    if tags == file_tags())
+            );
+
+            artwork_selection(this, other.clone(), cx);
+            project_recovery(this, Some("retry failed"), cx);
+            this.finish_source_action(retry, ack(false), cx);
+            assert_eq!(this.metadata.track(), Some(&other));
+            assert!(this.source_status().is_none());
+            artwork_selection(this, original.clone(), cx);
+            assert!(this.source_status().unwrap().contains("retry failed"));
+            let (retry, command) = this.metadata.begin_source(SourceAction::Sync).unwrap();
+            assert!(
+                matches!(command, Command::RetrySourceTagSync { track_id: 1, tags }
+                    if tags == file_tags())
+            );
+            if leave_before_ack {
+                artwork_selection(this, other.clone(), cx);
+            }
+            project_recovery(this, None, cx);
+            this.finish_source_action(retry, source_ack(true, false), cx);
+            assert!(this.metadata.source.recovery(1).is_none());
+            if leave_before_ack {
+                assert_eq!(this.metadata.track(), Some(&other));
+                assert!(this.source_status().is_none());
+            } else {
+                assert_eq!(
+                    source::database_tags(this.metadata.track().unwrap()),
+                    file_tags()
+                );
+                assert_eq!(
+                    this.metadata.source.status,
+                    Some(source::SourceStatus::Synced)
+                );
+            }
+        });
+    }
 }
 
 #[gpui::test]
@@ -638,6 +746,30 @@ fn source_save_acknowledges_all_tags_without_touching_user_state(cx: &mut TestAp
             this.metadata.source.status,
             Some(source::SourceStatus::Saved)
         );
+    });
+}
+
+#[gpui::test]
+fn committed_save_with_projection_warning_does_not_enter_recovery(cx: &mut TestAppContext) {
+    use source::SourceAction;
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let (save, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
+        let mut delivery = source_ack(true, true);
+        let warning = "File and database saved; refresh failed";
+        delivery.ack.source_refresh_error = Some(warning.into());
+        this.finish_source_action(save, delivery, cx);
+        assert_eq!(
+            this.metadata.source.status,
+            Some(source::SourceStatus::Saved)
+        );
+        assert_eq!(
+            source::database_tags(this.metadata.track().unwrap()),
+            file_tags()
+        );
+        assert_eq!(this.error.as_deref(), Some(warning));
+        assert!(this.metadata.source.recovery(1).is_none());
+        assert!(this.metadata.source.allows(1, SourceAction::Save));
     });
 }
 

@@ -753,6 +753,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
                 database_optimization: None,
                 source_tags: None,
                 source_file_saved: false,
+                source_refresh_error: None,
             },
         );
     });
@@ -1125,6 +1126,7 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
                         database_optimization: None,
                         source_tags: None,
                         source_file_saved: false,
+                        source_refresh_error: None,
                     },
                 );
             }

@@ -2197,6 +2197,38 @@ fn import_input_failures_are_terminal_tasks_without_database_changes() {
 }
 
 #[test]
+fn scan_entry_points_reject_an_active_source_tag_save() {
+    let (directory, mut core) = fixture();
+    let track = core.track(1).unwrap();
+    write_pcm_frames(&track.path, 150);
+    let playlist = directory.path().join("mix.m3u");
+    std::fs::write(&playlist, "1.wav\n").unwrap();
+    let expected = source_tags::track_tags(&track);
+    let mut tags = expected.clone();
+    tags.title = "Saved title".into();
+    core.command(Command::SaveSourceTags {
+        track_id: track.id,
+        tags,
+        expected: Box::new(expected),
+    })
+    .unwrap();
+
+    // The owner has not handled the save result, even if the worker has finished.
+    assert!(
+        core.import_playlist(playlist.clone(), "Mix".into())
+            .is_err()
+    );
+    assert!(core.scan(vec![track.path], false).is_err());
+    assert!(core.start_other_tracks_check(false).is_err());
+    assert!(!core.state.system.scanning);
+
+    core.shutdown_source_tags();
+    assert_eq!(core.track(track.id).unwrap().title, "Saved title");
+    core.import_playlist(playlist, "Mix".into()).unwrap();
+    assert!(settle_scan(&mut core));
+}
+
+#[test]
 fn accepted_import_allows_dispatch_and_cancellation_before_commit() {
     let (directory, mut core) = fixture();
     write_pcm(&directory.path().join("new.wav"));

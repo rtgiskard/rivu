@@ -1,6 +1,10 @@
 use super::*;
 use anyhow::ensure;
 use rivu_format::tags::{TagEncoding, TagValues};
+use rivu_protocol::model::SourceTagRecovery;
+
+const SAVED_SOURCE_SYNC_FAILED: &str =
+    "File tags saved, but synchronizing the database failed; retry database synchronization only";
 
 /// One explicit file operation per Core. Its worker outlives caller timeouts.
 pub(in crate::core) struct SourceTagTask {
@@ -15,6 +19,8 @@ pub(in crate::core) struct PendingWrittenSource {
     track_id: i64,
     path: PathBuf,
     source: rivu_metadata::WrittenSource,
+    tags: TagValues,
+    expected: TagValues,
 }
 
 pub(in crate::core) struct SourceTagFinished {
@@ -50,6 +56,7 @@ impl Drop for SourceTagTask {
     }
 }
 
+#[cfg(test)]
 pub(super) fn track_tags(track: &Track) -> TagValues {
     TagValues {
         title: track.title.clone(),
@@ -60,6 +67,16 @@ pub(super) fn track_tags(track: &Track) -> TagValues {
         disc_number: track.disc_number,
         replaygain_track_gain: track.replaygain_track_gain,
     }
+}
+
+fn tags_match(track: &Track, tags: &TagValues) -> bool {
+    track.title == tags.title
+        && track.artist == tags.artist
+        && track.album == tags.album
+        && track.release_date == tags.release_date
+        && track.track_number == tags.track_number
+        && track.disc_number == tags.disc_number
+        && track.replaygain_track_gain == tags.replaygain_track_gain
 }
 
 fn source_values(tags: rivu_metadata::Tags) -> TagValues {
@@ -104,18 +121,18 @@ impl Core {
         );
         if let Some((_, expected)) = &save {
             ensure!(
-                track_tags(&track) == *expected,
+                tags_match(&track, expected),
                 "Database tags changed; reload the details before saving"
             );
         }
         let path = track.path.clone();
-        let expected = save.as_ref().map(|(_, expected)| expected.clone());
+        let (tags, expected) = save.unzip();
         let (tx, finished) = oneshot::channel();
         let workers = self.workers.clone();
         let worker = self.executor.spawn(async move {
             let result = workers
                 .execute(move || -> Result<SourceTagFinished> {
-                    if let Some((tags, _)) = save {
+                    if let Some(tags) = tags {
                         let patch = rivu_metadata::TagPatch {
                             title: Some(tags.title),
                             artist: Some(tags.artist),
@@ -165,14 +182,25 @@ impl Core {
         track_id: i64,
         tags: &TagValues,
         expected: &TagValues,
+    ) -> Result<Option<String>> {
+        let stored = self.track(track_id)?;
+        self.preflight_tag_sync(&stored, tags, expected)?;
+        let impact = self.store.sync_track_tags(track_id, tags)?;
+        Ok(self.refresh_tag_commit(track_id, impact, false))
+    }
+
+    fn preflight_tag_sync(
+        &self,
+        stored: &Track,
+        tags: &TagValues,
+        expected: &TagValues,
     ) -> Result<()> {
         ensure!(
             tags.replaygain_track_gain.is_none_or(f64::is_finite),
             "ReplayGain must be finite"
         );
-        let stored = self.track(track_id)?;
         ensure!(
-            track_tags(&stored) == *expected,
+            tags_match(stored, expected),
             "Database tags changed; reload the details before synchronizing"
         );
         // Reject a busy live metadata update before persisting tags or saved source facts.
@@ -180,9 +208,9 @@ impl Core {
             .transport
             .session
             .as_ref()
-            .is_some_and(|playback| playback.loaded_track.id == track_id)
+            .is_some_and(|playback| playback.loaded_track.id == stored.id)
             && self.state.current_track.as_ref().is_some_and(|track| {
-                track.id == track_id
+                track.id == stored.id
                     && (track.title != tags.title
                         || track.artist != tags.artist
                         || track.album != tags.album
@@ -191,28 +219,106 @@ impl Core {
         {
             self.engine.ensure_command_capacity(1)?;
         }
-        if let Some(pending) = &self.pending_written_source
-            && pending.track_id == track_id
-        {
-            ensure!(
-                stored.path == pending.path && stored.cue.is_none(),
-                "Saved source identity changed; inspect the file before synchronizing"
-            );
-            let changes = self
-                .store
-                .update_written_source(track_id, &pending.source)?;
-            self.pending_written_source = None;
-            self.accept_catalog_facts(changes, Some(&[track_id]), None);
-            self.projections.current_track |= changes.library
-                && self
-                    .state
-                    .current_track
-                    .as_ref()
-                    .is_some_and(|track| track.id == track_id);
+        Ok(())
+    }
+
+    pub(in crate::core) fn commit_saved_tags(
+        &mut self,
+        track_id: i64,
+        receipt_tags: Option<&TagValues>,
+    ) -> Result<(TagValues, Option<String>)> {
+        let pending = self
+            .pending_written_source
+            .as_ref()
+            .filter(|pending| pending.track_id == track_id)
+            .context("This track has no saved file awaiting database synchronization")?;
+        ensure!(
+            receipt_tags.is_none_or(|tags| *tags == pending.tags),
+            "Recovery tags do not match the verified file save"
+        );
+        match self.synchronize_saved_tags() {
+            Ok(impact) => {
+                let tags = self
+                    .pending_written_source
+                    .take()
+                    .expect("committed save")
+                    .tags;
+                if let Some(recovery) = self.state.system.source_tag_recovery.take()
+                    && self
+                        .state
+                        .system
+                        .last_error
+                        .as_deref()
+                        .and_then(|error| error.split_once(": "))
+                        == Some((SAVED_SOURCE_SYNC_FAILED, recovery.error.as_str()))
+                {
+                    self.state.system.last_error = None;
+                }
+                // Source facts can invalidate the current track even when tags are unchanged.
+                let warning = self.refresh_tag_commit(track_id, impact, true);
+                Ok((tags, warning))
+            }
+            Err(error) => {
+                let reason = format!("{error:#}");
+                let recovery = &mut self.state.system.source_tag_recovery;
+                if recovery.as_ref().is_none_or(|save| save.error != reason) {
+                    let pending = self.pending_written_source.as_ref().expect("pending save");
+                    *recovery = Some(Arc::new(SourceTagRecovery {
+                        track_id,
+                        tags: pending.tags.clone(),
+                        error: reason,
+                    }));
+                }
+                Err(error.context(SAVED_SOURCE_SYNC_FAILED))
+            }
         }
-        let impact = self.store.sync_track_tags(track_id, tags)?;
-        // A source-fact write can invalidate the current track even when the tags are unchanged.
-        self.finish_track_edit(track_id, impact, self.projections.current_track)
+    }
+
+    fn synchronize_saved_tags(&mut self) -> Result<crate::store::TrackEditImpact> {
+        let pending = self.pending_written_source.as_ref().expect("pending save");
+        let track_id = pending.track_id;
+        let stored = self.track(track_id)?;
+        ensure!(
+            stored.path == pending.path && stored.cue.is_none(),
+            "Saved source identity changed; inspect the file before synchronizing"
+        );
+        self.preflight_tag_sync(&stored, &pending.tags, &pending.expected)?;
+        let changes = self
+            .store
+            .update_written_source(track_id, &pending.source)?;
+        let impact = self.store.sync_track_tags(track_id, &pending.tags);
+        // Source facts are already committed even if the tag write failed.
+        self.accept_catalog_facts(changes, Some(&[track_id]), None);
+        self.projections.current_track |= changes.library
+            && self
+                .state
+                .current_track
+                .as_ref()
+                .is_some_and(|track| track.id == track_id);
+        impact
+    }
+
+    fn refresh_tag_commit(
+        &mut self,
+        track_id: i64,
+        impact: crate::store::TrackEditImpact,
+        file_saved: bool,
+    ) -> Option<String> {
+        let error = self
+            .finish_track_edit(
+                track_id,
+                impact,
+                file_saved && self.projections.current_track,
+            )
+            .err()?;
+        let committed = if file_saved {
+            "File and database saved"
+        } else {
+            "Database tags saved"
+        };
+        let warning = format!("{committed}; refresh failed: {error:#}");
+        self.state.system.last_error = Some(warning.clone());
+        Some(warning)
     }
 
     pub(in crate::core) fn finish_source_tags(&mut self, mut result: SourceTagFinished) {
@@ -222,20 +328,29 @@ impl Core {
         if let Err(error) = task.join() {
             result.result = Err(error);
         }
+        let mut refresh_error = None;
         if result.result.is_ok() && result.file_saved {
-            result.result = (|| {
-                let track = self.track(task.track.id)?;
-                ensure!(track.path == task.track.path && track.cue == task.track.cue,
-                    "File saved, but the library source identity changed");
-                self.pending_written_source = Some(PendingWrittenSource {
-                    track_id: task.track.id,
-                    path: task.track.path.clone(),
-                    source: result.source.take().context("Saved file omitted verified source facts")?,
-                });
-                self.sync_track_tags(task.track.id,
-                    result.tags.as_ref().context("Saved file omitted verified tags")?,
-                    task.expected.as_ref().context("Saved file omitted database baseline")?)
-            })().context("File tags saved, but synchronizing the database failed; retry database synchronization only");
+            let track_id = task.track.id;
+            self.pending_written_source = Some(PendingWrittenSource {
+                track_id,
+                path: task.track.path.clone(),
+                source: result.source.take().expect("verified file source facts"),
+                tags: result.tags.take().expect("verified file tags"),
+                expected: task.expected.take().expect("save database baseline"),
+            });
+            match self.commit_saved_tags(track_id, None) {
+                Ok((tags, warning)) => {
+                    result.tags = Some(tags);
+                    refresh_error = warning;
+                }
+                Err(error) => {
+                    result.tags = self
+                        .pending_written_source
+                        .as_ref()
+                        .map(|save| save.tags.clone());
+                    result.result = Err(error);
+                }
+            }
         }
         if let Err(error) = &result.result {
             self.state.system.last_error = Some(format!("{error:#}"));
@@ -244,6 +359,7 @@ impl Core {
         let mut ack = Ack::from_result(result.result, self.state.system.revision);
         ack.source_tags = result.tags;
         ack.source_file_saved = result.file_saved;
+        ack.source_refresh_error = refresh_error;
         if let Some(reply) = task.reply.take() {
             let _ = reply.send(CoreResponse::Ack(ack));
         }
@@ -267,18 +383,32 @@ impl Core {
         }
     }
 
-    /// No scan/relocation may publish stale source facts across an accepted write.
+    pub(in crate::core) fn ensure_source_tag_scan_allowed(&self) -> Result<()> {
+        ensure!(
+            self.pending_written_source.is_none(),
+            "A saved file is awaiting database synchronization; synchronize it first"
+        );
+        ensure!(
+            !self
+                .active_source_tags
+                .as_ref()
+                .is_some_and(|task| task.expected.is_some()),
+            "Source tags are being saved; this library operation was not executed"
+        );
+        Ok(())
+    }
+
+    /// No conflicting catalog operation may publish stale facts across an accepted write.
     pub(in crate::core) fn source_tag_control(&self, command: &Command) -> Result<()> {
         if let Some(pending) = &self.pending_written_source {
             let conflicting = match command {
-                Command::Scan { .. }
-                | Command::CheckOtherTracks { .. }
-                | Command::QueueExternalPaths { .. }
+                Command::QueueExternalPaths { .. }
                 | Command::RelocateTrack { .. }
                 | Command::OptimizeDatabase
                 | Command::RemoveMissingTracks => true,
                 Command::EditTrack { track_id, .. }
                 | Command::SetReplayGain { track_id, .. }
+                | Command::SyncTrackTags { track_id, .. }
                 | Command::KeepTrackIndependent { track_id } => *track_id == pending.track_id,
                 Command::RemoveTracks { track_ids } => track_ids.contains(&pending.track_id),
                 _ => false,
@@ -295,15 +425,14 @@ impl Core {
             return Ok(());
         }
         let conflicting = match command {
-            Command::Scan { .. }
-            | Command::CheckOtherTracks { .. }
-            | Command::QueueExternalPaths { .. }
+            Command::QueueExternalPaths { .. }
             | Command::RelocateTrack { .. }
             | Command::OptimizeDatabase
             | Command::RemoveMissingTracks => true,
             Command::EditTrack { track_id, .. }
             | Command::SetReplayGain { track_id, .. }
             | Command::SyncTrackTags { track_id, .. }
+            | Command::RetrySourceTagSync { track_id, .. }
             | Command::KeepTrackIndependent { track_id } => *track_id == task.track.id,
             Command::RemoveTracks { track_ids } => track_ids.contains(&task.track.id),
             _ => false,

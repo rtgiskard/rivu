@@ -457,7 +457,10 @@ impl Core {
                     Ok(CommandOutcome::Scan(id)) => ack.scan_id = Some(id),
                     Ok(CommandOutcome::Relocation(id)) => ack.relocation_id = Some(id),
                     Ok(CommandOutcome::Processing(id)) => ack.processing_id = Some(id),
-                    Ok(CommandOutcome::SourceTags(tags)) => ack.source_tags = Some(tags),
+                    Ok(CommandOutcome::SourceTags(tags, warning)) => {
+                        ack.source_tags = Some(tags);
+                        ack.source_refresh_error = warning;
+                    }
                     Ok(CommandOutcome::DeferredSourceTags) => {
                         self.active_source_tags
                             .as_mut()

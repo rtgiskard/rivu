@@ -589,10 +589,14 @@ The temporary copy first attempts a reflink/COW clone and falls back to ordinary
 copying if cloning fails. This preserves atomic replacement and final-byte hashing;
 filesystems without clone support still require a complete data copy.
 
-Keep no source-file backup. File replacement and database commit are separate
-boundaries: report physical success even if database synchronization fails, and
-retry database synchronization without rewriting the file. Offline edits do not
-open the library database. See link:02_library.adoc#source-file-tags[operation and limits].
+Keep no source-file backup. File verification, database commit and projection
+refresh are separate boundaries. Core holds the verified tags and source facts
+for the saved track until database commit and publishes one pending recovery
+snapshot so a new window can recover without the original ACK. Recovery must
+match that receipt; it cannot apply arbitrary displayed values or rewrite the
+file. Report a post-commit refresh error without marking the database write
+failed. Offline edits do not open the library database. See
+link:02_library.adoc#source-file-tags[operation and limits].
 
 [[DEC-025]]
 === DEC-025: Separate refresh authority from bounded stale presentation

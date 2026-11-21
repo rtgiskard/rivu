@@ -2948,6 +2948,7 @@ mod tests {
             database_optimization: None,
             source_tags: None,
             source_file_saved: false,
+            source_refresh_error: None,
         }
     }
 
