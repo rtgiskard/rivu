@@ -585,11 +585,16 @@ impl QueueBrowser {
         self.page_worker && self.page_projection.generation() == generation
     }
 
-    pub(super) fn cancel_page_demand(&mut self) {
+    /// Revoke page publication without releasing the physical worker gate.
+    pub(super) fn cancel_page_read(&mut self) {
         if self.page_worker {
             self.page_projection.cancel();
             self.rows.cancel_pending();
         }
+    }
+
+    pub(super) fn cancel_page_demand(&mut self) {
+        self.cancel_page_read();
         if self.locate.worker.is_some() {
             self.locate.invalidate();
         }

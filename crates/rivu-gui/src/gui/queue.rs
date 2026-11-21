@@ -172,6 +172,9 @@ impl Queue {
             return;
         }
         self.visible = visible;
+        if !visible {
+            self.model.cancel_page_read();
+        }
         self.retain_loading(cx);
         if visible {
             self.demand_visible_page(cx);
@@ -309,8 +312,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    #[gpui::test]
-    fn search_replacement_retires_loading_before_worker_release(cx: &mut gpui::TestAppContext) {
+    fn test_queue(
+        cx: &mut gpui::TestAppContext,
+        directory: &tempfile::TempDir,
+    ) -> (gpui::Entity<Queue>, crate::test_support::CoreRuntime) {
         cx.update(|cx| {
             rivu_ui::theme::set_palette(
                 rivu_presentation::theme::palette(rivu_presentation::theme::Theme::default()),
@@ -323,7 +328,6 @@ mod tests {
                 cx,
             );
         });
-        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         rivu_format::config::Config {
             volume: 0.0,
@@ -349,6 +353,13 @@ mod tests {
             scroll: Default::default(),
         };
         let queue = cx.new(|cx| Queue::new(context, cx));
+        (queue, runtime)
+    }
+
+    #[gpui::test]
+    fn search_replacement_retires_loading_before_worker_release(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (queue, _runtime) = test_queue(cx, &directory);
         for already_visible in [false, true] {
             queue.update(cx, |this, cx| {
                 this.model.retire_page_worker();
@@ -378,5 +389,54 @@ mod tests {
                 assert!(!this.loading.show(&(), false));
             });
         }
+    }
+
+    #[gpui::test]
+    fn last_queue_pane_hide_revokes_page_publication(cx: &mut gpui::TestAppContext) {
+        use rivu_protocol::{
+            model::Page,
+            response::{QueryError, QueryResponse, ViewResponse},
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let (queue, _runtime) = test_queue(cx, &directory);
+        queue.update(cx, |this, cx| {
+            for (search, result) in [
+                (
+                    "success",
+                    Ok(ViewResponse::QueuePage(Page {
+                        total: 0,
+                        rows: Vec::new(),
+                    })),
+                ),
+                ("failure", Err(QueryError::Message("late failure".into()))),
+            ] {
+                this.model.change_search(Some(search.to_owned()));
+                this.sync_queue(cx);
+                this.visible = true;
+                let limit = this.state.system.config.query_batch_size as usize;
+                let (request, generation) = this.model.demand_page(0..1, limit).unwrap();
+                let revisions = this.state.query_revisions(None);
+
+                this.set_visible(false, cx);
+                assert!(this.model.page_worker);
+                this.set_visible(true, cx);
+                assert!(this.model.demand_page(0..1, limit).is_none());
+
+                // Complete the original worker only after reopening, with the same query and stamp.
+                this.model.retire_page_worker();
+                this.model.accept_page(
+                    &request,
+                    generation,
+                    QueryResponse { revisions, result },
+                    || unreachable!(),
+                );
+                assert_eq!(this.model.rows.total(), None);
+                assert_eq!(this.model.rows.error(0), None);
+                let (_, replacement) = this.model.demand_page(0..1, limit).unwrap();
+                assert_ne!(replacement, generation);
+                this.model.retire_page_worker();
+            }
+        });
     }
 }
