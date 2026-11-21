@@ -573,12 +573,14 @@ impl Worker {
                     // Desired settings survive failure; later loads must not use the old sink.
                     self.device = device;
                     self.pipewire_auto_mix = auto_mix;
-                    let result = if device_changed || idle_apply {
+                    let result = if self.playback.is_some() {
+                        // The replacement stream resolves its target against fresh inventory.
+                        self.reopen(None)
+                    } else if device_changed || idle_apply {
                         validate_device(self.device.as_deref())
                     } else {
                         Ok(())
-                    }
-                    .and_then(|()| self.reopen(None));
+                    };
                     if let Err(error) = result {
                         if self.playback.is_some() || self.opening.is_some() {
                             // This generation was stopped, even if a newer
