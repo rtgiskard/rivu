@@ -1,6 +1,15 @@
 use super::*;
 use crate::config::LibraryColumn;
 
+fn compose_config(state: &CoreState) -> Config {
+    state.configuration.config.as_ref().clone().into_config(
+        state.playback.volume,
+        state.playback.shuffle,
+        state.playback.repeat,
+        state.system.selected_device.clone(),
+    )
+}
+
 #[test]
 fn material_edits_persist_immediately_and_merge_with_owner_time_settings() {
     use rivu_format::config::{MaterialChange, MaterialPreset, material::MaterialParameter};
@@ -147,6 +156,89 @@ fn configuration_only_publication_wakes_watchers_without_invalidating_runtime() 
         handle.state(changed).configuration.unwrap().config_path,
         std::path::Path::new("/relocated/config.toml")
     );
+}
+
+#[test]
+fn live_only_settings_do_not_replace_published_configuration() {
+    let (_directory, mut core) = fixture();
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let before = handle.state_revisions();
+    edit_preferences(&mut core, |config| {
+        config.volume = 0.25;
+        config.shuffle = true;
+        config.repeat = RepeatMode::One;
+        config.output_device = Some("new output".into());
+    });
+    core.publish();
+    let response = handle.read_state(StateRequest {
+        sections: StateSections::ALL,
+        since: Some(before),
+    });
+    assert_eq!(
+        response.sections(),
+        StateSections {
+            playback: true,
+            system: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(response.revisions.configuration, before.configuration);
+    let playback = response.playback.unwrap().playback;
+    assert_eq!(playback.volume, 0.25);
+    assert!(playback.shuffle);
+    assert_eq!(playback.repeat, RepeatMode::One);
+    assert_eq!(
+        response.system.unwrap().selected_device.as_deref(),
+        Some("new output")
+    );
+}
+
+#[test]
+fn current_track_delta_captures_metadata_source_and_clear_without_playback() {
+    let (_directory, mut core) = fixture();
+    core.state.current_track = Some(Arc::new(rivu_protocol::test_support::track(
+        1,
+        "track.flac",
+    )));
+    core.publish();
+    let (handle, _requests) = super::task_wait::wait_handle(&core);
+    let mut observed = rivu_protocol::response::ObservedState::new(1);
+    assert!(observed.apply(1, handle.state(StateSections::ALL)));
+    let before = observed.applied();
+    Arc::make_mut(core.state.current_track.as_mut().unwrap()).title = "edited".into();
+    core.transport.generation = core.transport.generation.wrapping_add(1);
+    core.publish();
+    let read = |since| {
+        handle.read_state(StateRequest {
+            sections: StateSections::ALL,
+            since: Some(since),
+        })
+    };
+    let response = read(before);
+    assert_eq!(
+        response.sections(),
+        StateSections {
+            current_track: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(response.revisions.playback, before.playback);
+    assert!(observed.apply(1, response));
+    let track = observed.snapshot().current_track().unwrap();
+    assert_eq!((track.id, track.title.as_str()), (1, "edited"));
+    assert_eq!(
+        observed.snapshot().source_generation,
+        core.transport.generation
+    );
+
+    core.state.current_track = None;
+    core.publish();
+    let cleared = read(observed.applied());
+    assert!(cleared.playback.is_none());
+    assert!(cleared.current_track.as_ref().unwrap().track.is_none());
+    assert!(observed.apply(1, cleared));
+    assert!(observed.snapshot().current_track.is_none());
 }
 
 #[test]
@@ -1132,7 +1224,7 @@ fn shutdown_flush_reports_failure_and_retains_live_settings() {
     assert!(state.system.shutting_down);
     assert!(state.system.last_error.is_some());
     assert_eq!(state.playback.repeat, RepeatMode::All);
-    assert_eq!(state.configuration.config.repeat, RepeatMode::Off);
+    assert!(path.is_dir());
 }
 
 #[test]
@@ -1268,7 +1360,13 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
             expected.output_device
         );
         core.publish();
-        assert_eq!(*core.shared.read().configuration.config, expected);
+        assert!(
+            core.shared
+                .read()
+                .configuration
+                .config
+                .matches_config(&expected)
+        );
         assert!(matches!(
             audio.try_recv(),
             Err(async_channel::TryRecvError::Empty)
@@ -1425,10 +1523,11 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
         .unwrap();
     core.publish();
     let visible = &core.shared.read().clone();
-    assert_eq!(*visible.configuration.config, expected);
+    assert!(visible.configuration.config.matches_config(&expected));
     assert_eq!(visible.playback.volume, 0.3);
     assert!(visible.playback.shuffle);
     assert_eq!(visible.playback.repeat, RepeatMode::One);
+    assert_eq!(visible.system.selected_device, expected.output_device);
     assert!(visible.configuration.config.library_roots.contains(&added));
     assert_eq!(
         Config::load(&core.state.configuration.config_path).unwrap(),
@@ -1474,7 +1573,7 @@ fn settings_apply_explicit_fields_override_newer_conflicting_values() {
     assert!(!visible.configuration.config.visualization_enabled);
     assert_eq!(
         Config::load(&core.state.configuration.config_path).unwrap(),
-        *visible.configuration.config
+        compose_config(visible)
     );
 }
 
@@ -1507,7 +1606,7 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
     assert_eq!(visible.configuration.config.scan_max_depth, 7);
     assert_eq!(
         Config::load(&core.state.configuration.config_path).unwrap(),
-        *visible.configuration.config
+        compose_config(visible)
     );
 }
 
@@ -1758,7 +1857,7 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     );
     assert!(!core.flush_config().unwrap());
     core.publish();
-    assert_eq!(*core.shared.read().configuration.config, expected);
+    assert_eq!(compose_config(&core.shared.read()), expected);
 }
 
 #[test]
@@ -1807,7 +1906,7 @@ fn visualization_enabled_applied_but_disconnected_audio_retains_unsaved_settings
         );
         assert!(!core.state.configuration.config_path.exists());
         core.publish();
-        assert_eq!(*core.shared.read().configuration.config, expected);
+        assert_eq!(compose_config(&core.shared.read()), expected);
     }
 }
 
@@ -1825,15 +1924,18 @@ fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     let (handle, control, worker, _publications) = navigation_runtime(core);
     #[cfg(feature = "ffmpeg")]
     let changes = handle.subscribe_revisions(RevisionInterest::Sections(StateSections::ALL));
-    let configure = |enabled| {
-        let baseline = handle.config_snapshot();
-        let mut config = baseline.as_ref().clone();
-        config.ffmpeg_enabled = enabled;
+    let configure = |enabled: bool| {
+        let baseline = Config {
+            ffmpeg_enabled: !enabled,
+            ..Config::default()
+        };
+        let draft = Config {
+            ffmpeg_enabled: enabled,
+            ..baseline.clone()
+        };
         let ack = futures::executor::block_on(handle.operation_ack_async(
             Operation::Command(Command::MutateConfig {
-                change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
-                    &baseline, &config,
-                ))),
+                change: ConfigMutation::Settings(Box::new(ConfigPatch::between(&baseline, &draft))),
             }),
             Duration::from_secs(5),
         ));

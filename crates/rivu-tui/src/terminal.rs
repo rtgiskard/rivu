@@ -225,8 +225,8 @@ fn apply_command_completion(
     let failure = match completion.result {
         Ok(ack) if ack.is_success() => None,
         Ok(ack) => Some((
-            ack.status == rivu_protocol::response::AckStatus::Unknown,
-            ack.error,
+            ack.status() == rivu_protocol::response::AckStatus::Unknown,
+            ack.error().map(str::to_owned),
         )),
         Err(error) => Some((error.command_outcome_unknown(), Some(error.into_message()?))),
     };

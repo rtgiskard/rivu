@@ -55,10 +55,9 @@ fn fixture(cx: &mut TestAppContext) -> Fixture {
     rivu::test_support::catalog::seed_playlist_targets(directory.path(), 1).unwrap();
     let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
     assert!(
-        futures::executor::block_on(runtime.handle.request_ack(Command::Enqueue {
+        futures::executor::block_on(runtime.handle.request_command(Command::Enqueue {
             track_ids: vec![1, 1, 1],
         }))
-        .ack
         .is_success()
     );
     let rows = queue_rows(&runtime);
@@ -130,9 +129,12 @@ fn fixture(cx: &mut TestAppContext) -> Fixture {
 fn queue_rows(runtime: &CoreRuntime) -> Vec<QueueRow> {
     // Commands and queries use independent queues. The ACK fences preceding actions.
     assert!(
-        futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-            .ack
-            .is_success()
+        futures::executor::block_on(
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.0 })
+        )
+        .is_success()
     );
     let ViewResponse::QueuePage(page) = runtime
         .handle
@@ -252,9 +254,8 @@ fn old_queue_frame_removes_stable_id_but_rejects_positional_move(cx: &mut TestAp
                 fixture
                     .runtime
                     .handle
-                    .request_ack(Command::Enqueue { track_ids: vec![1] })
+                    .request_command(Command::Enqueue { track_ids: vec![1] })
             )
-            .ack
             .is_success()
         );
         click(fixture.window, action, cx);

@@ -39,7 +39,7 @@ fn assert_query_socket_closed(mut stream: std::os::unix::net::UnixStream) {
         let length = u32::from_le_bytes(pending[..4].try_into().unwrap()) as usize;
         assert!(matches!(
             rivu_protocol::transport::decode_request_frame(&pending[4..4 + length]).unwrap(),
-            rivu_protocol::wire::WireRequest::QueryCancel(_)
+            rivu_protocol::wire::WireRequest::CancelRead(_)
         ));
         pending = &pending[4 + length..];
     }
@@ -400,7 +400,7 @@ fn watcher_rejects_replacement_at_initial_hello() {
 }
 
 #[test]
-fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
+fn watcher_applies_wait_deltas_without_another_read_and_keeps_shutdown() {
     use rivu_protocol::{
         response::{StateResponse, StateRevisions},
         test_support::write_test_response,
@@ -430,7 +430,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
             }),
         );
         assert!(
-            matches!(ipc::read_test_request(&mut stream), WireRequest::Watch(watch)
+            matches!(ipc::read_test_request(&mut stream), WireRequest::WaitState(watch)
             if watch.sections == TERMINAL_SECTIONS)
         );
         continuation.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -438,28 +438,7 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
             processing: 1,
             ..Default::default()
         };
-        // Even a redundant announcement must not cause a state fetch or publication.
-        write_test_response(&mut stream, WireResponse::Watch(processing_only));
-        assert!(
-            matches!(ipc::read_test_request(&mut stream), WireRequest::Watch(watch)
-            if watch.sections == TERMINAL_SECTIONS)
-        );
-        ignored.send(()).unwrap();
-        continuation.recv_timeout(Duration::from_secs(5)).unwrap();
-        // A stale announcement can yield no interested payload. Do not publish
-        // it or acknowledge the unread processing revision.
-        write_test_response(
-            &mut stream,
-            WireResponse::Watch(StateRevisions {
-                playback: 1,
-                ..processing_only
-            }),
-        );
-        assert!(matches!(
-            ipc::read_test_request(&mut stream),
-            WireRequest::State(request) if request.sections == TERMINAL_SECTIONS
-                && request.since == Some(StateRevisions::default())
-        ));
+        // No interested payload means no publication or applied token advance.
         write_test_response(
             &mut stream,
             WireResponse::State(wire_state(StateResponse {
@@ -469,34 +448,24 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         );
         assert!(matches!(
             ipc::read_test_request(&mut stream),
-            WireRequest::Watch(watch) if watch.revisions == StateRevisions::default()
+            WireRequest::WaitState(watch) if watch.revisions == StateRevisions::default()
+                && watch.sections == TERMINAL_SECTIONS
         ));
         ignored.send(()).unwrap();
         continuation.recv_timeout(Duration::from_secs(5)).unwrap();
-        let shutdown = StateRevisions {
-            system: 1,
-            ..processing_only
-        };
-        write_test_response(&mut stream, WireResponse::Watch(shutdown));
-        assert!(
-            matches!(ipc::read_test_request(&mut stream), WireRequest::State(request)
-            if request.sections == TERMINAL_SECTIONS
-                && request.since == Some(StateRevisions::default()))
-        );
         write_test_response(
             &mut stream,
             WireResponse::State(wire_state(StateResponse {
                 revisions: StateRevisions {
                     playback: 2,
-                    ..shutdown
+                    system: 1,
+                    ..processing_only
                 },
                 playback: Some(rivu_protocol::response::PlaybackSnapshot {
                     playback: rivu_protocol::model::PlaybackState {
                         volume: 0.42,
                         ..Default::default()
                     },
-                    current_track: None,
-                    source_generation: 0,
                     processing_audition: None,
                     processing_selection: None,
                 }),
@@ -515,10 +484,6 @@ fn watcher_excludes_processing_reads_and_publications_but_keeps_shutdown() {
         .unwrap();
     let (_, initial) = watcher.take_update().unwrap().unwrap();
     assert!(initial.processing.is_none());
-    continue_watch.send(()).unwrap();
-    ignored_update.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(watcher.latest.lock().is_none());
-    assert!(watcher.receiver.try_recv().is_err());
     continue_watch.send(()).unwrap();
     ignored_update.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(watcher.latest.lock().is_none());
@@ -593,7 +558,7 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
-        let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+        let WireRequest::Query(query) = read_test_request(&mut stream) else {
             panic!("expected retained query");
         };
         assert!(matches!(
@@ -602,7 +567,7 @@ fn replaced_bitrate_queries_drain_then_send_only_latest_on_the_same_session() {
         ));
         started.send(()).unwrap();
         assert!(
-            matches!(read_test_request(&mut stream), WireRequest::QueryCancel(id) if id == query.id)
+            matches!(read_test_request(&mut stream), WireRequest::CancelRead(id) if id == query.id)
         );
         cancel_seen.send(()).unwrap();
         resume.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -699,9 +664,9 @@ fn query_worker_shutdown_cancels_active_exchange_and_discards_pending_job() {
 fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
     use ipc::{
         complete_test_handshake, complete_test_handshake_for_instance, read_test_command,
-        reply_test_ack,
+        reply_test_command,
     };
-    use rivu_protocol::response::AckStatus;
+    use rivu_protocol::response::{Ack, AckStatus};
 
     if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
         return;
@@ -714,7 +679,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
             assert!(
                 matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
             );
-            // Mutation execution is ambiguous to the client: no Ack arrives.
+            // Mutation execution is ambiguous to the client: no receipt arrives.
             drop(stream);
             let mut stream = listener.accept().unwrap().0;
             if replacement {
@@ -727,7 +692,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
             assert!(
                 matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
             );
-            reply_test_ack(&mut stream, Ack::new(AckStatus::Succeeded, None, 2));
+            reply_test_command(&mut stream, Ack::new(AckStatus::Succeeded, None, 2).into());
         });
         let worker = spawn_command_worker(directory.path(), 1);
         assert!(
@@ -984,7 +949,7 @@ fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
             .is_success()
     );
     // Only the watch's real shutdown state authorizes the TUI to exit; no
-    // command-side revision refresh is required after the successful Ack.
+    // command-side revision refresh is required after the successful receipt.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let remaining = deadline
@@ -1002,7 +967,7 @@ fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
 
 #[test]
 fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
-    use ipc::{complete_test_handshake, read_test_request, reply_test_ack};
+    use ipc::{complete_test_handshake, read_test_request, reply_test_command};
     use rivu_protocol::{
         response::AckStatus,
         wire::{WireCommand, WireRequest},
@@ -1021,9 +986,14 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
                 WireRequest::Command(WireCommand::Shutdown)
             ));
             if rejected {
-                reply_test_ack(
+                reply_test_command(
                     &mut stream,
-                    Ack::new(AckStatus::NotAdmitted, Some("shutdown rejected".into()), 0),
+                    rivu_protocol::response::Ack::new(
+                        AckStatus::NotAdmitted,
+                        Some("shutdown rejected".into()),
+                        0,
+                    )
+                    .into(),
                 );
             }
         }
@@ -1151,13 +1121,13 @@ fn repeated_withdrawal_discards_pending_but_retains_active_until_reply() {
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
-        let WireRequest::QueryRetained(query) = read_test_request(&mut stream) else {
+        let WireRequest::Query(query) = read_test_request(&mut stream) else {
             panic!("expected retained query");
         };
         started.send(()).unwrap();
         assert!(matches!(
             read_test_request(&mut stream),
-            WireRequest::QueryCancel(id) if id == query.id
+            WireRequest::CancelRead(id) if id == query.id
         ));
         cancel_seen.send(()).unwrap();
         resume.recv_timeout(Duration::from_secs(5)).unwrap();

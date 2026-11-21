@@ -1,7 +1,8 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 struct ReadState {
-    config: Arc<Config>,
+    config: Arc<ConfigSettings>,
     revisions: QueryRevisions,
     playlist_entry_revisions: Arc<std::collections::BTreeMap<i64, u64>>,
     metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
@@ -322,7 +323,7 @@ pub(super) fn read_snapshot(
     state: &CoreState,
     query: &Query,
     maintenance: bool,
-    config: &Arc<Config>,
+    config: &Arc<ConfigSettings>,
 ) -> QueryResponse {
     ReadState {
         config: Arc::clone(config),
@@ -367,6 +368,7 @@ pub(super) struct ReadFence {
     state: Mutex<GateState>,
     owner_ready: parking_lot::Condvar,
     retired: Event,
+    stopping: AtomicBool,
 }
 
 impl ReadFence {
@@ -429,8 +431,9 @@ struct ReadRequest {
 }
 
 impl ReadRequest {
-    fn is_cancelled(&self) -> bool {
-        self.reply.is_canceled()
+    fn is_cancelled(&self, fence: &ReadFence) -> bool {
+        fence.stopping.load(Ordering::Acquire)
+            || self.reply.is_canceled()
             || self
                 .ticket
                 .as_ref()
@@ -530,12 +533,16 @@ impl ReadQueries {
         fence: &Arc<ReadFence>,
         demand: projections::ProjectionDemand,
     ) -> projections::PreparedProjections {
+        let stopping = || fence.stopping.load(Ordering::Acquire);
+        if stopping() {
+            return projections::PreparedProjections::default();
+        }
         {
             let mut gate = fence.state.lock();
             while gate.owner_busy {
                 fence.owner_ready.wait(&mut gate);
             }
-            if gate.maintenance {
+            if stopping() || gate.maintenance {
                 return projections::PreparedProjections::default();
             }
             gate.active = true;
@@ -554,11 +561,8 @@ impl ReadQueries {
                         ),
                     });
                 }
-                let snapshot = reader
-                    .as_ref()
-                    .expect("reader opened")
-                    .store
-                    .read_snapshot()?;
+                let store = &reader.as_ref().expect("reader opened").store;
+                let snapshot = store.read_snapshot()?;
                 {
                     let mut gate = fence.state.lock();
                     while gate.owner_busy {
@@ -566,7 +570,8 @@ impl ReadQueries {
                     }
                     let current = shared.read().query_revisions();
                     anyhow::ensure!(
-                        !gate.maintenance
+                        !stopping()
+                            && !gate.maintenance
                             && (!demand.track_total
                                 || current.structure == demand.revisions.structure)
                             && (!demand.history || current.library == demand.revisions.library)
@@ -575,9 +580,15 @@ impl ReadQueries {
                         "Projection ownership changed"
                     );
                 }
-                let prepared = projections::PreparedProjections::read(&snapshot, demand);
+                let prepared = store.with_read_cancellation(stopping, || {
+                    projections::PreparedProjections::read(&snapshot, demand)
+                });
                 snapshot.finish()?;
-                Ok(prepared)
+                Ok(if stopping() {
+                    projections::PreparedProjections::default()
+                } else {
+                    prepared
+                })
             },
         ));
         match result {
@@ -601,7 +612,7 @@ impl ReadQueries {
             revisions,
             result: Err(error),
         };
-        if request.is_cancelled() {
+        if request.is_cancelled(fence) {
             return failed(QueryError::Cancelled);
         }
         {
@@ -609,7 +620,7 @@ impl ReadQueries {
             while gate.owner_busy {
                 fence.owner_ready.wait(&mut gate);
             }
-            if request.is_cancelled() {
+            if request.is_cancelled(fence) {
                 return failed(QueryError::Cancelled);
             }
             if gate.maintenance {
@@ -671,7 +682,7 @@ impl ReadQueries {
             result: Err(error),
         };
         let response = connection.store.with_read_cancellation(
-            || request.is_cancelled(),
+            || request.is_cancelled(fence),
             || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     {
@@ -679,7 +690,7 @@ impl ReadQueries {
                         while gate.owner_busy {
                             fence.owner_ready.wait(&mut gate);
                         }
-                        if request.is_cancelled() {
+                        if request.is_cancelled(fence) {
                             return failed(QueryError::Cancelled);
                         }
                         // SQL is pinned before this version check. No I/O holds the gate,
@@ -734,7 +745,7 @@ impl ReadQueries {
                 .unwrap_or_else(|_| failed(QueryError::Message("Read worker panicked".into())))
             },
         );
-        let response = if request.is_cancelled() {
+        let response = if request.is_cancelled(fence) {
             failed(QueryError::Cancelled)
         } else {
             response
@@ -772,6 +783,8 @@ impl ReadQueries {
 
 impl Drop for ReadQueries {
     fn drop(&mut self) {
+        // Client sockets may still be open while Core joins this worker.
+        self.fence.stopping.store(true, Ordering::Release);
         self.requests.close();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -795,6 +808,55 @@ mod tests {
             panic!("expected query response")
         };
         response
+    }
+
+    #[test]
+    fn shutdown_cancels_queries_and_projection_recovery_with_open_receivers() {
+        let (directory, core) = super::super::tests::fixture();
+        let reads = ReadQueries::start(
+            directory.path().join("library.db"),
+            Arc::clone(&core.shared),
+        )
+        .unwrap();
+        let transition = reads.fence.transition();
+        let requests = reads.requests.clone();
+        let (reply, receiver) = oneshot::channel();
+        reads.submit(
+            Query::Track { track_id: 1 },
+            None,
+            &core.shared.read(),
+            reply,
+        );
+        let (recovered, mut recovery) = oneshot::channel();
+        assert!(reads.recover(
+            projections::ProjectionDemand {
+                track_total: true,
+                playlist_total: false,
+                history: false,
+                revisions: core.shared.read().query_revisions(),
+            },
+            recovered,
+        ));
+        let closing = thread::spawn(move || drop(reads));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !requests.is_closed() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        transition.finish(false);
+        assert!(requests.is_closed());
+        assert!(matches!(
+            response(receiver).result,
+            Err(QueryError::Cancelled)
+        ));
+        closing.join().unwrap();
+        assert!(
+            recovery
+                .try_recv()
+                .unwrap()
+                .unwrap()
+                .library_total
+                .is_none()
+        );
     }
 
     fn execute_read(

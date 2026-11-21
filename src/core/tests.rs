@@ -120,14 +120,17 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
     let mut state = CoreState::default();
     state.library.track_total = store.track_count().unwrap();
     state.configuration.config_path = directory.path().join("config.toml");
-    Arc::make_mut(&mut state.configuration.config)
-        .library_roots
-        .push(directory.path().to_path_buf());
     let (scan_tx, scan_rx) = async_channel::bounded(3);
     let (relocation_tx, relocation_rx) = async_channel::bounded(1);
     let tasks = TaskRuntime::start().unwrap();
-    let preferences =
-        crate::core::settings::Preferences::new(Arc::clone(&state.configuration.config), false);
+    let preferences = super::settings::Preferences::new(
+        Arc::new(Config {
+            library_roots: vec![directory.path().to_path_buf()],
+            ..Config::default()
+        }),
+        false,
+    );
+    preferences.project(&mut state);
     let mut core = Core {
         store,
         read_queries: None,

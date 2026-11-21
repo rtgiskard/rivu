@@ -1,8 +1,8 @@
 //! Concrete rendering parameters, captured by the host when configuration changes.
 use rivu_analysis::AnalysisSettings;
 use rivu_format::config::{
-    AnalysisWindow, Config, RgbColor, SpectrumBarLayout, SpectrumStyle, VisualizationPalette,
-    VisualizationSignal,
+    AnalysisWindow, Config, ConfigSettings, RgbColor, SpectrumBarLayout, SpectrumStyle,
+    VisualizationPalette, VisualizationSignal,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,9 +48,10 @@ pub struct VisualParameters {
     pub gpu_material_budget_bytes: u64,
 }
 
-impl From<&Config> for VisualParameters {
-    fn from(config: &Config) -> Self {
-        Self {
+macro_rules! visual_parameters {
+    ($config:ident) => {{
+        let config = $config;
+        VisualParameters {
             analysis_fft_size: config.analysis_fft_size,
             analysis_rate_hz: config.analysis_rate_hz,
             analysis_window: config.analysis_window,
@@ -91,6 +92,18 @@ impl From<&Config> for VisualParameters {
             waveform_rms_gain: config.waveform_rms_gain,
             gpu_material_budget_bytes: config.gpu_material_budget_bytes(),
         }
+    }};
+}
+
+impl From<&Config> for VisualParameters {
+    fn from(config: &Config) -> Self {
+        visual_parameters!(config)
+    }
+}
+
+impl From<&ConfigSettings> for VisualParameters {
+    fn from(config: &ConfigSettings) -> Self {
+        visual_parameters!(config)
     }
 }
 

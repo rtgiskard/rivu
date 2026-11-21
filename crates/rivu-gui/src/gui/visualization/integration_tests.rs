@@ -2,7 +2,7 @@ use super::*;
 use crate::gui::interaction::{DragCommit, SeekCommit, WindowInteraction};
 use crate::test_support::ConfigFixture;
 use gpui::{AppContext, Bounds, Context};
-use rivu_format::config::Config;
+use rivu_format::config::{Config, ConfigSettings};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_visuals::WaveformFrame;
 use rivu_visuals::test_support::{frame, track};
@@ -116,7 +116,7 @@ fn presentation_hiding_retains_pending_and_completed_full_previews(cx: &mut gpui
     let mut panels = crate::gui::workspace::WorkspacePanels::default();
     window.update(|_window, cx| {
         let mut sync = |owner: &mut VisualizerRuntime,
-                        config: Arc<Config>,
+                        config: Arc<ConfigSettings>,
                         visible,
                         has_panel,
                         cx: &mut Context<VisualizerRuntime>| {

@@ -336,7 +336,7 @@ pub(super) fn run(
                 decoder_hint: None,
                 release_date: None,
             };
-            let ack = rivu_client::request_ack(data_dir, command)?;
+            let ack = output::legacy_ack(rivu_client::request_command(data_dir, command)?)?;
             show_ack(i18n, &ack, mode)
         }
         LibraryAction::Duplicates {
@@ -467,10 +467,10 @@ pub(super) fn run(
             wait,
         } => {
             let mut session = rivu_client::client_session(data_dir);
-            let ack = session.request_ack(Command::RelocateTrack {
+            let ack = output::legacy_ack(session.request_command(Command::RelocateTrack {
                 source_id,
                 target_id,
-            })?;
+            })?)?;
             if !ack.is_success() || !wait {
                 return output::show_task_ack(i18n, &session, &ack, mode);
             }
@@ -480,7 +480,10 @@ pub(super) fn run(
             tasks::wait_relocation(i18n, &mut session, id, json)
         }
         LibraryAction::Optimize => {
-            let ack = rivu_client::request_ack(data_dir, Command::OptimizeDatabase)?;
+            let ack = output::legacy_ack(rivu_client::request_command(
+                data_dir,
+                Command::OptimizeDatabase,
+            )?)?;
             if json || !ack.is_success() {
                 return show_ack(i18n, &ack, mode);
             }

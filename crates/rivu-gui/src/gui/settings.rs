@@ -744,7 +744,7 @@ impl Settings {
         let i18n = context.i18n;
         let text = context.labels;
         let (ffmpeg_status, mpris_status) = runtime_status;
-        let config = handle.config_snapshot();
+        let config = handle.editable_config_snapshot();
         let artwork_cache_age = cx.new(|cx| {
             Input::new(
                 i18n.text("settings-age-in-days").to_owned(),
@@ -851,7 +851,7 @@ impl Settings {
         self.root_stats.cancel();
         self.schedule_library_stats_expiry(cx);
         self.dropdown.close();
-        self.reset(&self.handle.config_snapshot(), cx);
+        self.reset(&self.handle.editable_config_snapshot(), cx);
         cx.emit(SettingsEvent::Closed);
     }
 
@@ -2001,7 +2001,7 @@ impl Settings {
     }
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.reset(&self.handle.config_snapshot());
+        self.model.reset(&self.handle.editable_config_snapshot());
         self.show_session(window, cx);
     }
 
@@ -2031,7 +2031,7 @@ impl Settings {
         cx: &mut Context<Self>,
     ) {
         self.model
-            .reset_artwork(&self.handle.config_snapshot(), panel_id, options);
+            .reset_artwork(&self.handle.editable_config_snapshot(), panel_id, options);
         self.page = SettingsPage::Interface;
         self.show_session(window, cx);
     }
@@ -2156,7 +2156,7 @@ impl Settings {
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let response = handle.apply_settings(patch).await;
-            let committed = handle.config_snapshot();
+            let committed = handle.editable_config_snapshot();
             let _ = this.update(cx, |this, cx| {
                 let result = response.observed_result();
                 this.complete_settings_apply(submission, committed, result, cx);
@@ -2674,7 +2674,7 @@ mod tests {
         .save_fixture(&path)
         .unwrap();
         let runtime = CoreRuntime::start(directory.path(), &path).unwrap();
-        let config = runtime.handle.config_snapshot();
+        let config = runtime.handle.editable_config_snapshot();
         let context = super::super::feature::FeatureContext::for_test(runtime.handle.clone());
         let settings = cx.new(|cx| {
             Settings::new(
@@ -2710,7 +2710,7 @@ mod tests {
     ) -> (Arc<Config>, std::result::Result<(), String>) {
         let response = futures::executor::block_on(runtime.handle.apply_settings(patch));
         let result = response.observed_result();
-        (runtime.handle.config_snapshot(), result)
+        (runtime.handle.editable_config_snapshot(), result)
     }
 
     pub(super) struct SettingsWindow(Entity<Settings>);
@@ -3004,7 +3004,7 @@ mod tests {
     ) {
         let (_directory, runtime, settings) = fixture(cx);
         let window = open_window(cx, &settings);
-        let original = runtime.handle.config_snapshot();
+        let original = runtime.handle.editable_config_snapshot();
         let precise = precise_config(&original);
         let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
         assert!(result.is_ok());
@@ -3033,7 +3033,7 @@ mod tests {
     ) {
         let (_directory, runtime, settings) = fixture(cx);
         let window = open_window(cx, &settings);
-        let mut expected = precise_config(&runtime.handle.config_snapshot());
+        let mut expected = precise_config(&runtime.handle.editable_config_snapshot());
         settings.update(cx, |this, cx| {
             this.model.draft.spectrum_style = SpectrumStyle::Bars;
             this.sync_field_enabled(cx);
@@ -3066,7 +3066,7 @@ mod tests {
     ) {
         let (_directory, runtime, settings) = fixture(cx);
         let window = open_window(cx, &settings);
-        let original = runtime.handle.config_snapshot();
+        let original = runtime.handle.editable_config_snapshot();
         let precise = Arc::new(precise_config(&original));
         let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
         assert!(result.is_ok());
@@ -3112,7 +3112,7 @@ mod tests {
     ) {
         let (_directory, runtime, settings) = fixture(cx);
         let window = open_window(cx, &settings);
-        let original = runtime.handle.config_snapshot();
+        let original = runtime.handle.editable_config_snapshot();
         let precise = precise_config(&original);
         let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
         assert!(result.is_ok());
@@ -3203,9 +3203,12 @@ mod tests {
         });
         let (patch, submission) = submit(&settings, cx);
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.2 }))
-                .ack
-                .is_success()
+            futures::executor::block_on(
+                runtime
+                    .handle
+                    .request_command(Command::Volume { value: 0.2 })
+            )
+            .is_success()
         );
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
@@ -3240,9 +3243,12 @@ mod tests {
         .unwrap();
         let (patch, submission) = submit(&settings, cx);
         assert!(
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.3 }))
-                .ack
-                .is_success()
+            futures::executor::block_on(
+                runtime
+                    .handle
+                    .request_command(Command::Volume { value: 0.3 })
+            )
+            .is_success()
         );
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
@@ -3412,7 +3418,7 @@ mod tests {
         let (_directory, _runtime, settings) = fixture(cx);
         for result in [Ok(()), Err("save failed".to_owned())] {
             settings.update(cx, |this, cx| {
-                let config = this.handle.config_snapshot();
+                let config = this.handle.editable_config_snapshot();
                 this.model
                     .reset_artwork(&config, 22, ArtworkOptions::from(config.as_ref()));
                 this.active = true;
@@ -3449,7 +3455,7 @@ mod tests {
         settings.update(cx, |this, cx| {
             // Explicitly replace the session to exercise stale completion protection;
             // user cancellation cannot close a session with an in-flight apply.
-            let reopened = this.handle.config_snapshot();
+            let reopened = this.handle.editable_config_snapshot();
             this.reset(&reopened, cx);
             this.active = true;
             this.set_value(Field::ScanMaxDepth, "9", None, cx);

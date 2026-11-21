@@ -9,7 +9,7 @@ pub mod response;
 pub mod transport;
 pub mod wire;
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 #[cfg(test)]

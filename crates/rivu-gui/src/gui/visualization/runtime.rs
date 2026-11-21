@@ -12,7 +12,7 @@ use gpui::{
 use rivu_analysis::{AnalysisFrame, DisplayDemand, VisualizerDemand};
 use rivu_format::config::AudioVisualizerOptions;
 use rivu_format::config::AudioVisualizerStyle;
-use rivu_format::config::Config;
+use rivu_format::config::ConfigSettings;
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::model::{PlaybackStatus, Track};
 use std::{
@@ -30,7 +30,7 @@ enum PanelKind {
 }
 
 impl PanelKind {
-    fn from_panel(panel: &layout::Panel, config: &Config) -> Option<Self> {
+    fn from_panel(panel: &layout::Panel, config: &ConfigSettings) -> Option<Self> {
         if panel.kind != "audio_visualizer" {
             return None;
         }
@@ -49,7 +49,7 @@ impl PanelKind {
 }
 
 pub(in crate::gui) struct VisualizerInputs<'a> {
-    pub(in crate::gui) config: Arc<Config>,
+    pub(in crate::gui) config: Arc<ConfigSettings>,
     pub(in crate::gui) panels: &'a crate::gui::workspace::WorkspacePanels,
     pub(in crate::gui) status: PlaybackStatus,
     pub(in crate::gui) source_generation: u64,
@@ -112,7 +112,7 @@ pub(in crate::gui) struct VisualizerRuntime {
     handle: FrontendHandle,
     labels: Arc<visualization::VisualLabels>,
     parameters: visualization::VisualParameters,
-    config: Arc<Config>,
+    config: Arc<ConfigSettings>,
     frequency_views: visualization::FrequencyViews,
     frequency_enabled: bool,
     style_coordinator: visualization::StyleCoordinator,
@@ -828,6 +828,7 @@ pub(in crate::gui) fn stage_analysis_frame(
 mod tests {
     use super::*;
     use crate::test_support::CoreRuntime;
+    use rivu_format::config::Config;
 
     fn test_config() -> Config {
         Config {
@@ -888,7 +889,7 @@ mod tests {
     /// Visible playing inputs for an unchanged source; each test overrides
     /// only the fields that drive its transition.
     fn inputs<'a>(
-        config: &Arc<Config>,
+        config: &Arc<ConfigSettings>,
         panels: &'a crate::gui::workspace::WorkspacePanels,
     ) -> VisualizerInputs<'a> {
         VisualizerInputs {
@@ -1377,7 +1378,7 @@ mod tests {
             ..test_config()
         };
         let (_directory, runtime) = fixture(&config);
-        let config = Arc::new(config);
+        let config = Arc::new(ConfigSettings::from(config));
         let mut layout = layout::Layout {
             root: None,
             next_id: 1,
@@ -1472,7 +1473,7 @@ mod tests {
     fn hidden_and_paused_semantic_changes_discard_retained_input(cx: &mut gpui::TestAppContext) {
         let config = test_config();
         let (_directory, runtime) = fixture(&config);
-        let config = Arc::new(config);
+        let config = Arc::new(ConfigSettings::from(config));
         let mut layout = layout::Layout {
             root: None,
             next_id: 1,
@@ -1766,7 +1767,7 @@ mod tests {
     fn seed_radial(
         owner: &mut VisualizerRuntime,
         generation: u64,
-        config: &Config,
+        config: &ConfigSettings,
     ) -> AnalysisFrame {
         let frame = AnalysisFrame {
             generation,
@@ -1823,9 +1824,9 @@ mod tests {
         let ack = futures::executor::block_on(
             runtime
                 .handle
-                .request_ack(rivu_protocol::model::Command::Stop),
+                .request_command(rivu_protocol::model::Command::Stop),
         );
-        assert!(ack.ack.is_success(), "{:?}", ack.ack.error);
+        assert!(ack.is_success(), "{:?}", ack.error());
         let stopped = runtime.handle.gui_snapshot();
         assert_eq!(stopped.source_generation, before.source_generation);
         assert_eq!(stopped.playback.stopped_source_generation, None);
@@ -1943,7 +1944,7 @@ mod tests {
                     1 => state.source_generation += 1,
                     2 => state.seek_revision += 1,
                     3 => {
-                        state.config = Arc::new(Config {
+                        state.config = Arc::new(ConfigSettings {
                             visualization_enabled: false,
                             ..config.as_ref().clone()
                         });

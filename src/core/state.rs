@@ -67,10 +67,10 @@ impl CoreState {
         };
         StateSections {
             playback: self.playback != previous.playback
-                || self.source_generation != previous.source_generation
-                || current_track_changed
                 || self.processing_audition != previous.processing_audition
                 || self.processing_selection != previous.processing_selection,
+            current_track: current_track_changed
+                || self.source_generation != previous.source_generation,
             queue: self.queue != previous.queue,
             library: self.library.revision != previous.library.revision
                 || self.library.count_revision != previous.library.count_revision

@@ -135,15 +135,13 @@ fn activate(data_dir: &Path, model: SetupModel, prepared: &Prepared) -> Result<(
     } else {
         patch.speech_manifest = Some(Some(prepared.model_manifest.clone()));
     }
-    let ack = session.request_ack(Command::NeuralEdit {
+    let ack = session.request_command(Command::NeuralEdit {
         patch: Box::new(patch),
     })?;
     ensure!(
         ack.is_success(),
         "Core rejected activation: {}",
-        ack.error
-            .as_deref()
-            .unwrap_or("unsuccessful acknowledgement")
+        ack.error().unwrap_or("unsuccessful acknowledgement")
     );
     Ok(())
 }

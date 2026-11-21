@@ -200,7 +200,7 @@ impl CoreHandle {
         self.state.read().system.shutting_down
     }
     #[cfg(test)]
-    pub fn config_snapshot(&self) -> Arc<Config> {
+    pub fn config_snapshot(&self) -> Arc<ConfigSettings> {
         Arc::clone(&self.state.read().configuration.config)
     }
     pub(crate) fn mpris_service_state(&self) -> MprisServiceState {
@@ -238,6 +238,7 @@ impl CoreHandle {
         receiver
     }
 
+    #[cfg(test)]
     pub(crate) async fn query_async(&self, query: Query) -> QueryResponse {
         self.submit_query(query, None, Some(REPLY_TIMEOUT)).await
     }
@@ -320,10 +321,14 @@ impl CoreHandle {
             revisions: state.revisions,
             playback: sections.playback.then(|| PlaybackSnapshot {
                 playback: state.playback.clone(),
-                current_track: state.current_track.clone(),
-                source_generation: state.source_generation,
                 processing_audition: state.processing_audition,
                 processing_selection: state.processing_selection,
+            }),
+            current_track: sections.current_track.then(|| {
+                rivu_protocol::response::CurrentTrackState {
+                    track: state.current_track.clone(),
+                    source_generation: state.source_generation,
+                }
             }),
             queue: sections.queue.then(|| state.queue.clone()),
             library: sections.library.then(|| state.library.clone()),
@@ -341,6 +346,7 @@ impl CoreHandle {
         }
     }
 
+    #[cfg(test)]
     pub fn state_revisions(&self) -> StateRevisions {
         self.state.read().revisions
     }

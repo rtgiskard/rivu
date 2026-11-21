@@ -1166,23 +1166,22 @@ mod tests {
         let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
         // Album order must differ from insertion order for the staged playlist check.
         for (track_id, title) in ids.into_iter().zip(["B", "C", "A", "Outside"]) {
-            let ack = futures::executor::block_on(runtime.handle.request_ack(Command::EditTrack {
-                track_id,
-                title: Some(title.into()),
-                artist: None,
-                album: Some(album.title.clone()),
-                decoder_hint: None,
-                release_date: None,
-            }))
-            .ack;
-            assert!(ack.is_success(), "{:?}", ack.error);
+            let ack =
+                futures::executor::block_on(runtime.handle.request_command(Command::EditTrack {
+                    track_id,
+                    title: Some(title.into()),
+                    artist: None,
+                    album: Some(album.title.clone()),
+                    decoder_hint: None,
+                    release_date: None,
+                }));
+            assert!(ack.is_success(), "{:?}", ack.error());
         }
         let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::CreatePlaylist {
+            futures::executor::block_on(runtime.handle.request_command(Command::CreatePlaylist {
                 name: "Target".into(),
-            }))
-            .ack;
-        assert!(ack.is_success(), "{:?}", ack.error);
+            }));
+        assert!(ack.is_success(), "{:?}", ack.error());
         let save =
             LayoutPersistence::new(LoadedLayouts::load(directory.path().join("layouts.json")));
         let save_handle = save.handle();
@@ -1242,10 +1241,12 @@ mod tests {
     fn command_fence(runtime: &CoreRuntime) {
         // Commands and queries have independent queues. Observe a harmless
         // command after the action before asserting its real catalog effects.
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::Volume { value: 0.0 }))
-                .ack;
-        assert!(ack.is_success(), "{:?}", ack.error);
+        let ack = futures::executor::block_on(
+            runtime
+                .handle
+                .request_command(Command::Volume { value: 0.0 }),
+        );
+        assert!(ack.is_success(), "{:?}", ack.error());
     }
 
     fn favorites(runtime: &CoreRuntime, album: &AlbumKey) -> Vec<bool> {
@@ -1519,17 +1520,17 @@ mod tests {
             app.refresh(cx);
             app.state.library.album_revision
         });
-        let ack =
-            futures::executor::block_on(fixture.runtime.handle.request_ack(Command::EditTrack {
+        let ack = futures::executor::block_on(fixture.runtime.handle.request_command(
+            Command::EditTrack {
                 track_id: fixture.ids[0],
                 title: Some("Changed during drag".into()),
                 artist: None,
                 album: None,
                 decoder_hint: None,
                 release_date: None,
-            }))
-            .ack;
-        assert!(ack.is_success(), "{:?}", ack.error);
+            },
+        ));
+        assert!(ack.is_success(), "{:?}", ack.error());
         fixture.app.update(cx, |app, cx| {
             app.refresh(cx);
             assert_ne!(app.state.library.album_revision, revision);
@@ -1740,17 +1741,17 @@ mod tests {
         fixture.app.update(cx, |app, cx| {
             open_album(app, &fixture.album, cx);
         });
-        let ack =
-            futures::executor::block_on(fixture.runtime.handle.request_ack(Command::EditTrack {
+        let ack = futures::executor::block_on(fixture.runtime.handle.request_command(
+            Command::EditTrack {
                 track_id: fixture.ids[0],
                 title: None,
                 artist: None,
                 album: Some("Changed".into()),
                 decoder_hint: None,
                 release_date: None,
-            }))
-            .ack;
-        assert!(ack.is_success(), "{:?}", ack.error);
+            },
+        ));
+        assert!(ack.is_success(), "{:?}", ack.error());
         fixture.app.update(cx, |app, cx| {
             app.content_action(ContentAction::Favorite(true), cx);
             assert!(app.content_menu.is_none());

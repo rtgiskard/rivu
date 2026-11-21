@@ -1,6 +1,6 @@
 use super::wire::{
-    HelloResponse, MAX_REQUEST, MAX_RESPONSE, PROTOCOL_VERSION, RequestTag, ResponseTag,
-    UNKNOWN_INSTANCE, WireRequest, WireResponse,
+    CommandRefusal, HelloResponse, MAX_REQUEST, MAX_RESPONSE, PROTOCOL_VERSION, RequestTag,
+    ResponseTag, UNKNOWN_INSTANCE, WireRequest, WireResponse,
 };
 use anyhow::{Context, Result, bail, ensure};
 use bytes::{Buf, BufMut, BytesMut};
@@ -82,24 +82,27 @@ pub fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
     let message_type = RequestTag::try_from(message_type)?;
     let request = match message_type {
         RequestTag::Hello => WireRequest::Hello(decode_body(body, "Decoding IPC Hello request")?),
-        RequestTag::State => WireRequest::State(decode_body(body, "Decoding IPC state request")?),
+        RequestTag::ReadState => {
+            WireRequest::ReadState(decode_body(body, "Decoding IPC state read request")?)
+        }
         RequestTag::Query => WireRequest::Query(decode_body(body, "Decoding IPC query request")?),
         RequestTag::Command => {
-            WireRequest::Command(decode_body(body, "Decoding IPC command request")?)
+            WireRequest::Command(decode_body(body, "Decoding IPC command request").map_err(
+                |error| CommandRefusal::MalformedCommand(format!("Invalid IPC command: {error:#}")),
+            )?)
         }
-        RequestTag::Watch => WireRequest::Watch(decode_body(body, "Decoding IPC watch request")?),
+        RequestTag::WaitState => {
+            WireRequest::WaitState(decode_body(body, "Decoding IPC state wait request")?)
+        }
         RequestTag::WaitTask => {
             WireRequest::WaitTask(decode_body(body, "Decoding IPC task wait request")?)
-        }
-        RequestTag::QueryRetained => {
-            WireRequest::QueryRetained(decode_body(body, "Decoding IPC retained query request")?)
         }
         RequestTag::RegisterDesktop => {
             let () = decode_body(body, "Decoding IPC desktop registration")?;
             WireRequest::RegisterDesktop
         }
-        RequestTag::QueryCancel => {
-            WireRequest::QueryCancel(decode_body(body, "Decoding IPC query cancellation")?)
+        RequestTag::CancelRead => {
+            WireRequest::CancelRead(decode_body(body, "Decoding IPC query cancellation")?)
         }
     };
     Ok(request)
@@ -118,9 +121,8 @@ pub fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
         ResponseTag::Query => {
             WireResponse::Query(decode_body(body, "Decoding IPC query response")?)
         }
-        ResponseTag::Ack => WireResponse::Ack(decode_body(body, "Decoding IPC acknowledgement")?),
-        ResponseTag::Watch => {
-            WireResponse::Watch(decode_body(body, "Decoding IPC watch response")?)
+        ResponseTag::Command => {
+            WireResponse::Command(decode_body(body, "Decoding IPC command reply")?)
         }
         ResponseTag::Task => WireResponse::Task(decode_body(body, "Decoding IPC task response")?),
         ResponseTag::Error => {
@@ -164,14 +166,13 @@ pub fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u8>) -> 
     };
     match request {
         WireRequest::Hello(value) => writer.encode(RequestTag::Hello as u8, value),
-        WireRequest::State(value) => writer.encode(RequestTag::State as u8, value),
+        WireRequest::ReadState(value) => writer.encode(RequestTag::ReadState as u8, value),
         WireRequest::Query(value) => writer.encode(RequestTag::Query as u8, value),
         WireRequest::Command(value) => writer.encode(RequestTag::Command as u8, value),
-        WireRequest::Watch(value) => writer.encode(RequestTag::Watch as u8, value),
+        WireRequest::WaitState(value) => writer.encode(RequestTag::WaitState as u8, value),
         WireRequest::WaitTask(value) => writer.encode(RequestTag::WaitTask as u8, value),
-        WireRequest::QueryRetained(value) => writer.encode(RequestTag::QueryRetained as u8, value),
         WireRequest::RegisterDesktop => writer.encode(RequestTag::RegisterDesktop as u8, &()),
-        WireRequest::QueryCancel(value) => writer.encode(RequestTag::QueryCancel as u8, value),
+        WireRequest::CancelRead(value) => writer.encode(RequestTag::CancelRead as u8, value),
     }
 }
 
@@ -184,8 +185,7 @@ pub fn encode_response_frame_into(response: &WireResponse, bytes: &mut Vec<u8>) 
         WireResponse::Hello(value) => writer.encode(ResponseTag::Hello as u8, value),
         WireResponse::State(value) => writer.encode(ResponseTag::State as u8, value),
         WireResponse::Query(value) => writer.encode(ResponseTag::Query as u8, value),
-        WireResponse::Ack(value) => writer.encode(ResponseTag::Ack as u8, value),
-        WireResponse::Watch(value) => writer.encode(ResponseTag::Watch as u8, value),
+        WireResponse::Command(value) => writer.encode(ResponseTag::Command as u8, value),
         WireResponse::Task(value) => writer.encode(ResponseTag::Task as u8, value),
         WireResponse::Error(value) => writer.encode(ResponseTag::Error as u8, value),
     }
@@ -596,7 +596,7 @@ mod tests {
             let mut write_started = false;
             let error = write_request_frame_buffered(
                 &mut PendingFlush,
-                &WireRequest::State(crate::response::StateSections::ALL.into()),
+                &WireRequest::ReadState(crate::response::StateSections::ALL.into()),
                 &mut Vec::new(),
                 &mut write_started,
             )
@@ -608,16 +608,23 @@ mod tests {
     }
 
     fn payload_request(payload: String) -> WireRequest {
-        WireRequest::Query(super::super::wire::WireQuery::PlaylistSummaries {
-            query: Some(payload),
-            offset: 0,
-            limit: 1,
+        WireRequest::Query(super::super::wire::WireReadQuery {
+            id: 1,
+            query: super::super::wire::WireQuery::PlaylistSummaries {
+                query: Some(payload),
+                offset: 0,
+                limit: 1,
+            },
         })
     }
 
     fn request_payload(request: WireRequest) -> String {
-        let WireRequest::Query(super::super::wire::WireQuery::PlaylistSummaries {
-            query: Some(payload),
+        let WireRequest::Query(super::super::wire::WireReadQuery {
+            query:
+                super::super::wire::WireQuery::PlaylistSummaries {
+                    query: Some(payload),
+                    ..
+                },
             ..
         }) = request
         else {

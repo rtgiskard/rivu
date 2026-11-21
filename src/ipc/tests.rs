@@ -53,7 +53,7 @@ fn command_service(
 
 #[track_caller]
 fn assert_ack(session: &mut rivu_client::ClientSession, command: Command, success: bool) {
-    let ack = session.request_ack(command).unwrap();
+    let ack = session.request_command(command).unwrap();
     assert_eq!(ack.is_success(), success, "{ack:?}");
 }
 
@@ -76,7 +76,48 @@ fn connect_hello(
 }
 
 #[test]
-fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_slots() {
+fn invalid_command_does_not_produce_an_owner_receipt() {
+    use std::io::Write as _;
+    use std::time::Duration;
+
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
+        return;
+    }
+    let directory = socket_test_directory();
+    let config_path = command_config(directory.path());
+    let (_owner, mut runtime, app, server) = command_service(directory.path(), &config_path, None);
+    let mut raw = connect_hello(directory.path(), Duration::from_secs(2), StateSections::ALL);
+    // A complete command frame with a missing command body cannot reach App or Core.
+    raw.write_all(&[2, 0, 0, 0, PROTOCOL_VERSION, RequestTag::Command as u8])
+        .unwrap();
+    assert!(matches!(
+        read_response(&mut raw),
+        WireResponse::Command(CommandReply::Refused(CommandRefusal::MalformedCommand(_)))
+    ));
+
+    let mut client = client_session(directory.path());
+    assert!(client.register_desktop().unwrap().is_success());
+    let duplicate = client.register_desktop().unwrap();
+    assert!(matches!(
+        duplicate,
+        CommandReply::Receipt(CommandReceipt {
+            outcome: CommandOutcome::Failed { .. },
+            ..
+        })
+    ));
+    assert!(
+        client
+            .request_command(AppCommand::Shutdown)
+            .unwrap()
+            .is_success()
+    );
+    drop(server);
+    runtime.join().unwrap();
+    assert!(app.is_shutting_down());
+}
+
+#[test]
+fn pending_query_rejects_pipelining_and_disconnected_clients_release_slots() {
     if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(20)) {
         return;
     }
@@ -91,40 +132,30 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     let connect = || connect_hello(directory.path(), Duration::from_secs(2), StateSections::ALL);
     let receive_query =
         || async_io::block_on(timeout(Duration::from_secs(2), queries.receive())).unwrap();
-    let response = || QueryResponse {
-        revisions: Default::default(),
-        result: Ok(rivu_protocol::response::ViewResponse::Track(None)),
-    };
     let mut stream = connect();
     let mut frame = Vec::new();
     encode_request_frame_into(
-        &WireRequest::Query(WireQuery::from(Query::Track { track_id: 1 })),
+        &WireRequest::Query(WireReadQuery {
+            id: 1,
+            query: WireQuery::Track { track_id: 1 },
+        }),
         &mut frame,
     )
     .unwrap();
     stream.write_all(&frame).unwrap();
     let reply = receive_query();
-    encode_request_frame_into(&WireRequest::State(StateSections::ALL.into()), &mut frame).unwrap();
-    stream.write_all(&frame).unwrap();
     encode_request_frame_into(
-        &WireRequest::Query(WireQuery::from(Query::Track { track_id: 2 })),
+        &WireRequest::Query(WireReadQuery {
+            id: 2,
+            query: WireQuery::Track { track_id: 2 },
+        }),
         &mut frame,
     )
     .unwrap();
-    stream.write_all(&frame[..1]).unwrap();
-    stream.set_nonblocking(true).unwrap();
-    assert_eq!(
-        stream.read(&mut [0; 1]).unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
-    stream.set_nonblocking(false).unwrap();
-    assert!(!reply.is_cancelled());
-    reply.respond(response());
-    assert!(matches!(read_response(&mut stream), WireResponse::Query(_)));
-    assert!(matches!(read_response(&mut stream), WireResponse::State(_)));
-    stream.write_all(&frame[1..]).unwrap();
-    receive_query().respond(response());
-    assert!(matches!(read_response(&mut stream), WireResponse::Query(_)));
+    stream.write_all(&frame).unwrap();
+    assert!(matches!(read_response(&mut stream), WireResponse::Error(_)));
+    assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
+    assert!(reply.is_cancelled());
     drop(stream);
 
     // More than MAX_CLIENTS abandoned reads must still admit another Hello
@@ -132,7 +163,10 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
     for _ in 0..=MAX_CLIENTS {
         let mut stream = connect();
         encode_request_frame_into(
-            &WireRequest::Query(WireQuery::from(Query::LibraryStats)),
+            &WireRequest::Query(WireReadQuery {
+                id: 1,
+                query: WireQuery::LibraryStats,
+            }),
             &mut frame,
         )
         .unwrap();
@@ -149,7 +183,7 @@ fn pending_query_preserves_pipelined_responses_and_disconnected_clients_release_
 }
 
 #[test]
-fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
+fn configuration_change_returns_selective_ipc_state_delta() {
     let directory = socket_test_directory();
     let config_path = command_config(directory.path());
     let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
@@ -169,23 +203,17 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
         .unwrap();
     let stop = watcher.cancellation();
     let (completed, completion) = std::sync::mpsc::sync_channel(1);
+    let sections = StateSections {
+        configuration: true,
+        ..Default::default()
+    };
     let watched = std::thread::spawn(move || {
-        let mut revisions = before;
-        loop {
-            let next = watcher.watch(revisions.into()).unwrap();
-            let configuration_changed = next.changed_since(revisions).configuration;
-            revisions = next;
-            if configuration_changed {
-                let sections = StateSections {
-                    configuration: true,
-                    ..Default::default()
-                };
-                completed
-                    .send(watcher.get_state_since(sections, before).unwrap())
-                    .unwrap();
-                break;
-            }
-        }
+        completed
+            .send(watcher.wait_state(rivu_protocol::response::StateWatch {
+                revisions: before,
+                sections,
+            }))
+            .unwrap();
     });
     runtime
         .handle
@@ -193,18 +221,15 @@ fn configuration_change_wakes_ipc_watch_and_selective_read_omits_runtime() {
             change: rivu_protocol::model::ConfigMutation::ToggleWaveformSeek,
         })
         .unwrap();
-    // Bound the failure path without depending on scheduling a particular watch/read order.
+    // Bound the failure path without depending on mutation and wait order.
     let response = completion.recv_timeout(std::time::Duration::from_secs(5));
     stop.cancel();
     watched.join().unwrap();
-    let response = response.expect("configuration publication did not wake IPC Watch");
-    assert_eq!(
-        response.sections(),
-        StateSections {
-            configuration: true,
-            ..Default::default()
-        }
-    );
+    let response = response
+        .expect("configuration publication did not wake WaitState")
+        .unwrap();
+    assert_eq!(response.sections(), sections);
+    assert_ne!(response.revisions.configuration, before.configuration);
     assert_ne!(
         response.configuration.unwrap().config.waveform_seek_enabled,
         previous
@@ -240,7 +265,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
         assert_eq!(client.instance_id(), instance);
     }
     let before = client.get_state(StateSections::ALL).unwrap();
-    let accepted = client.request_ack(AppCommand::ShowWindow).unwrap();
+    let accepted = client.request_command(AppCommand::ShowWindow).unwrap();
     #[cfg(feature = "gui")]
     assert!(accepted.is_success());
     #[cfg(not(feature = "gui"))]
@@ -264,11 +289,11 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
         ))
         .unwrap()
     );
-    let ack = client.request_ack(AppCommand::Shutdown).unwrap();
+    let ack = client.request_command(AppCommand::Shutdown).unwrap();
     assert!(ack.is_success());
     runtime.join().unwrap();
     assert!(runtime.handle.is_shutting_down());
-    assert!(ack.revision <= runtime.handle.publication_revision());
+    assert!(ack.receipt().unwrap().revision <= runtime.handle.publication_revision());
     drop(server);
     assert!(SocketOwner::acquire(directory.path()).is_err());
     drop(owner);
@@ -276,9 +301,12 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
 }
 
 #[test]
-fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
+fn selective_wait_ignores_unselected_revision_and_rejects_concurrent_read() {
     use rivu_protocol::response::StateWatch;
-    use std::{io::Write, time::Duration};
+    use std::{
+        io::{Read, Write},
+        time::Duration,
+    };
 
     let directory = socket_test_directory();
     let config_path = command_config(directory.path());
@@ -294,7 +322,7 @@ fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
     let mut baseline = runtime.handle.state_revisions();
     baseline.processing = baseline.processing.wrapping_add(1);
     encode_request_frame_into(
-        &WireRequest::Watch(StateWatch {
+        &WireRequest::WaitState(StateWatch {
             revisions: baseline,
             sections: StateSections {
                 configuration: true,
@@ -305,15 +333,22 @@ fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
     )
     .unwrap();
     stream.write_all(&encoded).unwrap();
-    encode_request_frame_into(&WireRequest::Query(WireQuery::LibraryStats), &mut encoded).unwrap();
+    encode_request_frame_into(
+        &WireRequest::ReadState(StateSections::ALL.into()),
+        &mut encoded,
+    )
+    .unwrap();
     stream.write_all(&encoded).unwrap();
-    // Pending requests still supersede a watch; an unrelated revision must not
-    // produce a Watch response ahead of the real query response.
-    assert!(matches!(read_response(&mut stream), WireResponse::Query(_)));
+    // Processing did not satisfy the wait, and the next request is not dispatched.
+    assert!(
+        matches!(read_response(&mut stream), WireResponse::Error(message)
+            if message.contains("Concurrent IPC requests"))
+    );
+    assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
     drop(stream);
     assert!(
         control
-            .request_ack(AppCommand::Shutdown)
+            .request_command(AppCommand::Shutdown)
             .unwrap()
             .is_success()
     );
@@ -322,7 +357,7 @@ fn selective_watch_ignores_unselected_processing_revision_before_dispatch() {
 }
 
 #[test]
-fn malformed_request_during_watch_receives_invalid_request_response() {
+fn malformed_request_during_state_wait_rejects_and_closes() {
     if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(15)) {
         return;
     }
@@ -341,25 +376,26 @@ fn malformed_request_during_watch_receives_invalid_request_response() {
     let mut encoded = Vec::new();
 
     encode_request_frame_into(
-        &WireRequest::Watch(runtime.handle.state_revisions().into()),
+        &WireRequest::WaitState(rivu_protocol::response::StateWatch {
+            revisions: runtime.handle.state_revisions(),
+            sections: StateSections::default(),
+        }),
         &mut encoded,
     )
     .unwrap();
-    // A complete frame with an unknown request type is a decoding failure, not
-    // a framing failure: Watch must hand it back to the normal error responder.
+    // No section is selected, so this complete but malformed request is the
+    // only possible interruption before shutdown.
     encoded.extend_from_slice(&[2, 0, 0, 0, PROTOCOL_VERSION, 99]);
     stream.write_all(&encoded).unwrap();
-    let response = match read_response(&mut stream) {
-        // Startup publication may race the Watch baseline.
-        WireResponse::Watch(_) => read_response(&mut stream),
-        response => response,
-    };
-    assert!(matches!(response, WireResponse::Error(_)));
+    assert!(
+        matches!(read_response(&mut stream), WireResponse::Error(message)
+            if message.contains("Concurrent IPC requests"))
+    );
     assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
     drop(stream);
     assert!(
         control
-            .request_ack(AppCommand::Shutdown)
+            .request_command(AppCommand::Shutdown)
             .unwrap()
             .is_success()
     );
@@ -439,7 +475,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     assert_eq!(page.total, 1);
     assert_eq!(page.rows[0].title, "Needle One");
     let ack = session
-        .request_ack(Command::SetFavorite {
+        .request_command(Command::SetFavorite {
             track_ids: vec![page.rows[0].id],
             favorite: true,
         })
@@ -1223,9 +1259,8 @@ fn remote_config_patch_merges_live_controls_and_keeps_quick_changes_unpersisted(
     let saved = std::fs::read(&config_path).unwrap();
     let (_owner, mut runtime, app, server) = command_service(directory.path(), &config_path, None);
     let mut session = client_session(directory.path());
-    let initial = session.get_state(StateSections::ALL).unwrap();
-    let baseline = initial.configuration.unwrap().config;
-    let mut draft = baseline.as_ref().clone();
+    let baseline = crate::config::Config::load(&config_path).unwrap();
+    let mut draft = baseline.clone();
     draft.scan_max_depth = 7;
     let patch = ConfigPatch::between(&baseline, &draft);
     assert_ack(&mut session, Command::Volume { value: 0.2 }, true);
@@ -1247,12 +1282,17 @@ fn remote_config_patch_merges_live_controls_and_keeps_quick_changes_unpersisted(
     let state = session.get_state(StateSections::ALL).unwrap();
     let config = state.configuration.unwrap().config;
     assert_eq!(config.scan_max_depth, 7);
-    assert_eq!(config.volume, 0.2);
     assert_eq!(
         config.waveform_seek_enabled,
         !baseline.waveform_seek_enabled
     );
-    assert_eq!(crate::config::Config::load(&config_path).unwrap(), *config);
+    let persisted = crate::config::Config::load(&config_path).unwrap();
+    assert_eq!(persisted.volume, 0.2);
+    assert_eq!(persisted.scan_max_depth, config.scan_max_depth);
+    assert_eq!(
+        persisted.waveform_seek_enabled,
+        config.waveform_seek_enabled
+    );
     assert_eq!(state.playback.unwrap().playback.volume, 0.2);
     drop(session);
     drop(server);

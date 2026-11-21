@@ -7,9 +7,10 @@ pub use config_patch::WireConfigMutation;
 
 use crate::{
     AppCommand,
-    model::{Command, ConfigurationState, Query, SystemState},
+    model::{Command, ConfigurationState, DatabaseOptimization, Query, SystemState},
     response::{
-        Ack, QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections, StateWatch,
+        Ack, AckStatus, QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections,
+        StateWatch,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -17,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 50;
+pub const PROTOCOL_VERSION: u8 = 51;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -28,14 +29,13 @@ pub const UNKNOWN_INSTANCE: u32 = 0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestTag {
     Hello = 0,
-    State = 1,
+    ReadState = 1,
     Query = 2,
     Command = 3,
-    Watch = 4,
+    WaitState = 4,
     WaitTask = 5,
-    QueryRetained = 6,
     RegisterDesktop = 7,
-    QueryCancel = 8,
+    CancelRead = 8,
 }
 
 impl TryFrom<u8> for RequestTag {
@@ -44,14 +44,13 @@ impl TryFrom<u8> for RequestTag {
     fn try_from(value: u8) -> Result<Self> {
         Ok(match value {
             0 => Self::Hello,
-            1 => Self::State,
+            1 => Self::ReadState,
             2 => Self::Query,
             3 => Self::Command,
-            4 => Self::Watch,
+            4 => Self::WaitState,
             5 => Self::WaitTask,
-            6 => Self::QueryRetained,
             7 => Self::RegisterDesktop,
-            8 => Self::QueryCancel,
+            8 => Self::CancelRead,
             _ => bail!("Unknown IPC request type {value}"),
         })
     }
@@ -63,8 +62,7 @@ pub enum ResponseTag {
     Hello = 0,
     State = 1,
     Query = 2,
-    Ack = 3,
-    Watch = 4,
+    Command = 3,
     Task = 5,
     Error = 255,
 }
@@ -77,8 +75,7 @@ impl TryFrom<u8> for ResponseTag {
             0 => Self::Hello,
             1 => Self::State,
             2 => Self::Query,
-            3 => Self::Ack,
-            4 => Self::Watch,
+            3 => Self::Command,
             5 => Self::Task,
             255 => Self::Error,
             _ => bail!("Unknown IPC response type {value}"),
@@ -98,19 +95,19 @@ impl SessionState {
 
 pub enum WireRequest {
     Hello(StateSections),
-    State(StateRequest),
-    Query(WireQuery),
+    ReadState(StateRequest),
+    Query(WireReadQuery),
     Command(WireCommand),
-    Watch(StateWatch),
+    WaitState(StateWatch),
     WaitTask(crate::model::TaskTarget),
-    QueryRetained(WireRetainedQuery),
     RegisterDesktop,
     /// Serial control frame: cancels only the matching read and has no reply.
-    QueryCancel(u64),
+    CancelRead(u64),
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct WireRetainedQuery {
+pub struct WireReadQuery {
+    /// Connection-local identity, not reused for a later query.
     pub id: u64,
     pub query: WireQuery,
 }
@@ -1757,13 +1754,183 @@ pub struct HelloResponse {
     pub state: WireStateResponse,
 }
 
+/// A reply from the receiving endpoint, not evidence synthesized by the client.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CommandReply {
+    Receipt(CommandReceipt),
+    Refused(CommandRefusal),
+}
+
+impl CommandReply {
+    pub fn receipt(&self) -> Option<&CommandReceipt> {
+        match self {
+            Self::Receipt(receipt) => Some(receipt),
+            Self::Refused(_) => None,
+        }
+    }
+
+    pub fn relocation_id(&self) -> Option<u64> {
+        match &self.receipt()?.outcome {
+            CommandOutcome::Succeeded(CommandOutput::Relocation(id)) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status() == AckStatus::Succeeded
+    }
+
+    pub fn status(&self) -> AckStatus {
+        match self {
+            Self::Receipt(receipt) => receipt.outcome.status(),
+            Self::Refused(_) => AckStatus::NotAdmitted,
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Receipt(receipt) => receipt.outcome.error(),
+            Self::Refused(refusal) => Some(refusal.message()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CommandRefusal {
+    InvalidCommand(String),
+    /// The command body could not be decoded; the server closes the session.
+    MalformedCommand(String),
+}
+
+impl CommandRefusal {
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidCommand(error) | Self::MalformedCommand(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for CommandRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for CommandRefusal {}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommandReceipt {
+    pub revision: u64,
+    pub outcome: CommandOutcome,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CommandOutcome {
+    Succeeded(CommandOutput),
+    /// Owner failure does not imply rollback: verified source writes may survive.
+    Failed {
+        error: String,
+        source_tags: Option<SourceTagOutput>,
+    },
+    NotAdmitted(String),
+    /// The endpoint could not establish the outcome. Never replay automatically.
+    Unknown(String),
+}
+
+impl CommandOutcome {
+    fn status(&self) -> AckStatus {
+        match self {
+            Self::Succeeded(_) => AckStatus::Succeeded,
+            Self::Failed { .. } => AckStatus::Failed,
+            Self::NotAdmitted(_) => AckStatus::NotAdmitted,
+            Self::Unknown(_) => AckStatus::Unknown,
+        }
+    }
+
+    fn error(&self) -> Option<&str> {
+        match self {
+            Self::Succeeded(_) => None,
+            Self::Failed { error, .. } | Self::NotAdmitted(error) | Self::Unknown(error) => {
+                Some(error)
+            }
+        }
+    }
+
+    pub fn source_tags(&self) -> Option<&SourceTagOutput> {
+        match self {
+            Self::Succeeded(CommandOutput::SourceTags(tags)) => Some(tags),
+            Self::Failed { source_tags, .. } => source_tags.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CommandOutput {
+    None,
+    Scan(u64),
+    Relocation(u64),
+    Processing(u64),
+    DatabaseOptimization(DatabaseOptimization),
+    SourceTags(SourceTagOutput),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceTagOutput {
+    pub tags: Option<rivu_format::tags::TagValues>,
+    pub file_saved: bool,
+    pub refresh_error: Option<String>,
+}
+
+impl From<Ack> for CommandReply {
+    fn from(ack: Ack) -> Self {
+        let source_tags = (ack.source_tags.is_some()
+            || ack.source_file_saved
+            || ack.source_refresh_error.is_some())
+        .then_some(SourceTagOutput {
+            tags: ack.source_tags,
+            file_saved: ack.source_file_saved,
+            refresh_error: ack.source_refresh_error,
+        });
+        let outcome =
+            match ack.status {
+                AckStatus::Succeeded => CommandOutcome::Succeeded(if let Some(id) = ack.scan_id {
+                    CommandOutput::Scan(id)
+                } else if let Some(id) = ack.relocation_id {
+                    CommandOutput::Relocation(id)
+                } else if let Some(id) = ack.processing_id {
+                    CommandOutput::Processing(id)
+                } else if let Some(report) = ack.database_optimization {
+                    CommandOutput::DatabaseOptimization(report)
+                } else if let Some(source_tags) = source_tags {
+                    CommandOutput::SourceTags(source_tags)
+                } else {
+                    CommandOutput::None
+                }),
+                AckStatus::Failed => CommandOutcome::Failed {
+                    error: ack.error.unwrap_or_else(|| "Command failed".into()),
+                    source_tags,
+                },
+                AckStatus::NotAdmitted => CommandOutcome::NotAdmitted(
+                    ack.error.unwrap_or_else(|| "Command not admitted".into()),
+                ),
+                AckStatus::Unknown => CommandOutcome::Unknown(ack.error.unwrap_or_else(|| {
+                    "Command outcome unknown; do not automatically retry".into()
+                })),
+            };
+        Self::Receipt(CommandReceipt {
+            revision: ack.revision,
+            outcome,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum WireResponse {
     Hello(HelloResponse),
     Query(QueryResponse),
     State(WireStateResponse),
-    Ack(Ack),
-    Watch(StateRevisions),
+    Command(CommandReply),
     Task(Result<crate::response::TaskOutcome, crate::response::QueryError>),
     Error(String),
 }
@@ -1772,6 +1939,7 @@ pub enum WireResponse {
 pub struct WireStateResponse {
     revisions: StateRevisions,
     playback: Option<crate::response::PlaybackSnapshot>,
+    current_track: Option<crate::response::CurrentTrackState>,
     queue: Option<crate::model::QueueState>,
     library: Option<crate::model::LibrarySnapshot>,
     system: Option<SystemState>,
@@ -1807,23 +1975,17 @@ impl From<WireSpectrumBarLayout> for rivu_format::config::SpectrumBarLayout {
 
 /// Shared domain storage with an explicit positional binary serialization schema.
 #[derive(Clone, Debug)]
-pub struct WireConfig(Arc<rivu_format::config::Config>);
+pub struct WireConfig(Arc<rivu_format::config::ConfigSettings>);
 
-impl From<Arc<rivu_format::config::Config>> for WireConfig {
-    fn from(value: Arc<rivu_format::config::Config>) -> Self {
+impl From<Arc<rivu_format::config::ConfigSettings>> for WireConfig {
+    fn from(value: Arc<rivu_format::config::ConfigSettings>) -> Self {
         Self(value)
     }
 }
 
-impl From<WireConfig> for Arc<rivu_format::config::Config> {
+impl From<WireConfig> for Arc<rivu_format::config::ConfigSettings> {
     fn from(value: WireConfig) -> Self {
         value.0
-    }
-}
-
-impl From<WireConfig> for rivu_format::config::Config {
-    fn from(value: WireConfig) -> Self {
-        Arc::unwrap_or_clone(value.0)
     }
 }
 
@@ -1849,7 +2011,7 @@ macro_rules! declare_config {
                     $( $(#[$attr])* $field: $ty, )*
                 }
                 let value = OwnedConfig::deserialize(deserializer)?;
-                Ok(Self(Arc::new(rivu_format::config::Config {
+                Ok(Self(Arc::new(rivu_format::config::ConfigSettings {
                     $( $field: config_wire_convert!(from_wire, $field, value.$field), )*
                 })))
             }
@@ -1887,6 +2049,7 @@ pub fn wire_state(response: StateResponse) -> WireStateResponse {
     WireStateResponse {
         revisions: response.revisions,
         playback: response.playback,
+        current_track: response.current_track,
         queue: response.queue,
         library: response.library,
         system: response.system,
@@ -1899,6 +2062,7 @@ pub fn state_response(response: WireStateResponse) -> StateResponse {
     StateResponse {
         revisions: response.revisions,
         playback: response.playback,
+        current_track: response.current_track,
         queue: response.queue,
         library: response.library,
         system: response.system,

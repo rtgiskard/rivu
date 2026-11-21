@@ -366,8 +366,15 @@ pub(super) fn write_error(
         } else {
             serde_json::json!({"error": format!("{error:#}")})
         };
-        if let Some(failure) = error.downcast_ref::<rivu_client::CommandFailure>() {
-            value["status"] = serde_json::to_value(failure.status)?;
+        let command_status = error
+            .downcast_ref::<rivu_client::CommandFailure>()
+            .map(|failure| failure.status)
+            .or_else(|| {
+                error.downcast_ref::<rivu_protocol::wire::CommandRefusal>()?;
+                Some(rivu_protocol::response::AckStatus::NotAdmitted)
+            });
+        if let Some(status) = command_status {
+            value["status"] = serde_json::to_value(status)?;
         }
         serde_json::to_writer(&mut *output, &value)?;
         writeln!(output)?;
@@ -468,6 +475,65 @@ pub(super) fn show_task_ack(
     Ok(())
 }
 
+/// Project typed owner receipts onto the established CLI JSON and text fields.
+pub(super) fn legacy_ack(
+    reply: rivu_protocol::wire::CommandReply,
+) -> Result<rivu_protocol::response::Ack> {
+    use rivu_protocol::{
+        response::{Ack, AckStatus},
+        wire::{CommandOutcome, CommandOutput, CommandReply},
+    };
+
+    let receipt = match reply {
+        CommandReply::Receipt(receipt) => receipt,
+        CommandReply::Refused(refusal) => return Err(refusal.into()),
+    };
+    let revision = receipt.revision;
+    let (mut ack, source_tags) = match receipt.outcome {
+        CommandOutcome::Succeeded(output) => {
+            let mut ack = Ack::new(AckStatus::Succeeded, None, revision);
+            let source_tags = match output {
+                CommandOutput::None => None,
+                CommandOutput::Scan(id) => {
+                    ack.scan_id = Some(id);
+                    None
+                }
+                CommandOutput::Relocation(id) => {
+                    ack.relocation_id = Some(id);
+                    None
+                }
+                CommandOutput::Processing(id) => {
+                    ack.processing_id = Some(id);
+                    None
+                }
+                CommandOutput::DatabaseOptimization(report) => {
+                    ack.database_optimization = Some(report);
+                    None
+                }
+                CommandOutput::SourceTags(tags) => Some(tags),
+            };
+            (ack, source_tags)
+        }
+        CommandOutcome::Failed { error, source_tags } => (
+            Ack::new(AckStatus::Failed, Some(error), revision),
+            source_tags,
+        ),
+        CommandOutcome::NotAdmitted(error) => (
+            Ack::new(AckStatus::NotAdmitted, Some(error), revision),
+            None,
+        ),
+        CommandOutcome::Unknown(error) => {
+            (Ack::new(AckStatus::Unknown, Some(error), revision), None)
+        }
+    };
+    if let Some(source_tags) = source_tags {
+        ack.source_tags = source_tags.tags;
+        ack.source_file_saved = source_tags.file_saved;
+        ack.source_refresh_error = source_tags.refresh_error;
+    }
+    Ok(ack)
+}
+
 pub(super) fn show_ack(
     i18n: &Localizer,
     ack: &rivu_protocol::response::Ack,
@@ -514,6 +580,128 @@ fn write_ack_revision(
     )
 }
 
+fn status_json(response: &StateResponse) -> Result<String> {
+    use rivu_format::config::*;
+    use rivu_protocol::model::{
+        LibrarySnapshot, PlaybackState, ProcessingAudition, QueueState, SystemState, Track,
+    };
+    use rivu_protocol::response::ProcessingState;
+    use serde::Serialize;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::path::PathBuf;
+
+    #[derive(Serialize)]
+    struct StatusRevisions {
+        playback: u64,
+        queue: u64,
+        library: u64,
+        system: u64,
+        configuration: u64,
+        processing: u64,
+    }
+    #[derive(Serialize)]
+    struct StatusPlayback<'a> {
+        playback: &'a PlaybackState,
+        current_track: Option<&'a Track>,
+        source_generation: u64,
+        processing_audition: Option<ProcessingAudition>,
+        processing_selection: Option<ProcessingAudition>,
+    }
+    macro_rules! status_config {
+        ($( $(#[$attr:meta])* pub $field:ident : $ty:ty, )*) => {
+            #[derive(Serialize)]
+            struct StatusConfig<'a> {
+                $( $(#[$attr])* $field: &'a $ty, )*
+            }
+            impl<'a> StatusConfig<'a> {
+                fn new(settings: &'a ConfigSettings, playback: &'a PlaybackState, system: &'a SystemState) -> Self {
+                    macro_rules! value {
+                        (volume) => { &playback.volume };
+                        (shuffle) => { &playback.shuffle };
+                        (repeat) => { &playback.repeat };
+                        (output_device) => { &system.selected_device };
+                        ($field_name:ident) => { &settings.$field_name };
+                    }
+                    Self { $( $field: value!($field), )* }
+                }
+            }
+        };
+    }
+    rivu_format::config_fields!(status_config);
+
+    #[derive(Serialize)]
+    struct StatusConfiguration<'a> {
+        config: StatusConfig<'a>,
+        config_path: &'a Path,
+    }
+    #[derive(Serialize)]
+    struct Status<'a> {
+        revisions: StatusRevisions,
+        playback: StatusPlayback<'a>,
+        queue: Option<&'a QueueState>,
+        library: Option<&'a LibrarySnapshot>,
+        system: &'a SystemState,
+        configuration: Option<StatusConfiguration<'a>>,
+        processing: Option<&'a ProcessingState>,
+    }
+
+    // Keep the CLI schema independent of the IPC section layout.
+    let playback = response
+        .playback
+        .as_ref()
+        .context("State omitted playback section")?;
+    let source = response
+        .current_track
+        .as_ref()
+        .context("State omitted current-track section")?;
+    let system = response
+        .system
+        .as_ref()
+        .context("State omitted system section")?;
+    // Hash only the values the CLI adds to the cold settings projection.
+    let mut configuration = DefaultHasher::new();
+    response.revisions.configuration.hash(&mut configuration);
+    playback.playback.volume.to_bits().hash(&mut configuration);
+    playback.playback.shuffle.hash(&mut configuration);
+    (playback.playback.repeat as u8).hash(&mut configuration);
+    system.selected_device.hash(&mut configuration);
+    // Keep this opaque equality token exactly representable by JSON number consumers.
+    let configuration_revision = configuration.finish() & ((1 << 53) - 1);
+    Ok(serde_json::to_string_pretty(&Status {
+        revisions: StatusRevisions {
+            // CLI playback still includes current-track data. Both IPC tokens
+            // only advance, so their wrapping sum invalidates either change.
+            playback: response
+                .revisions
+                .playback
+                .wrapping_add(response.revisions.current_track),
+            queue: response.revisions.queue,
+            library: response.revisions.library,
+            system: response.revisions.system,
+            configuration: configuration_revision,
+            processing: response.revisions.processing,
+        },
+        playback: StatusPlayback {
+            playback: &playback.playback,
+            current_track: source.track.as_deref(),
+            source_generation: source.source_generation,
+            processing_audition: playback.processing_audition,
+            processing_selection: playback.processing_selection,
+        },
+        queue: response.queue.as_ref(),
+        library: response.library.as_ref(),
+        system,
+        configuration: response
+            .configuration
+            .as_ref()
+            .map(|settings| StatusConfiguration {
+                config: StatusConfig::new(&settings.config, &playback.playback, system),
+                config_path: &settings.config_path,
+            }),
+        processing: response.processing.as_ref(),
+    })?)
+}
+
 pub(super) fn show_state(
     i18n: &Localizer,
     response: &StateResponse,
@@ -521,7 +709,7 @@ pub(super) fn show_state(
 ) -> Result<()> {
     let mut output = io::stdout().lock();
     if mode == OutputMode::Json {
-        writeln!(output, "{}", serde_json::to_string_pretty(response)?)?;
+        writeln!(output, "{}", status_json(response)?)?;
         output.flush()?;
         return Ok(());
     }
@@ -542,7 +730,11 @@ pub(super) fn show_state(
         PlaybackStatus::Playing => i18n.text("core-playing"),
         PlaybackStatus::Paused => i18n.text("core-paused"),
     };
-    if let Some(track) = playback.current_track.as_deref() {
+    if let Some(track) = response
+        .current_track
+        .as_ref()
+        .and_then(|source| source.track.as_deref())
+    {
         writeln!(
             output,
             "{}",
@@ -673,6 +865,116 @@ pub(super) fn show_scan(
 #[cfg(test)]
 mod tests {
     use super::{show_history, write_error};
+
+    #[test]
+    fn status_json_keeps_legacy_track_and_config_shape_with_live_values() {
+        use rivu_protocol::{model::RepeatMode, response::*};
+        let mut response = StateResponse {
+            playback: Some(PlaybackSnapshot {
+                playback: rivu_protocol::model::PlaybackState {
+                    volume: 0.25,
+                    shuffle: true,
+                    repeat: RepeatMode::All,
+                    ..Default::default()
+                },
+                processing_audition: None,
+                processing_selection: None,
+            }),
+            current_track: Some(CurrentTrackState {
+                track: None,
+                source_generation: 13,
+            }),
+            configuration: Some(Default::default()),
+            system: Some(rivu_protocol::model::SystemState {
+                selected_device: Some("live output".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&super::status_json(&response).unwrap()).unwrap();
+        assert!(json.get("current_track").is_none());
+        assert!(json["revisions"].get("current_track").is_none());
+        assert_eq!(json["playback"]["current_track"], serde_json::Value::Null);
+        assert_eq!(json["playback"]["source_generation"], 13);
+        let config = &json["configuration"]["config"];
+        assert_eq!(config["volume"], 0.25);
+        assert_eq!(config["shuffle"], true);
+        assert_eq!(
+            config["repeat"],
+            serde_json::to_value(RepeatMode::All).unwrap()
+        );
+        assert_eq!(config["output_device"], "live output");
+        response.system.as_mut().unwrap().selected_device = None;
+        let json: serde_json::Value =
+            serde_json::from_str(&super::status_json(&response).unwrap()).unwrap();
+        assert!(
+            json["configuration"]["config"]
+                .get("output_device")
+                .is_none()
+        );
+        let revision = |response: &StateResponse| {
+            let json: serde_json::Value =
+                serde_json::from_str(&super::status_json(response).unwrap()).unwrap();
+            json["revisions"]["configuration"].as_u64().unwrap()
+        };
+        let baseline = revision(&response);
+        let mut changed = response.clone();
+        changed.revisions.playback += 1;
+        changed.playback.as_mut().unwrap().playback.position = 10.0;
+        assert_eq!(revision(&changed), baseline);
+        for change in [
+            (|p: &mut rivu_protocol::model::PlaybackState| p.volume = 0.5) as fn(&mut _),
+            |p| p.shuffle = false,
+            |p| p.repeat = RepeatMode::One,
+        ] {
+            let mut changed = response.clone();
+            change(&mut changed.playback.as_mut().unwrap().playback);
+            assert_ne!(revision(&changed), baseline);
+        }
+        changed.system.as_mut().unwrap().selected_device = Some("another device".into());
+        assert_ne!(revision(&changed), baseline);
+        let mut changed = response.clone();
+        changed.revisions.configuration += 1;
+        assert_ne!(revision(&changed), baseline);
+        response.revisions.current_track += 1;
+        response.current_track.as_mut().unwrap().source_generation += 1;
+        let changed: serde_json::Value =
+            serde_json::from_str(&super::status_json(&response).unwrap()).unwrap();
+        assert_ne!(
+            changed["revisions"]["playback"],
+            json["revisions"]["playback"]
+        );
+    }
+
+    #[test]
+    fn command_receipt_json_retains_legacy_fields_and_refusals_have_no_revision() {
+        use rivu_protocol::wire::{
+            CommandOutcome, CommandOutput, CommandReceipt, CommandRefusal, CommandReply,
+        };
+
+        let reply = CommandReply::Receipt(CommandReceipt {
+            revision: 7,
+            outcome: CommandOutcome::Succeeded(CommandOutput::Scan(3)),
+        });
+        let value = serde_json::to_value(super::legacy_ack(reply).unwrap()).unwrap();
+        assert_eq!(value["status"], "Succeeded");
+        assert_eq!(value["revision"], 7);
+        assert_eq!(value["scan_id"], 3);
+        assert!(value["processing_id"].is_null());
+        assert_eq!(value["source_file_saved"], false);
+
+        let refused =
+            CommandReply::Refused(CommandRefusal::InvalidCommand("invalid command".into()));
+        let error = super::legacy_ack(refused).unwrap_err();
+        let mut bytes = Vec::new();
+        write_error(&mut bytes, &error, true).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"status": "NotAdmitted", "error": "invalid command"})
+        );
+    }
 
     #[test]
     fn buffered_error_output_propagates_real_broken_pipe_on_flush() {

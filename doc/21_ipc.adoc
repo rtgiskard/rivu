@@ -161,7 +161,7 @@ Before Hello, each incoming frame has a one-second completion limit. Once bound,
 an incomplete request must finish within five seconds of its first byte, including
 during a Query wait. Further bytes, revision updates, and socket backpressure do
 not renew or suspend the deadline. Expiry closes the connection and releases its
-slot. Idle sessions, Watch, and Query waits without an incomplete following frame
+slot. Idle sessions, WaitState, and Query waits without an incomplete following frame
 do not expire under this rule.
 
 An oversized prefix closes immediately, before consuming its body. Invalid headers,
@@ -169,14 +169,14 @@ types, versions, malformed Postcard, and trailing payload bytes within the limit
 are fatal to the exchange. The ordinary request loop sends Error before closing
 where possible; failures during an in-flight exchange can close without Error.
 
-Query read-ahead is bounded to one maximum request frame plus its prefix. Complete
-frames wait untimed and in order behind earlier replies; incomplete tails retain
-their deadline even when the buffer is full. A framing failure drops the pending
-reply receiver and revokes the read through
+During a long wait, the server reads at most one following frame at a time.
+An incomplete frame retains its deadline; a complete ordinary request observed
+while the wait is pending is rejected instead of queued. A framing failure drops
+the pending query reply receiver and revokes the read through
 <<retained-read-cancellation,cooperative cancellation>>, never replaying SQL.
 
 Query waits share a cooperative budget of 32 read-ahead or cancellation steps,
-including runs of already-buffered `QueryCancel` frames. They yield when that
+including runs of already-buffered `CancelRead` frames. They yield when that
 budget is exhausted and check query completion and shutdown between batches, so
 continuously ready cancellation traffic cannot monopolize the shared executor.
 Cancellation still revokes only the matching retained read and keeps its physical
@@ -214,9 +214,10 @@ process death; no stale-file cleanup is needed.
 Ownership is scoped to a Linux network namespace. Instances in different network
 namespaces must not share a data directory.
 
-Sessions process requests serially, without request IDs or multiplexing. Partial
-input survives cancelled reads. Framing enforces the direction's size limit while
-encoding and decodes complete frames directly into owned messages.
+Sessions process requests serially, without multiplexing. Query IDs identify
+cancellation targets, not reply slots. Partial input survives cancelled reads.
+Framing enforces the direction's size limit while encoding and decodes complete
+frames directly into owned messages.
 
 Send buffers above 256 KiB are released after write/flush; receive buffers above
 that capacity are released once pending bytes drain. Smaller buffers are reused.
@@ -227,8 +228,8 @@ bulk transfers can allocate again and allocator pages may remain resident.
 [[session-handshake]]
 === Session handshake
 
-A client session starts unbound and must send Hello before State, Query, Command,
-or Watch. Hello can request initial state sections, including none. A non-Hello
+A client session starts unbound and must send Hello before ReadState, Query, Command,
+or WaitState. Hello can request initial state sections, including none. A non-Hello
 request before binding or a second Hello receives Error, but does not close the
 session. The first successful Hello binds it.
 
@@ -240,10 +241,10 @@ The Hello response contains a random nonzero `u32` instance ID encoded as four
 little-endian bytes, generated once per server start. Zero is invalid. Its role
 and equality semantics are defined in <<identity-and-freshness,Identity and freshness>>.
 
-The TUI uses independent retained command, query, and Watch sessions. The Watch
-Hello supplies initial state and pins the instance. Command and query sessions
-must bind to that instance; Watch never automatically reconnects. TUI State and
-Watch requests exclude Processing, so processing-only updates do not wake them.
+The TUI uses independent command, query, and state observation sessions. The
+observation session's Hello supplies initial state and pins the instance. Command
+and query sessions bind to that instance; the observation session never reconnects
+automatically. The TUI excludes Processing, so processing-only updates do not wake it.
 Frontend exit and failure policy belongs to
 link:20_architecture.adoc#consumer-and-application-lifetimes[Consumer and application lifetimes].
 
@@ -252,34 +253,27 @@ link:20_architecture.adoc#consumer-and-application-lifetimes[Consumer and applic
 Request types:
 
 * `Hello` (`0`) — initialize a session and optionally read selected state sections
-* `State` (`1`) — immediately read selected state sections, optionally only those
+* `ReadState` (`1`) — immediately read selected state sections, optionally only those
   whose revisions differ from the client's applied versions
-* `Query` (`2`) — execute a read-only query
-* `Command` (`3`) — execute a state-changing command
-* `Watch` (`4`) — wait for a change in selected sections, carrying their prior revisions
+* `Query` (`2`) — execute an identified read-only query
+* `Command` (`3`) — submit a state-changing command
+* `WaitState` (`4`) — wait for changed selected sections and return their payloads
 * `WaitTask` (`5`) — wait for a specific scan, relocation, or processing task's terminal result
-* `QueryRetained` (`6`) — execute an identified query while preserving its physical
-  worker ownership through reply, including after cancellation or logical timeout
-* `RegisterDesktop` (`7`) — register an instance-bound desktop activation session;
-  returns `Ack`
-* `QueryCancel` (`8`) — revoke only the identified retained read on this session;
-  no reply is emitted, and later queries are unaffected
+* `RegisterDesktop` (`7`) — register an instance-bound desktop activation session
+* `CancelRead` (`8`) — revoke only the matching query on this session; emits no reply
 
 Response types:
 
 * `Hello` (`0`) — returns the server instance ID and selected state
-* `State` (`1`) — returns selected state sections
+* `State` (`1`) — returns selected state sections for either `ReadState` or `WaitState`
 * `Query` (`2`) — returns query revisions and the query result
-* `Ack` (`3`) — returns command outcome, error, publication revision, optional
-  `scan_id`, `relocation_id`, or `processing_id`, and the completed operation's
-  optional database-optimization report
-* `Watch` (`4`) — returns changed state revisions
+* `Command` (`3`) — returns a typed receipt or refusal for `Command` or `RegisterDesktop`
 * `Task` (`5`) — returns the task-specific terminal status or a task-wait error
 * `Error` (`255`) — returns a protocol or request error
 
-These numbers are the frame's `message_type` byte, represented by `wire::RequestTag`
-and `wire::ResponseTag`, not Postcard enum ordinals inside a body. Wire enum variant
-and field order are part of the binary schema.
+`wire::RequestTag` and `wire::ResponseTag` define the frame's `message_type` byte,
+separately from Postcard enum ordinals. Wire variant and field order are part of
+the binary schema.
 
 [[wire-schemas]]
 === Wire schemas
@@ -289,30 +283,35 @@ offsets and filtered totals. Full-track traversal uses `TrackBatch` and its
 continuation contract; single full-track reads use `Track`. These are distinct
 projections, not interchangeable offset-page aliases.
 
-`State` carries `StateRequest { sections, since }` in that field order. With
+`ReadState` carries `StateRequest { sections, since }` in that field order. With
 `since: None`, it returns every selected section. With `since: Some(revisions)`,
 it returns only selected sections whose current tokens differ from that baseline.
 The revision comparison, payload selection and response tokens come from one
 shared-state read lock; serialization and transport occur after releasing it.
 An unchanged request returns current revisions without section payloads, never
-waits for a future publication, and does not establish a Watch subscription.
+waits for a future publication, and does not establish a revision subscription.
 Use a baseline from the bound instance only. `ClientSession::get_state_since`
 uses an unconditional selected-section Hello when the session is unbound.
 
-Configuration state carries the low-frequency settings `Config` and `config_path`
-through the positional `WireConfig` adapter. Its copies of volume, shuffle, repeat
-and output-device preference may lag live controls: current values are
-`playback.volume`, `playback.shuffle`, `playback.repeat` and
-`system.selected_device`. These controls do not advance the Configuration token.
-Apply and persistence merge them with settings at Core's checkpoint boundary;
-clients must not treat `configuration.config` as a live-control snapshot.
-`playback.speed` is a live control without a configuration counterpart: Core
-starts each session at `1.0` and never saves it.
-Runtime `SystemState` contains no configuration payload. Both section schemas
-are versioned positional contracts; lengths and optional fields are in the body.
-Full configuration encoding borrows fields from the shared immutable snapshot;
-decoding owns an independent configuration. The positional adapter remains
-separate from the human-readable configuration schema.
+Configuration state carries low-frequency settings and `config_path`. The
+decoded settings type has no volume, shuffle, repeat or output-device fields.
+Read the first three from Playback and the selected device from System. These
+controls do not advance the Configuration token. Core merges them with settings
+for Apply and persistence without changing the disk format. Playback speed starts
+at `1.0` and is never saved.
+
+Current-track metadata has its own section and token. Progress does not resend
+unchanged metadata, and a metadata edit can advance its token without replacing
+the playback source. When both sections change, a read selecting both gets the
+new values from one publication.
+
+The CLI's `status --json` includes current-track data inside `playback`. Its
+`revisions.playback` changes when either Playback or current-track state changes;
+it is not an IPC section token.
+Its `revisions.configuration` is an opaque equality token covering cold settings
+and the live controls included in `configuration.config`; playback progress
+alone does not invalidate it. Neither CLI token is an IPC section token.
+
 Processing is an independent selected state section and revision domain, with
 its own client snapshot field. Its payload is `processing.task`; a requested
 empty Processing section explicitly clears the task, while an omitted section
@@ -389,40 +388,42 @@ numeric values must be finite. It does not write the source file.
 mutation. `SyncTrackTags` commits the displayed tag values, including ReplayGain,
 against an expected database baseline.
 `SaveSourceTags` writes the file on a worker, then synchronizes verified values.
-Its ACK includes `source_tags` and sets `source_file_saved` once the file is
-verified, including when its bytes were unchanged. After a database failure,
-`SystemState.source_tag_recovery` exposes the one pending save's track ID,
-verified tags and database error, even to clients that did not receive the save
-ACK. The snapshot lives in the running Core until database commit.
+The command receipt carries `SourceTags` in `Succeeded(SourceTags(...))` or
+`Failed { source_tags: Some(...), .. }`. Its `file_saved` flag means the file
+was verified, including when its bytes were unchanged. After a database failure,
+`SystemState.source_tag_recovery` exposes the pending save's track ID, verified
+tags and database error, even to clients that did not receive the receipt.
+The snapshot lives in the running Core until database commit.
 `RetrySourceTagSync` matches the track ID and verified values and retries only
 the database writes. An ordinary `SyncTrackTags` cannot override the pending
 save for that track.
-After commit the ACK reports success even if projection refresh failed, with
-the warning in `source_refresh_error`; do not retry the write in that case.
+After commit the receipt reports success even if projection refresh failed,
+with the warning in `SourceTags.refresh_error`. If `file_saved` is set, do not
+repeat the file write; retry only the database sync if it is still pending.
 
 Exact positional schemas and adapters are defined in
 link:../crates/rivu-protocol/src/wire.rs[wire.rs];
 link:../crates/rivu-protocol/src/transport.rs[transport.rs] owns framing and deadlines.
 
 [[retained-read-cancellation]]
-=== Retained reads and cancellation
+=== Query lifecycle and cancellation
 
-`QueryRetained {id, query}` keeps the serial reply slot until Core returns a
-result or the connection closes. Unlike ordinary `Query`, it has no server or
-client response-wait deadline after Core admission. A logical UI timeout revokes
-publication rights, not physical ownership.
+An identified `Query` keeps its serial reply slot until the result arrives or
+the connection closes. A client deadline can end its wait but does not establish
+that the Core has retired the query. A logical UI timeout revokes publication
+rights, not physical ownership.
 
-While that request is pending, `QueryCancel(id)` on the same session cancels only
-the matching retained read. It emits no reply; the original Query response still
-retires the exchange. Unmatched or late cancellation is inert. Clients drain that
-response before sending replacement demand; cancellation does not multiplex queries.
-`rivu_client::ClientSession::query_retained_until` performs this exchange.
+`CancelRead(id)` on the same session cancels only the matching read and emits no
+reply. Use a distinct query ID for each read on a connection so late cancellation
+cannot match replacement demand. Drain the original reply before issuing the
+next query on that connection.
 
 Cancellation reaches Core's queued read and executing SQL. A request-scoped SQLite
 progress handler checks cancellation between bounded VM instruction batches and is
-detached before snapshot cleanup. Disconnection or server shutdown drops the reply
-receiver and also revokes the read. The query owner releases its physical lease
-only after SQL exit and snapshot cleanup, before replying or starting the next read.
+detached before snapshot cleanup. Disconnection revokes the read by dropping the
+reply receiver. Core shutdown also revokes queued and executing queries before
+joining the read worker, even if the connection is still open. The worker
+releases its physical lease only after SQL exit and snapshot cleanup.
 Cancellation is cooperative, not a hard filesystem/I/O deadline, and never cancels
 an accepted command. Frontend admission, timeout presentation and retained payloads
 are described in link:22_cache.adoc#demand-cancellation-and-physical-retirement[Query resource lifecycles].
@@ -430,28 +431,28 @@ are described in link:22_cache.adoc#demand-cancellation-and-physical-retirement[
 [[request-failures-and-completion]]
 === Request failures and completion
 
-Well-formed requests with invalid values, handshake-order errors, and server-side
-dispatch failures receive Error without ending the session. Core query failures
-instead appear in the Query result, and core command failures in an unsuccessful
-Ack. Transport failure or an oversized response can end the connection without
-a usable response.
+Protocol errors are distinct from query results and command receipts. Both
+`InvalidCommand` (decoded but invalid values) and `MalformedCommand` (undecodable
+body) refuse admission; only the latter ends the session. A protocol error
+reply to `WaitState` also ends the session. Transport failure or an oversized
+response can end the connection without a usable reply.
 
 Admission to the serial Core request queue allows two seconds, followed by
 twelve seconds for an ordinary reply or 120 seconds for `LoadSourceTags`,
-`SaveSourceTags`, and database optimization. Ordinary and retained queries both
-pass through Core admission before dispatch can try the read-worker queue. Either
-stage can reject admission independently; see
+`SaveSourceTags`, and database optimization. All queries pass through Core
+admission before dispatch can try the read-worker queue. Either stage can reject
+admission independently; see
 link:20_architecture.adoc[Core and client architecture].
 UI fire-and-forget sends fail with `Rivu is busy or stopped`
 rather than blocking. IPC adds one second to the operation's waiting budget for
 the server bridge; it does not classify commands again. Local ShowWindow and
-Shutdown allow twelve seconds without Core queue admission. State and Hello read
-published state directly. Retained reads use the admission budget but await physical
+Shutdown allow twelve seconds without Core queue admission. State reads and Hello
+read published state directly. Queries use the admission budget but await physical
 completion as described <<retained-read-cancellation,above>>.
 Each server response write, including Hello, Error, busy replies, and shutdown
 acknowledgements, has a five-second completion deadline covering write and flush.
 Client request writes use the same five-second write-and-flush deadline, including
-Hello, Watch, and WaitTask requests; serialization precedes it. A stalled write
+Hello, WaitState, and WaitTask requests; serialization precedes it. A stalled write
 discards that connection, so server writes cannot block teardown indefinitely.
 Shutdown does not immediately cancel accepted replies. The transport stops
 accepting new sessions and gives existing connections up to 120 seconds to
@@ -463,45 +464,37 @@ second:
 [cols="2,1",options="header"]
 |===
 |Request |Client response-wait limit
-|Ordinary Query, State, Hello and ordinary commands |21 seconds
+|Bounded Query, ReadState, Hello and ordinary commands |21 seconds
 |LoadSourceTags, SaveSourceTags and database optimization |129 seconds
 |ShowWindow and Shutdown |19 seconds
-|QueryRetained, Watch and WaitTask |No response-wait deadline
+|Interactive Query, WaitState and WaitTask |No response-wait deadline
 |===
 
 Persistent and one-shot sessions use the same policy. These are waiting limits,
 not guarantees on execution time or scheduling; retained-read UI timeouts remain
 separate from the exchange lifetime.
 
-`Ack.status` is `Succeeded`, `Failed`, `NotAdmitted`, or `Unknown`. `Succeeded`
-means the owner returned success; scan/import/relocation startup still requires
-its task's terminal result. `Failed` means the owner returned an error, not that
-all effects were rolled back. `NotAdmitted` means no business request was admitted.
-Once admitted, a missing response is `Unknown`: the operation may still execute.
-Do not automatically repeat a mutation; inspect authoritative state or the output.
-If startup timed out before its task ID arrived and reconciliation is unavailable,
-keep the result unknown rather than guessing that no task started.
+The server distinguishes a refusal before admission from an admitted command's
+outcome. A command failure does not imply rollback; a source-tag result can
+report that the file was saved even when synchronization did not finish. Task
+admission carries the specific task identity and does not imply terminal success.
+Cached or synchronous audition does not admit a processing task.
 
-For commands with an explicit frontend reply, the GUI keeps the owner's Ack and
-post-command observation separate in `CommandDelivery {ack, observation}`.
-It requests `State` even after a failed Ack, since the command may have committed
-some changes. Observation is `Refreshed`, `Unavailable` or `NotRequested`; an
-unavailable refresh does not rewrite the Ack or replay the command. Local
-publications cannot substitute for a fresh observation. Draft clearing, rebase,
-field writeback and undo require both fresh observation and the original editing
-identity. Fire-and-forget commands, including ordinary playback controls, still
-receive the owner's Ack and report failures locally, but rely on the Watch-driven
-state stream rather than requesting post-command `State`. Shutdown needs only its
-admission Ack, not a state read from an already retiring instance.
+Client exchange failures carry no Core publication revision or task identity.
+Before the first socket write attempt, the command was not sent. After that
+attempt, loss of a usable reply leaves the outcome unknown, even if the client
+cannot prove bytes reached the peer. Never automatically repeat a mutation.
+Inspect authoritative state or the output instead.
 
-An acknowledgement's `processing_id` identifies processing work admitted by that
-command, not another active task. Cached graph audition and synchronous audition
-omit it; callers must not infer task creation from the command type alone.
-
-Client command failures before handshake or encoding completes are `NotAdmitted`.
-Once a socket write is attempted, write, flush, response, and cancellation failures
-are conservatively `Unknown`, even without evidence that bytes reached the peer.
-The client's `CommandFailure` carries no invented Core revision or task ID.
+The GUI keeps the command result and post-command observation separate. For an
+explicit command reply, it may read state after failure because the operation
+could have committed changes. An unavailable refresh does not rewrite the
+result. Draft clearing, rebase, field writeback and undo require fresh
+observation and the original editing identity. If a source-tag save or sync
+succeeds but observation fails, the GUI keeps the draft and reports the refresh
+failure; it does not repeat the write. Ordinary playback controls rely on the
+state observation session instead of issuing an explicit state read.
+Shutdown needs only its admission receipt, not a read of a retiring instance.
 `Shutdown` is an App lifecycle request. After its local pending-edit guards,
 the GUI's `Quit application` sends it through the instance-bound command worker;
 `Close window` does not send Shutdown. Neither action confirms unsubmitted
@@ -514,17 +507,18 @@ The earlier successful shutdown acknowledgement is not changed by that result.
 If read-worker startup fails, the host still attempts final persistence and retains
 both the startup cause and any finalization failure in its returned error.
 
-A valid protocol `Error` on a bound State or Query exchange returns a request
-error without discarding the socket. Transport failures and unexpected response
-types discard the connection and its current Hello identity. An explicit
-`bind_instance` expectation survives that drop: a later request can reconnect
-and perform Hello, but must still match that instance. Failed commands are never
-automatically replayed.
+A protocol `Error` on a bound `ReadState` exchange returns a request error without
+discarding the socket. For `Query`, a protocol `Error` discards the connection;
+typed business failures in the Query result do not. Transport failures and
+unexpected response types discard the connection and its current Hello identity.
+An explicit `bind_instance` expectation survives that drop: a later request can
+reconnect and perform Hello, but must still match that instance. Failed commands
+are never automatically replayed.
 
 `rivu_client::SessionCancellation` permanently cancels a client session and wakes
 current and future waits, discarding its connection. It does not cancel accepted
 commands. Per-read cancellation instead uses
-<<retained-read-cancellation,QueryCancel>> and retains the original reply wait.
+<<retained-read-cancellation,CancelRead>> and retains the original reply wait.
 
 == Consistency
 
@@ -542,9 +536,9 @@ They are not one ordered version chain.
 |Equality only; not ordered, globally unique or an authentication credential.
 Restart requires a fresh Hello and state read; task IDs and retained results
 belong to that instance, not a persistent job database.
-|Core publication sequence: `SystemState.revision`, Ack `revision`
+|Core publication sequence: `SystemState.revision`
 |Has Core assembled a newer publication?
-|A wakeup/publication sequence, not query-data freshness. An Ack carries outcome
+|A wakeup/publication sequence, not query-data freshness. A command receipt carries outcome
 and diagnostics, never replacement state. Distinct from the System section token.
 |State-section tokens: `StateRevisions`
 |Which requested state sections changed?
@@ -563,38 +557,34 @@ data is fresh. Invalidating intent or a receipt does not release physical work.
 [[revisions-and-watching]]
 === Revisions and watching
 
-State revisions are tracked independently for Playback, Queue, Library, System,
-Configuration, and Processing sections, in that positional order. Section selection
-uses the same order. Tokens are compared for equality, not ordered as clocks.
-A Watch request carries expected revisions and selected sections; only a changed
-selected section completes it. Its response contains the latest revisions rather
-than an event log.
+Playback, current-track metadata, Queue, Library, System, Configuration and
+Processing have independent state tokens. Tokens are compared for equality,
+not ordered as clocks.
+`WaitState` waits for a change from the caller's applied baseline in any selected
+section. It returns the latest matching delta, not an event log.
 
 The `system` token invalidates only the System section; its distinction from
 the Core publication sequence is defined in <<identity-and-freshness,the identity table>>.
 
-Clients initialize from an unconditional state read, watch for revision changes,
-then request State with their interests and applied revisions. The conditional
-read returns current changed sections directly, without a separate revision
-probe; a delayed Watch notification need not retransmit already applied payloads.
-Clients apply the section/token pairing rules in <<identity-and-freshness,the
-identity table>>. Notifications coalesce to the latest state. `ObservedState`
-binds its private payload and applied tokens to one instance and advances them
-in one apply operation.
-GUI reads and merges are serialized together: a late Watch notification causes
-a conditional read under that same ordering boundary, not a merge of old payload.
+Clients initialize from an unconditional state read, then issue `WaitState`
+with their selected sections and applied tokens. The wait returns changed
+sections from one publication; it does not require a follow-up read.
+`ObservedState` binds its payload and applied tokens to one instance and
+advances a token only when applying its section.
+The GUI checks the wait's baseline while holding the same lock used for
+explicit command observation. If an intervening read already advanced that
+baseline, the GUI discards the wait response and starts from the current tokens.
 
-Configuration changes advance their own token and wake Watch even when runtime
-System fields are unchanged. Runtime progress does not materialize or transmit
+Configuration changes complete a matching `WaitState` even when runtime System
+fields are unchanged. Runtime progress does not materialize or transmit
 the unchanged configuration. Request Configuration on initial/full state reads
 and after its token changes; a runtime-only response cannot clear a retained
 configuration or acknowledge an unread configuration revision. Selected sections,
 including simultaneous runtime/configuration changes, come from one publication.
 
-Each in-flight Watch owns its revision subscription. Reply, disconnection or
-cancellation drops the receiver immediately. The closed registration is pruned
-on the next subscription or state-changing publication; it cannot wake the
-retired Watch while awaiting that physical removal.
+Each in-flight `WaitState` owns its revision subscription. Reply or disconnection
+drops the receiver immediately. The closed registration is pruned on the next
+subscription or state-changing publication.
 
 The Queue state section is constant-size: `{total, current_id, current_position,
 revision}`. It never embeds all occurrence IDs or track metadata. Queue content
@@ -651,8 +641,8 @@ Failed catalog counts, recent entries and current-track refreshes retain bounded
 pending synchronization state. A later query or business-control demand can retry
 those reads without replaying the mutation or advancing catalog versions again.
 Summary/history recovery shares the single query owner and publication fence;
-completion is accepted only for the corresponding data versions. State reads and
-Watch remain cache-only, and recovery completion never schedules another attempt
+completion is accepted only for the corresponding data versions. `ReadState` and
+`WaitState` remain cache-only, and recovery completion never schedules another attempt
 by itself. Unrelated catalog changes need not reload queue structure or decode
 the current Track; control decisions retain their own authoritative identity.
 Queue queries recover stale structure before returning rows, preserving surviving
@@ -670,10 +660,9 @@ The bounded track cache and current/recent snapshots receive these scalar change
 without reloading complete metadata. Count threshold and activity timing remain
 independent.
 
-Watch has no fixed expiry. A decoded `QueryCancel` receives no reply and leaves
-the pending Watch active. Any other complete request on that connection supersedes
-the Watch without a Watch response and becomes the next request. Disconnect or
-server shutdown terminates the wait.
+`WaitState` has no fixed expiry. A decoded `CancelRead` does not interrupt it.
+A new ordinary request while a wait is pending is a protocol error, not an
+implicit replacement. Disconnect or server shutdown terminates the wait.
 
 [[query-results-and-pagination]]
 === Query results and pagination
@@ -789,7 +778,7 @@ retains its summary baseline while capturing each playlist's entry baseline
 separately. Clients match the error variant, not diagnostic text. Other failures
 return `QueryError::Message`; owner-scoped cancellation can return
 `QueryError::Cancelled` before dispatch or during execution, including through
-<<retained-read-cancellation,QueryCancel>> for retained IPC reads.
+<<retained-read-cancellation,CancelRead>> for IPC reads.
 Without `expected`, track and summary batches do not reserve consistency between
 requests; occurrence continuations still enforce their embedded scope. All use
 bounded results and explicit restart, not a database snapshot retained for an
@@ -1010,8 +999,8 @@ of display filters, with the same union ordering and deduplication as other sour
 and inserts occurrences in input order, preserving duplicates. An absent `index`
 appends; insertion requires `expected_revision`. Registration and queue insertion
 commit atomically; stale revisions reject the whole commit without an append fallback.
-The accepted command returns `Ack.scan_id`; completion and cancellation use the
-shared media-task lifecycle below. User-visible file admission rules are in
+The acceptance receipt carries the scan task ID; completion and cancellation
+use the shared media-task lifecycle below. User-visible file admission rules are in
 link:04_playback.adoc#adding-local-files[Adding local files].
 
 `InsertQueue {track_ids, index, expected_revision}` and
@@ -1118,7 +1107,7 @@ Saving still validates queue insertion positions and database identities against
 the transaction.
 
 Accepted scan, playlist-import, file-check, and external-admission commands return
-`Ack.scan_id` with their `u64` task ID. Acceptance is not completion. The CLI sends
+the admitted scan task's `u64` ID. Acceptance is not completion. The CLI sends
 `WaitTask` on the same session and receives that exact task's terminal result:
 only `Completed` succeeds; `Failed` and `Cancelled` report the task's error or
 message. Global scanning state and `last_error` are presentation fields, not
@@ -1153,7 +1142,7 @@ restart. A confirmed commit survives later projection or worker-retirement failu
 missing views recover on demand without replaying admission. After an unknown
 outcome, reopen and inspect committed data before submitting any missing operation.
 `CancelScan` requests cancellation before Saving and is rejected during Saving;
-its Ack never proves worker retirement. Only the task terminal result resolves it.
+its receipt never proves worker retirement. Only the task terminal result resolves it.
 A failed wait never automatically replays startup.
 
 Shutdown cancels and joins scan preparation, but drains accepted Saving completion
@@ -1222,7 +1211,7 @@ before replacement playback, deletion, relocation, or Saving can retire its
 track identity. User mutations are never replayed automatically.
 
 Relocation verification is Core-owned and single-flight. Acceptance returns
-`Ack.relocation_id`; exact task queries and System status expose completion, with
+the relocation task ID; exact task queries and System status expose completion, with
 32 terminal results retained. Hashing is cancellable in at most 4 MiB stages with
 one 128 KiB buffer; started stages retire before admission is released. The verified
 descriptor survives to commit, where source absence, path/descriptor identity,
@@ -1342,7 +1331,7 @@ link:07_audio_processing.adoc#playback-bypass[Playback bypass] for desktop/CLI u
 
 `StartProcessing { track_id, operation, profile }` accepts `denoise`, `speech` or
 `separate`; profile is null or `{start_seconds,end_seconds}` in source-relative
-seconds. Acceptance returns `Ack.processing_id`, not completed output.
+seconds. Acceptance returns the processing task ID, not completed output.
 `Query::ProcessingTask { id }` returns an optional task status: unknown or no-longer
 retained IDs return `None`, unlike unknown scan and relocation task queries.
 `CancelProcessing { id }` requests cooperative cancellation of the matching active

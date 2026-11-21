@@ -8,7 +8,7 @@ use futures::{
 };
 use parking_lot::{Mutex, RwLock};
 use rivu_analysis::{AnalysisEngine, AnalysisFrame, AnalysisSettings, DisplayDemand};
-use rivu_format::config::Config;
+use rivu_format::config::ConfigSettings;
 use rivu_protocol::audio::PlaybackRange;
 use rivu_protocol::model::Track;
 use rivu_protocol::pcm::{
@@ -45,7 +45,7 @@ struct Desired {
 }
 impl Default for Desired {
     fn default() -> Self {
-        let config = Config::default();
+        let config = ConfigSettings::default();
         Self {
             demand: DisplayDemand::default(),
             revision: 0,
@@ -282,7 +282,7 @@ impl VisualClient {
         drop(desired);
         let _ = self.notifications.try_send(());
     }
-    pub(crate) fn configure(&self, config: &Config) {
+    pub(crate) fn configure(&self, config: &ConfigSettings) {
         let settings = AnalysisSettings::from(config);
         let mut desired = self.state.desired.lock();
         if desired.settings == settings
@@ -751,7 +751,7 @@ mod worker_panic_tests {
                 settings: AnalysisSettings {
                     fps: 60,
                     fft_size: 512,
-                    ..AnalysisSettings::from(&Config::default())
+                    ..AnalysisSettings::from(&ConfigSettings::default())
                 },
                 ..Desired::default()
             }),

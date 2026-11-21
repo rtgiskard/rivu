@@ -11,6 +11,7 @@ use std::{fmt, sync::Arc};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateRevisions {
     pub playback: u64,
+    pub current_track: u64,
     pub queue: u64,
     pub library: u64,
     /// System-section revision; distinct from `SystemState::revision`, which is a publication sequence.
@@ -22,6 +23,7 @@ pub struct StateRevisions {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateSections {
     pub playback: bool,
+    pub current_track: bool,
     pub queue: bool,
     pub library: bool,
     pub system: bool,
@@ -32,6 +34,7 @@ pub struct StateSections {
 impl StateSections {
     pub const ALL: Self = Self {
         playback: true,
+        current_track: true,
         queue: true,
         library: true,
         system: true,
@@ -40,6 +43,7 @@ impl StateSections {
     };
     pub fn is_empty(self) -> bool {
         !self.playback
+            && !self.current_track
             && !self.queue
             && !self.library
             && !self.system
@@ -50,6 +54,7 @@ impl StateSections {
     pub fn intersection(self, other: Self) -> Self {
         Self {
             playback: self.playback && other.playback,
+            current_track: self.current_track && other.current_track,
             queue: self.queue && other.queue,
             library: self.library && other.library,
             system: self.system && other.system,
@@ -98,6 +103,7 @@ impl StateRevisions {
     pub fn changed_since(self, previous: Self) -> StateSections {
         StateSections {
             playback: self.playback != previous.playback,
+            current_track: self.current_track != previous.current_track,
             queue: self.queue != previous.queue,
             library: self.library != previous.library,
             system: self.system != previous.system,
@@ -330,10 +336,15 @@ pub struct QueryResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlaybackSnapshot {
     pub playback: PlaybackState,
-    pub current_track: Option<Arc<Track>>,
-    pub source_generation: u64,
     pub processing_audition: Option<crate::model::ProcessingAudition>,
     pub processing_selection: Option<crate::model::ProcessingAudition>,
+}
+
+/// Independently observed source ownership and metadata; no track is authoritative.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CurrentTrackState {
+    pub track: Option<Arc<Track>>,
+    pub source_generation: u64,
 }
 
 /// Requested independently from system state, including an authoritative empty task.
@@ -348,6 +359,7 @@ pub struct ProcessingState {
 pub struct StateResponse {
     pub revisions: StateRevisions,
     pub playback: Option<PlaybackSnapshot>,
+    pub current_track: Option<CurrentTrackState>,
     pub queue: Option<QueueState>,
     pub library: Option<LibrarySnapshot>,
     pub system: Option<SystemState>,
@@ -359,6 +371,7 @@ impl StateResponse {
     pub fn sections(&self) -> StateSections {
         StateSections {
             playback: self.playback.is_some(),
+            current_track: self.current_track.is_some(),
             queue: self.queue.is_some(),
             library: self.library.is_some(),
             system: self.system.is_some(),
@@ -409,13 +422,16 @@ impl ObservedState {
         let applied = &mut self.applied;
         if let Some(section) = response.playback {
             state.playback = section.playback;
-            if state.current_track != section.current_track {
-                state.current_track = section.current_track;
-            }
-            state.source_generation = section.source_generation;
             state.processing_audition = section.processing_audition;
             state.processing_selection = section.processing_selection;
             applied.playback = current.playback;
+        }
+        if let Some(section) = response.current_track {
+            if state.current_track != section.track {
+                state.current_track = section.track;
+            }
+            state.source_generation = section.source_generation;
+            applied.current_track = current.current_track;
         }
         if let Some(section) = response.queue {
             state.queue = section;
@@ -509,6 +525,7 @@ mod tests {
     fn partial_read_does_not_acknowledge_unread_concurrent_changes() {
         let applied = StateRevisions {
             playback: 1,
+            current_track: 1,
             queue: 1,
             library: 1,
             system: 1,
@@ -525,10 +542,11 @@ mod tests {
             ..applied
         };
         let requested = notified.changed_since(applied);
-        // Queue changes after the notification but before the playback-only read.
+        // Queue and source change after the notification but before the playback-only read.
         let response = StateResponse {
             revisions: StateRevisions {
                 queue: 2,
+                current_track: 2,
                 ..notified
             },
             playback: Some(PlaybackSnapshot {
@@ -536,8 +554,6 @@ mod tests {
                     position: 8.0,
                     ..PlaybackState::default()
                 },
-                current_track: None,
-                source_generation: 0,
                 processing_audition: None,
                 processing_selection: None,
             }),
@@ -551,6 +567,7 @@ mod tests {
             next.changed_since(observed.applied()),
             StateSections {
                 queue: true,
+                current_track: true,
                 ..StateSections::default()
             }
         );
@@ -563,7 +580,7 @@ mod tests {
             7,
             StateResponse {
                 configuration: Some(ConfigurationState {
-                    config: Arc::new(rivu_format::config::Config {
+                    config: Arc::new(rivu_format::config::ConfigSettings {
                         query_batch_size: 37,
                         ..Default::default()
                     }),
@@ -609,7 +626,7 @@ mod tests {
                 ..current
             },
             configuration: Some(ConfigurationState {
-                config: Arc::new(rivu_format::config::Config {
+                config: Arc::new(rivu_format::config::ConfigSettings {
                     query_batch_size: 91,
                     ..Default::default()
                 }),

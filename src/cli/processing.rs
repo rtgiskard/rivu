@@ -10,7 +10,7 @@ use std::{io::Write, path::Path};
 
 fn show_settings(
     i18n: &Localizer,
-    config: &rivu::config::Config,
+    config: &ConfigSettings,
     task: Option<&ProcessingTaskStatus>,
     instance_id: u32,
     graph_only: bool,
@@ -427,7 +427,7 @@ fn run_live(
             }
         }
     };
-    let ack = session.request_ack(command)?;
+    let ack = super::output::legacy_ack(session.request_command(command)?)?;
     if !wait || !ack.is_success() {
         return super::output::show_task_ack(i18n, &session, &ack, mode);
     }

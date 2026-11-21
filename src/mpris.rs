@@ -1204,16 +1204,14 @@ mod tests {
     }
 
     fn set_enabled(handle: &CoreHandle, enabled: bool) {
-        let baseline = handle
-            .state(rivu_protocol::response::StateSections {
-                configuration: true,
-                ..Default::default()
-            })
-            .configuration
-            .unwrap()
-            .config;
-        let mut draft = baseline.as_ref().clone();
-        draft.mpris_enabled = enabled;
+        let baseline = rivu_format::config::Config {
+            mpris_enabled: !enabled,
+            ..Default::default()
+        };
+        let draft = rivu_format::config::Config {
+            mpris_enabled: enabled,
+            ..baseline.clone()
+        };
         let ack = async_io::block_on(handle.request_ack(Command::MutateConfig {
             change: ConfigMutation::Settings(Box::new(ConfigPatch::between(&baseline, &draft))),
         }));

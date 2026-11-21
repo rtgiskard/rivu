@@ -1,6 +1,6 @@
 //! Immutable audio-analysis display contracts. Producers own execution and storage pools.
 
-use rivu_format::config::{AnalysisWindow, Config, VisualizationSignal};
+use rivu_format::config::{AnalysisWindow, Config, ConfigSettings, VisualizationSignal};
 use std::{sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -249,6 +249,17 @@ pub struct AnalysisSettings {
 
 impl From<&Config> for AnalysisSettings {
     fn from(config: &Config) -> Self {
+        Self {
+            fps: config.analysis_rate_hz,
+            fft_size: config.analysis_fft_size,
+            window: config.analysis_window,
+            signal: config.visualization_signal,
+        }
+    }
+}
+
+impl From<&ConfigSettings> for AnalysisSettings {
+    fn from(config: &ConfigSettings) -> Self {
         Self {
             fps: config.analysis_rate_hz,
             fft_size: config.analysis_fft_size,

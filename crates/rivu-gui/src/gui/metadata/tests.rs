@@ -1,7 +1,9 @@
 use super::*;
 use crate::test_support::CoreRuntime;
 use gpui::{EntityInputHandler, TestAppContext};
-use rivu_protocol::response::Ack;
+use rivu_protocol::wire::{
+    CommandOutcome, CommandOutput, CommandReceipt, CommandReply, SourceTagOutput,
+};
 
 pub(super) fn track(id: i64, title: &str) -> Track {
     Track {
@@ -269,16 +271,28 @@ fn edit_text(
 }
 
 fn ack(ok: bool) -> crate::frontend::CommandDelivery {
+    command_delivery(ok, None)
+}
+
+fn command_delivery(
+    ok: bool,
+    source_tags: Option<SourceTagOutput>,
+) -> crate::frontend::CommandDelivery {
+    let outcome = if ok {
+        CommandOutcome::Succeeded(
+            source_tags.map_or(CommandOutput::None, CommandOutput::SourceTags),
+        )
+    } else {
+        CommandOutcome::Failed {
+            error: "save failed".into(),
+            source_tags,
+        }
+    };
     crate::frontend::CommandDelivery {
-        ack: Ack::new(
-            if ok {
-                rivu_protocol::response::AckStatus::Succeeded
-            } else {
-                rivu_protocol::response::AckStatus::Failed
-            },
-            (!ok).then(|| "save failed".into()),
-            0,
-        ),
+        result: Ok(CommandReply::Receipt(CommandReceipt {
+            revision: 0,
+            outcome,
+        })),
         observation: crate::frontend::CommandObservation::Refreshed,
     }
 }
@@ -296,10 +310,14 @@ fn file_tags() -> rivu_format::tags::TagValues {
 }
 
 fn source_ack(ok: bool, file_saved: bool) -> crate::frontend::CommandDelivery {
-    let mut delivery = ack(ok);
-    delivery.ack.source_tags = Some(file_tags());
-    delivery.ack.source_file_saved = file_saved;
-    delivery
+    command_delivery(
+        ok,
+        Some(SourceTagOutput {
+            tags: Some(file_tags()),
+            file_saved,
+            refresh_error: None,
+        }),
+    )
 }
 
 #[test]
@@ -686,6 +704,48 @@ fn projected_save_survives_selection_changes_before_or_after_ack(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn source_writes_without_observation_preserve_database_view_and_staging(cx: &mut TestAppContext) {
+    use crate::frontend::CommandObservation;
+    use source::{SourceAction, SourceStatus};
+
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let original = this.metadata.track().unwrap().clone();
+        let mut staged = file_tags();
+        staged.title = "staged title".into();
+        for (action, file_saved, status) in [
+            (SourceAction::Save, true, SourceStatus::Saved),
+            (SourceAction::Sync, false, SourceStatus::Synced),
+        ] {
+            for (observation, error) in [
+                (
+                    CommandObservation::Unavailable("refresh unavailable; do not retry".into()),
+                    "refresh unavailable; do not retry",
+                ),
+                (
+                    CommandObservation::NotRequested,
+                    "Authoritative state was not requested",
+                ),
+            ] {
+                this.metadata.source.stage(staged.clone());
+                let (token, _) = this.metadata.begin_source(action).unwrap();
+                let mut delivery = source_ack(true, file_saved);
+                delivery.observation = observation;
+                this.finish_source_action(token, delivery, cx);
+
+                let track = this.metadata.track().unwrap();
+                assert_eq!(track, &original);
+                assert_eq!(this.metadata.source.values(track), staged);
+                assert_eq!(this.metadata.source.status.as_ref(), Some(&status));
+                assert_eq!(this.error.as_deref(), Some(error));
+                assert!(!this.metadata.source.busy());
+                assert!(this.metadata.source.recovery(track.id).is_none());
+            }
+        }
+    });
+}
+
+#[gpui::test]
 fn source_save_acknowledges_all_tags_without_touching_user_state(cx: &mut TestAppContext) {
     use source::SourceAction;
     let (_directory, _runtime, metadata) = fixture(cx);
@@ -696,9 +756,7 @@ fn source_save_acknowledges_all_tags_without_touching_user_state(cx: &mut TestAp
         original.decoder_hint = DecoderHint::Native;
         artwork_selection(this, original, cx);
         let (token, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
-        let mut delivery = source_ack(true, true);
-        delivery.observation =
-            crate::frontend::CommandObservation::Unavailable("refresh unavailable".into());
+        let delivery = source_ack(true, true);
         this.finish_source_action(token, delivery, cx);
         let saved = this.metadata.track().unwrap();
         assert_eq!(source::database_tags(saved), file_tags());
@@ -718,9 +776,15 @@ fn committed_save_with_projection_warning_does_not_enter_recovery(cx: &mut TestA
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
         let (save, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
-        let mut delivery = source_ack(true, true);
         let warning = "File and database saved; refresh failed";
-        delivery.ack.source_refresh_error = Some(warning.into());
+        let delivery = command_delivery(
+            true,
+            Some(SourceTagOutput {
+                tags: Some(file_tags()),
+                file_saved: true,
+                refresh_error: Some(warning.into()),
+            }),
+        );
         this.finish_source_action(save, delivery, cx);
         assert_eq!(
             this.metadata.source.status,

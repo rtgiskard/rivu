@@ -13,6 +13,7 @@ pub(super) struct LiveControls {
 /// High-frequency controls never clone the graph or invalidate configuration.
 pub(super) struct Preferences {
     settings: Arc<Config>,
+    published_settings: Arc<ConfigSettings>,
     live: LiveControls,
     saved: Option<Arc<Config>>,
     save_error: Option<String>,
@@ -29,6 +30,7 @@ impl Preferences {
         };
         let saved = from_disk.then(|| Arc::clone(&settings));
         Self {
+            published_settings: Arc::new(ConfigSettings::from(settings.as_ref())),
             settings,
             live,
             saved,
@@ -38,6 +40,10 @@ impl Preferences {
 
     pub(super) fn settings(&self) -> &Arc<Config> {
         &self.settings
+    }
+
+    pub(super) fn published_settings(&self) -> &Arc<ConfigSettings> {
+        &self.published_settings
     }
 
     pub(super) fn live(&self) -> &LiveControls {
@@ -90,12 +96,17 @@ impl Preferences {
         self.live.shuffle = settings.shuffle;
         self.live.repeat = settings.repeat;
         self.live.output_device.clone_from(&settings.output_device);
+        if !Arc::ptr_eq(&self.settings, &settings)
+            && !self.published_settings.matches_config(&settings)
+        {
+            self.published_settings = Arc::new(ConfigSettings::from(settings.as_ref()));
+        }
         self.settings = settings;
     }
 
     pub(super) fn project(&self, state: &mut CoreState) {
-        if !Arc::ptr_eq(&state.configuration.config, &self.settings) {
-            state.configuration.config = Arc::clone(&self.settings);
+        if !Arc::ptr_eq(&state.configuration.config, &self.published_settings) {
+            state.configuration.config = Arc::clone(&self.published_settings);
         }
         state.playback.volume = self.live.volume;
         state.playback.speed = self.live.speed;

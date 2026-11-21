@@ -6,9 +6,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::model::{Command, Query, Track};
-use crate::response::{Ack, QueryResponse, StateResponse, StateRevisions};
+use crate::response::{QueryResponse, StateResponse, StateRevisions};
 use crate::transport::{decode_request_frame, encode_response_frame_into};
-use crate::wire::{HelloResponse, MAX_REQUEST, WireRequest, WireResponse, wire_state};
+use crate::wire::{
+    CommandReply, HelloResponse, MAX_REQUEST, WireRequest, WireResponse, wire_state,
+};
 
 /// A synthetic stereo track, without reading the filesystem.
 pub fn track(id: i64, path: impl Into<PathBuf>) -> Track {
@@ -87,6 +89,7 @@ pub fn complete_test_handshake_for_instance(stream: &mut UnixStream, instance_id
             state: wire_state(StateResponse {
                 revisions: StateRevisions::default(),
                 playback: None,
+                current_track: None,
                 queue: None,
                 library: None,
                 system: None,
@@ -104,15 +107,14 @@ pub fn read_test_command(stream: &mut UnixStream) -> Command {
     Command::try_from(command).unwrap()
 }
 
-pub fn reply_test_ack(stream: &mut UnixStream, ack: Ack) {
-    write_test_response(stream, WireResponse::Ack(ack));
+pub fn reply_test_command(stream: &mut UnixStream, reply: CommandReply) {
+    write_test_response(stream, WireResponse::Command(reply));
 }
 
-/// Reads either query lane. Tests that require one lane should match its wire request.
+/// Reads a query and returns its domain payload.
 pub fn read_test_query(stream: &mut UnixStream) -> Query {
     let query = match read_test_request(stream) {
-        WireRequest::Query(query) => query,
-        WireRequest::QueryRetained(query) => query.query,
+        WireRequest::Query(query) => query.query,
         _ => panic!("expected query"),
     };
     Query::try_from(query).unwrap()

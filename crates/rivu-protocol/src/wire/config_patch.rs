@@ -95,4 +95,10 @@ macro_rules! declare_config_patch {
     };
 }
 
-config_wire_fields!(declare_config_patch);
+config_wire_fields!(
+    declare_config_patch,
+    output_device: Option<String>,
+    volume: f32,
+    shuffle: bool,
+    repeat: crate::model::RepeatMode
+);

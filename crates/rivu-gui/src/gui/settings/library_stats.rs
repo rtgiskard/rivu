@@ -326,7 +326,7 @@ mod tests {
         use super::super::{ArtworkOptions, Config, ConfigPatch};
 
         let (directory, runtime, settings) = fixture(cx);
-        let baseline = runtime.handle.config_snapshot();
+        let baseline = runtime.handle.editable_config_snapshot();
         let config = Config {
             library_roots: vec![directory.path().join("music")],
             ..baseline.as_ref().clone()

@@ -10,7 +10,7 @@ use rivu_format::config::ArtworkDirection;
 use rivu_format::config::ArtworkMode;
 use rivu_format::config::ArtworkOptions;
 use rivu_format::config::ArtworkStyle;
-use rivu_format::config::Config;
+use rivu_format::config::ConfigSettings;
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::model::{ArtworkSource, PlaybackStatus, Track};
 
@@ -208,7 +208,7 @@ impl ArtworkRuntime {
         &mut self,
         track: Option<&Track>,
         status: PlaybackStatus,
-        config: &Config,
+        config: &ConfigSettings,
         panels: &super::workspace::WorkspacePanels,
         window_visible: bool,
         cx: &mut Context<Self>,
@@ -734,7 +734,7 @@ mod tests {
         let track = rivu_protocol::test_support::artwork_track(directory.path().join("track.wav"));
         let manager = Arc::new(ArtworkManager::new(directory.path()));
         assert!(manager.load(crate::artwork_source(&track)).is_none());
-        let config = Config::default();
+        let config = ConfigSettings::default();
         let panels = panel_demand(
             1,
             2,
@@ -807,7 +807,7 @@ mod tests {
         let manager = Arc::new(ArtworkManager::new(directory.path()));
         manager.load(crate::artwork_source(&track)).unwrap();
         let owner = runtime(manager, cx);
-        let config = Config::default();
+        let config = ConfigSettings::default();
         let panels = panel_demand(
             1,
             2,
@@ -891,7 +891,7 @@ mod tests {
         let old = manager.load(crate::artwork_source(&original)).unwrap();
         let new = manager.load(crate::artwork_source(&relocated)).unwrap();
         assert_ne!(old, new);
-        let config = Config::default();
+        let config = ConfigSettings::default();
         let panels = panel_demand(
             1,
             2,
@@ -1016,7 +1016,7 @@ mod tests {
         let mut repaired = original.clone();
         repaired.path = directory.path().join("repaired.wav");
         rivu_metadata::artwork::test_support::tagged_wav(&repaired.path);
-        let config = Config::default();
+        let config = ConfigSettings::default();
         let panels = panel_demand(
             10,
             1,

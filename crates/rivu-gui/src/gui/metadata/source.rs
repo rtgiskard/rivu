@@ -637,7 +637,7 @@ impl Metadata {
         self.source_menu.close();
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let delivery = handle.request_ack(command).await;
+            let delivery = handle.request_command(command).await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 this.finish_source_action(token, delivery, cx)
@@ -658,12 +658,15 @@ impl Metadata {
         let Some(current) = self.metadata.source.finish(token) else {
             return;
         };
-        let ack = &delivery.ack;
-        if !ack.is_success() {
+        let source = delivery
+            .reply()
+            .and_then(|reply| reply.receipt())
+            .and_then(|receipt| receipt.outcome.source_tags());
+        if !delivery.is_success() {
             let error = delivery
                 .observed_result()
                 .expect_err("failed source command");
-            let observed_save_failure = ack.source_file_saved
+            let observed_save_failure = source.is_some_and(|source| source.file_saved)
                 && delivery.observation == crate::frontend::CommandObservation::Refreshed;
             if same_editor
                 && !observed_save_failure
@@ -674,17 +677,19 @@ impl Metadata {
             cx.notify();
             return;
         }
-        if let Some(error) = &ack.source_refresh_error {
-            self.report_error(error.clone(), cx);
-        } else if let Err(error) = delivery.observed_result() {
+        let observation = delivery.observed_result();
+        let observed = observation.is_ok();
+        if let Err(error) = observation {
             self.report_error(error, cx);
+        } else if let Some(error) = source.and_then(|source| source.refresh_error.as_ref()) {
+            self.report_error(error.clone(), cx);
         }
         if self.metadata.identity() != Some(track_id) {
             // Never publish the other track's values or status in this editor.
             cx.notify();
             return;
         }
-        if let Some(tags) = &ack.source_tags {
+        if let Some(tags) = source.and_then(|source| source.tags.as_ref()) {
             match token.action {
                 SourceAction::Load(_) if same_editor && current => {
                     self.metadata.source.stage(tags.clone());
@@ -692,15 +697,24 @@ impl Metadata {
                 SourceAction::Load(_) => {}
                 SourceAction::Sync | SourceAction::RetrySync | SourceAction::Save => {
                     if same_editor {
-                        self.metadata.commit_tags(token, tags);
-                        if current {
-                            self.metadata.source.committed();
+                        // The receipt records server success, but cannot replace the
+                        // database view or retire staging without a fresh observation.
+                        if observed {
+                            self.metadata.commit_tags(token, tags);
+                            if current {
+                                self.metadata.source.committed();
+                            }
                         }
-                        self.metadata.source.status = Some(if ack.source_file_saved {
-                            SourceStatus::Saved
-                        } else {
-                            SourceStatus::Synced
-                        });
+                        self.metadata.source.status =
+                            Some(if source.is_some_and(|source| source.file_saved) {
+                                SourceStatus::Saved
+                            } else {
+                                SourceStatus::Synced
+                            });
+                    }
+                    if !observed {
+                        cx.notify();
+                        return;
                     }
                     let query = Query::Track { track_id };
                     self.metadata_read.request(

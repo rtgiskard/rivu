@@ -1559,13 +1559,13 @@ mod tests {
 
     fn replace_backend_node(runtime: &CoreRuntime, kind: GraphNodeKind) {
         let revision = runtime.handle.config_snapshot().processing_graph.revision;
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
+        let ack = futures::executor::block_on(runtime.handle.request_command(
+            Command::ProcessingGraphEdit {
                 expected_revision: revision,
                 edit: Box::new(GraphEdit::Replace { id: 3, kind }),
-            }))
-            .ack;
-        assert!(ack.is_success(), "{:?}", ack.error);
+            },
+        ));
+        assert!(ack.is_success(), "{:?}", ack.error());
     }
 
     #[gpui::test]
@@ -2032,15 +2032,15 @@ mod tests {
             },
         );
         let revision = runtime.handle.config_snapshot().processing_graph.revision;
-        let ack =
-            futures::executor::block_on(runtime.handle.request_ack(Command::ProcessingGraphEdit {
+        let ack = futures::executor::block_on(runtime.handle.request_command(
+            Command::ProcessingGraphEdit {
                 expected_revision: revision,
                 edit: Box::new(GraphEdit::Disconnect {
                     to: GraphPort { node: 2, port: 0 },
                 }),
-            }))
-            .ack;
-        assert!(ack.is_success(), "{:?}", ack.error);
+            },
+        ));
+        assert!(ack.is_success(), "{:?}", ack.error());
         processing.update(cx, |this, cx| {
             this.reconcile(this.context.snapshot(), cx);
             assert!(this.graph_editor.highlight_connection.is_none());
@@ -2107,14 +2107,13 @@ mod tests {
                 this.stage_graph_text(key, "8".into(), cx);
             });
             let revision = runtime.handle.config_snapshot().processing_graph.revision;
-            let ack = futures::executor::block_on(runtime.handle.request_ack(
+            let ack = futures::executor::block_on(runtime.handle.request_command(
                 Command::ProcessingGraphEdit {
                     expected_revision: revision,
                     edit: Box::new(GraphEdit::Replace { id: 3, kind }),
                 },
-            ))
-            .ack;
-            assert!(ack.is_success(), "{:?}", ack.error);
+            ));
+            assert!(ack.is_success(), "{:?}", ack.error());
             processing.update(cx, |this, cx| {
                 this.reconcile(this.context.snapshot(), cx);
                 let key = *this

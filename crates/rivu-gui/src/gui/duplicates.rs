@@ -13,7 +13,7 @@ use rivu_protocol::{
         Command, DuplicateGroup, DuplicateMember, Page, Query, RelocationPhase,
         RelocationTaskStatus,
     },
-    response::{Ack, QueryError, QueryResponse, QueryRevisions, ViewResponse},
+    response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, active_control, button, caption,
@@ -188,14 +188,19 @@ impl DuplicateReview {
 
     // False leaves the caller responsible for cancelling a late relocation ack,
     // including when the window entity itself no longer exists.
-    fn accept_ack(&mut self, epoch: u64, independent: bool, ack: Ack) -> bool {
+    fn accept_ack(
+        &mut self,
+        epoch: u64,
+        independent: bool,
+        delivery: &crate::frontend::CommandDelivery,
+    ) -> bool {
         if !self.open || self.epoch != epoch {
             return false;
         }
-        if !ack.is_success() {
+        if !delivery.is_success() {
             self.busy = None;
-            self.feedback = Some(match ack.error {
-                Some(error) => ReviewFeedback::Text(error, StatusKind::Error),
+            self.feedback = Some(match delivery.error() {
+                Some(error) => ReviewFeedback::Text(error.to_owned(), StatusKind::Error),
                 None => ReviewFeedback::Localized("gl-review-action-failed", StatusKind::Error),
             });
         } else if independent {
@@ -204,7 +209,7 @@ impl DuplicateReview {
                 "gl-kept-independent",
                 StatusKind::Success,
             ));
-        } else if let Some(id) = ack.relocation_id {
+        } else if let Some(id) = delivery.reply().and_then(|reply| reply.relocation_id()) {
             self.busy = Some(Busy::Relocating(id));
         } else {
             self.busy = None;
@@ -1264,8 +1269,8 @@ impl Duplicates {
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             let ack_handle = handle.clone();
-            let delivery = ack_handle.request_ack(command).await;
-            let relocation_id = delivery.ack.relocation_id;
+            let delivery = ack_handle.request_command(command).await;
+            let relocation_id = delivery.reply().and_then(|reply| reply.relocation_id());
             let accepted = this
                 .update(cx, |this, cx| {
                     this.finish_duplicate_action(epoch, independent, delivery, cx)
@@ -1296,9 +1301,9 @@ impl Duplicates {
             if self.duplicate_review.open && self.duplicate_review.epoch == epoch {
                 // Preserve the write's ACK, but never revive actions from the last
                 // cached members or adopt an unobservable relocation task.
-                if independent || !delivery.ack.is_success() {
+                if independent || !delivery.is_success() {
                     self.duplicate_review
-                        .accept_ack(epoch, independent, delivery.ack);
+                        .accept_ack(epoch, independent, &delivery);
                 }
                 self.duplicate_review.busy = None;
                 self.duplicate_review.invalidate();
@@ -1309,7 +1314,7 @@ impl Duplicates {
         }
         if !self
             .duplicate_review
-            .accept_ack(epoch, independent, delivery.ack)
+            .accept_ack(epoch, independent, &delivery)
         {
             return false;
         }
@@ -2131,7 +2136,7 @@ mod tests {
     use super::{Busy, DuplicateReview, Member, ReviewFeedback, TaskReadOutcome};
     use rivu_protocol::{
         model::{Command, DuplicateMember, Page, RelocationPhase, RelocationTaskStatus, Track},
-        response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
+        response::{QueryResponse, QueryRevisions, ViewResponse},
     };
 
     #[test]
@@ -2909,22 +2914,26 @@ mod tests {
         review
     }
 
-    fn ack(ok: bool, relocation_id: Option<u64>) -> Ack {
-        Ack {
-            status: if ok {
-                rivu_protocol::response::AckStatus::Succeeded
-            } else {
-                rivu_protocol::response::AckStatus::Failed
-            },
-            error: None,
-            revision: 0,
-            scan_id: None,
-            relocation_id,
-            processing_id: None,
-            database_optimization: None,
-            source_tags: None,
-            source_file_saved: false,
-            source_refresh_error: None,
+    fn ack(ok: bool, relocation_id: Option<u64>) -> crate::frontend::CommandDelivery {
+        use crate::frontend::{CommandDelivery, CommandObservation};
+        use rivu_protocol::wire::{CommandOutcome, CommandOutput, CommandReceipt, CommandReply};
+
+        let outcome = if ok {
+            CommandOutcome::Succeeded(
+                relocation_id.map_or(CommandOutput::None, CommandOutput::Relocation),
+            )
+        } else {
+            CommandOutcome::Failed {
+                error: "action failed".into(),
+                source_tags: None,
+            }
+        };
+        CommandDelivery {
+            result: Ok(CommandReply::Receipt(CommandReceipt {
+                revision: 0,
+                outcome,
+            })),
+            observation: CommandObservation::Refreshed,
         }
     }
 
@@ -2985,7 +2994,7 @@ mod tests {
         assert_eq!(review.close(), None);
         review.open(QueryRevisions::default());
         let late_ack = ack(true, Some(7));
-        assert!(!review.accept_ack(epoch, false, late_ack));
+        assert!(!review.accept_ack(epoch, false, &late_ack));
         assert!(review.busy.is_none());
         assert!(review.feedback.is_none());
         assert!(!review.accept_task(&task(7, RelocationPhase::Completed)));
@@ -2996,7 +3005,7 @@ mod tests {
         let mut review = ready_review();
         review.confirm(true);
         let (epoch, _) = review.submit(false).unwrap();
-        assert!(review.accept_ack(epoch, false, ack(true, Some(7))));
+        assert!(review.accept_ack(epoch, false, &ack(true, Some(7))));
         assert_eq!(review.cancellable_task(), Some(7));
         review.accept_cancel(7, Err(anyhow::anyhow!("send failed")));
         assert_eq!(review.cancellable_task(), Some(7));
@@ -3017,7 +3026,7 @@ mod tests {
         let mut review = ready_review();
         review.confirm(true);
         let (epoch, _) = review.submit(false).unwrap();
-        review.accept_ack(epoch, false, ack(true, Some(7)));
+        review.accept_ack(epoch, false, &ack(true, Some(7)));
         let mut completed = task(7, RelocationPhase::Completed);
         completed.error = Some("Relocation committed; refreshing views failed: unavailable".into());
         assert!(review.accept_task(&completed));
@@ -3036,7 +3045,7 @@ mod tests {
                 let mut review = ready_review();
                 review.confirm(true);
                 let (epoch, _) = review.submit(false).unwrap();
-                review.accept_ack(epoch, false, ack(true, Some(7)));
+                review.accept_ack(epoch, false, &ack(true, Some(7)));
                 if cancelling {
                     review.accept_cancel(7, Ok(()));
                 }
@@ -3059,7 +3068,7 @@ mod tests {
             let mut review = ready_review();
             review.confirm(true);
             let (epoch, _) = review.submit(false).unwrap();
-            assert!(review.accept_ack(epoch, false, ack(ok, None)));
+            assert!(review.accept_ack(epoch, false, &ack(ok, None)));
             assert!(review.busy.is_none());
         }
         let mut review = ready_review();
@@ -3068,7 +3077,7 @@ mod tests {
             command,
             Command::KeepTrackIndependent { track_id: 2 }
         ));
-        assert!(review.accept_ack(epoch, true, ack(true, None)));
+        assert!(review.accept_ack(epoch, true, &ack(true, None)));
         assert!(review.busy == Some(Busy::Keeping));
         review.request_groups(0, QueryRevisions::default());
         assert!(review.begin_groups().is_none());
@@ -3105,7 +3114,7 @@ mod tests {
                         epoch,
                         independent,
                         CommandDelivery {
-                            ack: ack(true, (!independent).then_some(7)),
+                            result: ack(true, (!independent).then_some(7)).result,
                             observation: CommandObservation::Unavailable("read failed".into()),
                         },
                         cx,
@@ -3149,7 +3158,7 @@ mod tests {
         let mut review = ready_review();
         review.confirm(true);
         let (epoch, _) = review.submit(false).unwrap();
-        review.accept_ack(epoch, false, ack(true, Some(7)));
+        review.accept_ack(epoch, false, &ack(true, Some(7)));
         assert_eq!(review.begin_task_read(7), Some(epoch));
         assert!(review.begin_task_read(7).is_none());
         review.close();
@@ -3160,7 +3169,7 @@ mod tests {
         review.select_member(2, false);
         review.confirm(true);
         let (new_epoch, _) = review.submit(false).unwrap();
-        review.accept_ack(new_epoch, false, ack(true, Some(8)));
+        review.accept_ack(new_epoch, false, &ack(true, Some(8)));
         assert!(review.begin_task_read(8).is_none());
         assert!(matches!(
             review.accept_task_read(epoch, 7, task_response(7, RelocationPhase::Completed)),
@@ -3181,7 +3190,7 @@ mod tests {
         let mut review = ready_review();
         review.confirm(true);
         let (epoch, _) = review.submit(false).unwrap();
-        review.accept_ack(epoch, false, ack(true, Some(7)));
+        review.accept_ack(epoch, false, &ack(true, Some(7)));
         review.begin_task_read(7);
         assert!(matches!(
             review.accept_task_read(epoch, 7, task_response(8, RelocationPhase::Completed)),
@@ -3299,7 +3308,7 @@ mod tests {
             assert!(review.begin_groups().is_some());
             review.confirm(true);
             let (epoch, _) = review.submit(false).unwrap();
-            review.accept_ack(epoch, false, ack(true, Some(7)));
+            review.accept_ack(epoch, false, &ack(true, Some(7)));
             let epoch = review.begin_task_read(7).unwrap();
             if timeout {
                 assert!(review.timeout_task_read(epoch, 7, timeout_response()));

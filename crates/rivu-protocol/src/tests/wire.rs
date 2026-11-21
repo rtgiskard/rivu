@@ -8,8 +8,17 @@ use crate::{
 use std::{path::PathBuf, sync::Arc};
 
 fn query_round_trip(encoded: &mut Vec<u8>, query: Query) -> Query {
-    encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), encoded).unwrap();
-    let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+    encode_request_frame_into(
+        &WireRequest::Query(WireReadQuery {
+            id: 1,
+            query: WireQuery::from(query),
+        }),
+        encoded,
+    )
+    .unwrap();
+    let WireRequest::Query(WireReadQuery { id: 1, query: wire }) =
+        decode_request_frame(&encoded[4..]).unwrap()
+    else {
         panic!("expected query");
     };
     Query::try_from(wire).unwrap()
@@ -36,7 +45,7 @@ fn assert_command_round_trip(encoded: &mut Vec<u8>, command: Command) {
 }
 
 fn assert_configuration_round_trip(
-    config: Arc<rivu_format::config::Config>,
+    config: Arc<rivu_format::config::ConfigSettings>,
     encoded: &mut Vec<u8>,
 ) {
     let response = WireResponse::State(wire_state(StateResponse {
@@ -138,11 +147,16 @@ fn exact_playlist_summary_round_trips_ids_and_optional_results() {
     for playlist_id in [i64::MIN, 0, 42, i64::MAX] {
         let query = Query::PlaylistSummary { playlist_id };
         encode_request_frame_into(
-            &WireRequest::Query(WireQuery::from(query.clone())),
+            &WireRequest::Query(WireReadQuery {
+                id: 1,
+                query: WireQuery::from(query.clone()),
+            }),
             &mut encoded,
         )
         .unwrap();
-        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+        let WireRequest::Query(WireReadQuery { id: 1, query: wire }) =
+            decode_request_frame(&encoded[4..]).unwrap()
+        else {
             panic!("expected playlist summary query");
         };
         assert_eq!(Query::try_from(wire).unwrap(), query);
@@ -206,11 +220,16 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
     for id in [0, 42, u64::MAX] {
         let mut encoded = Vec::new();
         encode_request_frame_into(
-            &WireRequest::Query(WireQuery::from(Query::ScanTask { id })),
+            &WireRequest::Query(WireReadQuery {
+                id: 1,
+                query: WireQuery::from(Query::ScanTask { id }),
+            }),
             &mut encoded,
         )
         .unwrap();
-        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+        let WireRequest::Query(WireReadQuery { id: 1, query: wire }) =
+            decode_request_frame(&encoded[4..]).unwrap()
+        else {
             panic!("expected query");
         };
         assert!(
@@ -415,11 +434,18 @@ fn optional_search_queries_round_trip() {
             },
         ] {
             encode_request_frame_into(
-                &WireRequest::Query(WireQuery::from(expected.clone())),
+                &WireRequest::Query(WireReadQuery {
+                    id: 1,
+                    query: WireQuery::from(expected.clone()),
+                }),
                 &mut encoded,
             )
             .unwrap();
-            let WireRequest::Query(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+            let WireRequest::Query(WireReadQuery {
+                id: 1,
+                query: decoded,
+            }) = decode_request_frame(&encoded[4..]).unwrap()
+            else {
                 panic!("expected query");
             };
             assert_eq!(Query::try_from(decoded).unwrap(), expected);
@@ -464,9 +490,17 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
         },
     ] {
         let expected = serde_json::to_value(&query).unwrap();
-        encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
-            .unwrap();
-        let WireRequest::Query(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+        encode_request_frame_into(
+            &WireRequest::Query(WireReadQuery {
+                id: 1,
+                query: WireQuery::from(query),
+            }),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Query(WireReadQuery { id: 1, query: wire }) =
+            decode_request_frame(&encoded[4..]).unwrap()
+        else {
             panic!("expected query");
         };
         assert_eq!(
@@ -619,7 +653,6 @@ fn scan_task_status_wire_round_trip_preserves_all_phases() {
 #[test]
 fn current_page_schema_has_contiguous_query_and_response_tags() {
     use crate::{model::Page, response::ViewResponse};
-    assert_eq!(PROTOCOL_VERSION, 50);
     let query = WireQuery::DirectoryPage {
         path: std::path::PathBuf::new(),
         query: None,
@@ -890,50 +923,73 @@ fn queue_and_duplicate_rows_have_no_derived_wire_fields() {
 }
 
 #[test]
-fn ack_wire_round_trip_has_explicit_response_type() {
-    let ack = Ack {
-        status: rivu_protocol::response::AckStatus::Failed,
-        error: Some("failed".into()),
-        revision: 42,
-        scan_id: Some(u64::MAX),
-        relocation_id: Some(42),
-        processing_id: Some(7),
-        database_optimization: None,
-        source_tags: None,
-        source_file_saved: false,
-        source_refresh_error: None,
+fn command_reply_round_trips_typed_outputs_and_refusal() {
+    use rivu_protocol::wire::{
+        CommandOutcome, CommandOutput, CommandReceipt, CommandRefusal, CommandReply,
     };
+
+    for output in [
+        CommandOutput::Scan(u64::MAX),
+        CommandOutput::Relocation(42),
+        CommandOutput::Processing(7),
+        CommandOutput::DatabaseOptimization(crate::model::DatabaseOptimization {
+            database_bytes_before: 7,
+            database_bytes_after: 4,
+            wal_bytes_before: 3,
+            wal_bytes_after: 0,
+        }),
+    ] {
+        assert_command_reply_round_trip(CommandReply::Receipt(CommandReceipt {
+            revision: 42,
+            outcome: CommandOutcome::Succeeded(output),
+        }));
+    }
+    let refused = assert_command_reply_round_trip(CommandReply::Refused(
+        CommandRefusal::InvalidCommand("invalid command".into()),
+    ));
+    assert!(refused.receipt().is_none());
+}
+
+fn assert_command_reply_round_trip(
+    reply: rivu_protocol::wire::CommandReply,
+) -> rivu_protocol::wire::CommandReply {
+    let expected = serde_json::to_value(&reply).unwrap();
     let mut encoded = Vec::new();
-    encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
-    assert_eq!(encoded[5], ResponseTag::Ack as u8);
-    let response = decode_response_frame(&encoded[4..]).unwrap();
-    let WireResponse::Ack(decoded) = response else {
-        panic!("expected ack")
+    encode_response_frame_into(&WireResponse::Command(reply), &mut encoded).unwrap();
+    assert_eq!(encoded[5], ResponseTag::Command as u8);
+    let WireResponse::Command(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected command reply")
     };
-    assert_eq!(
-        serde_json::to_value(&decoded).unwrap(),
-        serde_json::to_value(&ack).unwrap()
-    );
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), expected);
+    decoded
 }
 
 #[test]
-fn source_refresh_warning_round_trips_as_success() {
-    let mut ack = Ack::new(rivu_protocol::response::AckStatus::Succeeded, None, 42);
-    ack.source_file_saved = true;
-    ack.source_tags = Some(rivu_format::tags::TagValues {
+fn verified_source_write_survives_success_warning_and_partial_failure() {
+    use rivu_protocol::{response::AckStatus, wire::CommandReply};
+
+    let tags = rivu_format::tags::TagValues {
         title: "Verified".into(),
         ..Default::default()
-    });
-    ack.source_refresh_error = Some("File and database saved; refresh failed".into());
-    let mut encoded = Vec::new();
-    encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
-    let WireResponse::Ack(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
-        panic!("expected ack")
     };
-    assert!(decoded.is_success());
-    assert!(decoded.source_file_saved);
-    assert_eq!(decoded.source_tags, ack.source_tags);
-    assert_eq!(decoded.source_refresh_error, ack.source_refresh_error);
+    for status in [AckStatus::Succeeded, AckStatus::Failed] {
+        let mut ack = Ack::new(
+            status,
+            (status == AckStatus::Failed).then(|| "database sync failed".into()),
+            42,
+        );
+        ack.source_tags = Some(tags.clone());
+        ack.source_file_saved = true;
+        ack.source_refresh_error =
+            (status == AckStatus::Succeeded).then(|| "projection refresh failed".into());
+        let decoded = assert_command_reply_round_trip(CommandReply::from(ack.clone()));
+        assert_eq!(decoded.status(), status);
+        assert_eq!(decoded.error(), ack.error.as_deref());
+        let source = decoded.receipt().unwrap().outcome.source_tags().unwrap();
+        assert!(source.file_saved);
+        assert_eq!(source.tags.as_ref(), Some(&tags));
+        assert_eq!(source.refresh_error, ack.source_refresh_error);
+    }
 }
 
 #[test]
@@ -957,6 +1013,7 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
     let response = StateResponse {
         revisions: StateRevisions {
             playback: 1,
+            current_track: 7,
             queue: 2,
             library: 3,
             system: 4,
@@ -964,6 +1021,7 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
             processing: 6,
         },
         playback: None,
+        current_track: None,
         queue: None,
         library: Some(rivu_protocol::model::LibrarySnapshot::default()),
         system: None,
@@ -1073,6 +1131,7 @@ fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
             &WireResponse::State(wire_state(StateResponse {
                 revisions: StateRevisions::default(),
                 playback: None,
+                current_track: None,
                 queue: None,
                 library: None,
                 system: Some(system),
@@ -1125,16 +1184,42 @@ fn system_state_wire_round_trip_preserves_pending_source_tag_recovery() {
 }
 
 #[test]
-fn configuration_wire_round_trip_preserves_optional_devices_columns_and_appearance() {
+fn configuration_wire_omits_all_live_values() {
+    let config = rivu_format::config::Config::default();
+    let live = rivu_format::config::Config {
+        volume: 0.25,
+        shuffle: true,
+        repeat: crate::model::RepeatMode::One,
+        output_device: Some("runtime-output-marker".into()),
+        ..config.clone()
+    };
+    let encode = |config| {
+        postcard::to_allocvec(&WireConfig::from(Arc::new(
+            rivu_format::config::ConfigSettings::from(config),
+        )))
+        .unwrap()
+    };
+    let bytes = encode(config);
+    assert_eq!(bytes, encode(live));
+    let decoded = Arc::<rivu_format::config::ConfigSettings>::from(
+        postcard::from_bytes::<WireConfig>(&bytes).unwrap(),
+    );
+    let value = serde_json::to_value(&*decoded).unwrap();
+    for key in ["volume", "shuffle", "repeat", "output_device"] {
+        assert!(value.get(key).is_none(), "unexpected {key}");
+    }
+}
+
+#[test]
+fn configuration_wire_round_trip_preserves_columns_and_appearance() {
     use rivu_format::config::{
-        ArtworkDirection, ArtworkMode, ArtworkStyle, Config, LibraryColumns, Theme,
+        ArtworkDirection, ArtworkMode, ArtworkStyle, ConfigSettings, LibraryColumns, Theme,
         VisualizationPalette,
     };
 
     let mut encoded = Vec::new();
     for has_device in [false, true] {
-        let base = Config {
-            output_device: has_device.then(|| "USB audio output".to_owned()),
+        let base = ConfigSettings {
             library_columns: if has_device {
                 LibraryColumns {
                     artist: true,
@@ -1156,14 +1241,14 @@ fn configuration_wire_round_trip_preserves_optional_devices_columns_and_appearan
             ..Default::default()
         };
         for config in [
-            Config {
+            ConfigSettings {
                 visualization_palette: VisualizationPalette::Viridis,
                 ui_theme: Theme::TokyoNight,
                 artwork_style: ArtworkStyle::Metal,
                 animation_fps: 240,
                 ..base.clone()
             },
-            Config {
+            ConfigSettings {
                 default_visualizer_reference_lines: has_device,
                 default_visualizer_labels: !has_device,
                 oscilloscope_overlay_channels: has_device,
@@ -1183,15 +1268,18 @@ fn configuration_wire_round_trip_preserves_optional_devices_columns_and_appearan
 fn request_round_trip_uses_explicit_message_types() {
     let requests = [
         WireRequest::Hello(StateSections::ALL),
-        WireRequest::Query(WireQuery::from(Query::LibraryPage {
-            query: Some("album".into()),
-            favorite: Some(true),
-            missing: Some(false),
-            sort: rivu_protocol::model::LibrarySort::Album,
-            offset: 7,
-            limit: 11,
-        })),
-        WireRequest::State(StateRequest {
+        WireRequest::Query(WireReadQuery {
+            id: 73,
+            query: WireQuery::from(Query::LibraryPage {
+                query: Some("album".into()),
+                favorite: Some(true),
+                missing: Some(false),
+                sort: rivu_protocol::model::LibrarySort::Album,
+                offset: 7,
+                limit: 11,
+            }),
+        }),
+        WireRequest::ReadState(StateRequest {
             sections: StateSections {
                 playback: true,
                 configuration: true,
@@ -1199,6 +1287,7 @@ fn request_round_trip_uses_explicit_message_types() {
             },
             since: Some(StateRevisions {
                 playback: u64::MAX,
+                current_track: 7,
                 queue: 2,
                 library: 3,
                 system: 4,
@@ -1211,9 +1300,10 @@ fn request_round_trip_uses_explicit_message_types() {
             index: 9,
             expected_revision: 12,
         })),
-        WireRequest::Watch(
+        WireRequest::WaitState(
             StateRevisions {
                 playback: 1,
+                current_track: 7,
                 queue: 2,
                 library: 3,
                 system: 4,
@@ -1223,34 +1313,32 @@ fn request_round_trip_uses_explicit_message_types() {
             .into(),
         ),
         WireRequest::WaitTask(rivu_protocol::model::TaskTarget::Scan { id: 42 }),
-        WireRequest::QueryRetained(rivu_protocol::wire::WireRetainedQuery {
-            id: 73,
-            query: WireQuery::Track { track_id: 42 },
-        }),
         WireRequest::RegisterDesktop,
-        WireRequest::QueryCancel(73),
+        WireRequest::CancelRead(73),
     ];
     for request in requests {
         let expected_type = match &request {
             WireRequest::Hello(_) => RequestTag::Hello,
-            WireRequest::State(_) => RequestTag::State,
+            WireRequest::ReadState(_) => RequestTag::ReadState,
             WireRequest::Query(_) => RequestTag::Query,
             WireRequest::Command(_) => RequestTag::Command,
-            WireRequest::Watch(_) => RequestTag::Watch,
+            WireRequest::WaitState(_) => RequestTag::WaitState,
             WireRequest::WaitTask(_) => RequestTag::WaitTask,
-            WireRequest::QueryRetained(_) => RequestTag::QueryRetained,
             WireRequest::RegisterDesktop => RequestTag::RegisterDesktop,
-            WireRequest::QueryCancel(_) => RequestTag::QueryCancel,
+            WireRequest::CancelRead(_) => RequestTag::CancelRead,
         };
         let mut encoded = Vec::new();
         encode_request_frame_into(&request, &mut encoded).unwrap();
         assert_eq!(encoded[5], expected_type as u8);
         let decoded = decode_request_frame(&encoded[4..]).unwrap();
         match decoded {
-            WireRequest::Query(WireQuery::LibraryPage { offset, limit, .. }) => {
+            WireRequest::Query(WireReadQuery {
+                id: 73,
+                query: WireQuery::LibraryPage { offset, limit, .. },
+            }) => {
                 assert_eq!((offset, limit), (7, 11))
             }
-            WireRequest::State(request) => assert_eq!(
+            WireRequest::ReadState(request) => assert_eq!(
                 request,
                 StateRequest {
                     sections: StateSections {
@@ -1260,6 +1348,7 @@ fn request_round_trip_uses_explicit_message_types() {
                     },
                     since: Some(StateRevisions {
                         playback: u64::MAX,
+                        current_track: 7,
                         queue: 2,
                         library: 3,
                         system: 4,
@@ -1269,12 +1358,8 @@ fn request_round_trip_uses_explicit_message_types() {
                 }
             ),
             WireRequest::Hello(_) => {}
-            WireRequest::QueryRetained(query) => {
-                assert_eq!(query.id, 73);
-                assert!(matches!(query.query, WireQuery::Track { track_id: 42 }));
-            }
             WireRequest::RegisterDesktop => {}
-            WireRequest::QueryCancel(id) => assert_eq!(id, 73),
+            WireRequest::CancelRead(id) => assert_eq!(id, 73),
             WireRequest::WaitTask(target) => {
                 assert_eq!(target, rivu_protocol::model::TaskTarget::Scan { id: 42 })
             }
@@ -1285,12 +1370,13 @@ fn request_round_trip_uses_explicit_message_types() {
             }) => {
                 assert_eq!((queue_id, index, expected_revision), (4, 9, 12))
             }
-            WireRequest::Watch(watch) => {
+            WireRequest::WaitState(watch) => {
                 assert_eq!(watch.sections, StateSections::ALL);
                 assert_eq!(
                     watch.revisions,
                     StateRevisions {
                         playback: 1,
+                        current_track: 7,
                         queue: 2,
                         library: 3,
                         system: 4,
@@ -1461,7 +1547,10 @@ fn request_encoding_rejects_oversized_body_before_completion() {
 fn postcard_frame_headers_and_bodies_preserve_wire_contract() {
     let mut encoded = Vec::new();
     encode_request_frame_into(&WireRequest::Hello(StateSections::ALL), &mut encoded).unwrap();
-    assert_eq!(encoded, [8, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1, 1, 1]);
+    assert_eq!(
+        encoded,
+        [9, 0, 0, 0, PROTOCOL_VERSION, 0, 1, 1, 1, 1, 1, 1, 1]
+    );
     encode_response_frame_into(&WireResponse::Error("x".into()), &mut encoded).unwrap();
     assert_eq!(encoded, [4, 0, 0, 0, PROTOCOL_VERSION, 255, 1, b'x']);
 }
@@ -1537,12 +1626,18 @@ fn request_and_response_decoding_reject_trailing_bytes() {
     encoded.push(0);
     assert!(decode_request_frame(&encoded[4..]).is_err());
     encode_response_frame_into(
-        &WireResponse::Watch(StateRevisions::default()),
+        &WireResponse::State(wire_state(StateResponse::default())),
         &mut encoded,
     )
     .unwrap();
     encoded.push(0);
     assert!(decode_response_frame(&encoded[4..]).is_err());
+}
+
+#[test]
+fn legacy_watch_response_tag_is_not_decoded() {
+    let error = decode_response_frame(&[PROTOCOL_VERSION, 4]).unwrap_err();
+    assert_eq!(error.to_string(), "Unknown IPC response type 4");
 }
 
 #[test]
@@ -1892,7 +1987,7 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
             expected
         );
     }
-    let mut config = rivu_format::config::Config {
+    let mut config = rivu_format::config::ConfigSettings {
         log_max_files: 128,
         ..Default::default()
     };
@@ -1916,12 +2011,15 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
     let wire = WireConfig::from(Arc::clone(&config));
     let bytes = postcard::to_allocvec(&wire).unwrap();
     let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
-    assert_eq!(rivu_format::config::Config::from(decoded), *config);
+    assert_eq!(
+        Arc::<rivu_format::config::ConfigSettings>::from(decoded),
+        config
+    );
 }
 
 #[test]
 fn shared_configuration_encoding_rejects_oversize_and_recovers() {
-    let config = Arc::new(rivu_format::config::Config {
+    let config = Arc::new(rivu_format::config::ConfigSettings {
         ui_font: "x".repeat(MAX_RESPONSE),
         ..Default::default()
     });
@@ -1937,13 +2035,13 @@ fn shared_configuration_encoding_rejects_oversize_and_recovers() {
     assert!(encoded.is_empty());
     assert!(encoded.capacity() <= RETAINED_BUFFER_LIMIT);
 
-    let config = rivu_format::config::Config::default();
+    let config = rivu_format::config::ConfigSettings::default();
     assert_configuration_round_trip(Arc::new(config), &mut encoded);
 }
 
 #[test]
 fn spectrum_bar_layout_postcard_round_trip_preserves_both_positional_variants() {
-    use rivu_format::config::{Config, SpectrumBarLayout};
+    use rivu_format::config::{ConfigSettings, SpectrumBarLayout};
 
     for (layout, expected_bytes) in [
         (
@@ -1957,7 +2055,7 @@ fn spectrum_bar_layout_postcard_round_trip_preserves_both_positional_variants() 
         let decoded: WireSpectrumBarLayout = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(SpectrumBarLayout::from(decoded), layout);
 
-        let config = Config {
+        let config = ConfigSettings {
             spectrum_bar_layout: layout,
             spectrum_gap: 2.5,
             spectrogram_history_seconds: 37,
@@ -1966,7 +2064,7 @@ fn spectrum_bar_layout_postcard_round_trip_preserves_both_positional_variants() 
         let config = Arc::new(config);
         let bytes = postcard::to_allocvec(&WireConfig::from(Arc::clone(&config))).unwrap();
         let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(Config::from(decoded), *config);
+        assert_eq!(Arc::<ConfigSettings>::from(decoded), config);
     }
 }
 
@@ -2064,7 +2162,7 @@ fn unified_audio_export_round_trip_preserves_sources_encoding_and_eq_snapshot() 
 #[test]
 fn graph_configuration_round_trip_retains_authoritative_revision_nodes_and_edges() {
     use rivu_protocol::model::{GraphEdit, GraphNodeKind};
-    let mut config = rivu_format::config::Config::default();
+    let mut config = rivu_format::config::ConfigSettings::default();
     config
         .processing_graph
         .edit(
@@ -2304,10 +2402,12 @@ fn public_playback_and_scan_ownership_round_trip_to_client_snapshot() {
     let response = StateResponse {
         playback: Some(crate::response::PlaybackSnapshot {
             playback: Default::default(),
-            current_track: None,
-            source_generation: 43,
             processing_audition: Some(audition),
             processing_selection: Some(audition),
+        }),
+        current_track: Some(crate::response::CurrentTrackState {
+            track: Some(Arc::new(crate::test_support::track(5, "source.flac"))),
+            source_generation: 43,
         }),
         system: Some(crate::model::SystemState {
             scan_owner: Some(MediaTaskOwner::Playlist),
@@ -2324,6 +2424,7 @@ fn public_playback_and_scan_ownership_round_trip_to_client_snapshot() {
     observed.apply(1, state_response(response));
     let snapshot = observed.snapshot();
     assert_eq!(snapshot.source_generation, 43);
+    assert_eq!(snapshot.current_track().unwrap().id, 5);
     assert_eq!(snapshot.processing_audition, Some(audition));
     assert_eq!(snapshot.processing_selection, Some(audition));
     assert_eq!(snapshot.system.scan_owner, Some(MediaTaskOwner::Playlist));

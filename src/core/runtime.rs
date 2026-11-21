@@ -426,7 +426,7 @@ mod tests {
             Arc::clone(&tasks.workers),
             Core::initialize_state,
         )?;
-        assert_eq!(runtime.handle.config_snapshot().volume, 0.75);
+        assert_eq!(runtime.handle.state_snapshot().playback.volume, 0.75);
         runtime.control.request_shutdown()?;
         runtime.join()?;
         assert!(!path.exists());

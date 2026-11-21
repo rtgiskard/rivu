@@ -471,7 +471,7 @@ fn deferred_bitrate_flush_refreshes_payload_without_shape_invalidation() {
     assert_eq!(
         state.revisions.changed_since(before.revisions),
         StateSections {
-            playback: true,
+            current_track: true,
             library: true,
             ..StateSections::default()
         }

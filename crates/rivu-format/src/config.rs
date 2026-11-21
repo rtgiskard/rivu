@@ -202,16 +202,26 @@ pub struct ArtworkOptions {
     pub period_seconds: f32,
 }
 
-impl From<&Config> for ArtworkOptions {
-    fn from(config: &Config) -> Self {
-        Self {
-            style: config.artwork_style,
-            mode: config.artwork_mode,
-            direction: config.artwork_direction,
-            period_seconds: config.artwork_period_seconds,
+macro_rules! config_options {
+    ($options:ident { $($field:ident: $source:ident),* $(,)? }) => {
+        config_options!(@impl $options, Config, { $($field: $source),* });
+        config_options!(@impl $options, ConfigSettings, { $($field: $source),* });
+    };
+    (@impl $options:ident, $config:ident, { $($field:ident: $source:ident),* }) => {
+        impl From<&$config> for $options {
+            fn from(config: &$config) -> Self {
+                Self { $($field: config.$source),* }
+            }
         }
-    }
+    };
 }
+
+config_options!(ArtworkOptions {
+    style: artwork_style,
+    mode: artwork_mode,
+    direction: artwork_direction,
+    period_seconds: artwork_period_seconds,
+});
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -250,16 +260,12 @@ pub struct AudioVisualizerOptions {
     pub oscilloscope_overlay_channels: bool,
 }
 
-impl From<&Config> for AudioVisualizerOptions {
-    fn from(config: &Config) -> Self {
-        Self {
-            style: config.default_visualizer_style,
-            reference_lines: config.default_visualizer_reference_lines,
-            labels: config.default_visualizer_labels,
-            oscilloscope_overlay_channels: config.oscilloscope_overlay_channels,
-        }
-    }
-}
+config_options!(AudioVisualizerOptions {
+    style: default_visualizer_style,
+    reference_lines: default_visualizer_reference_lines,
+    labels: default_visualizer_labels,
+    oscilloscope_overlay_channels: oscilloscope_overlay_channels,
+});
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -441,21 +447,29 @@ pub const DEFAULT_QUERY_BATCH_SIZE: u32 = 64;
 pub const DEFAULT_SCAN_MAX_DEPTH: u32 = 64;
 const DEFAULT_UI_FONT: &str = "monospace";
 
-// Share the runtime field declaration with application-local Settings patches.
+// Keep the full disk/patch order and the cold settings field list in sync.
 #[macro_export]
 macro_rules! config_fields {
     ($callback:ident) => {
+        $crate::config_fields!(@emit $callback [
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pub output_device: Option<String>,
+            pub volume: f32,
+            pub shuffle: bool,
+            pub repeat: RepeatMode,
+        ]);
+    };
+    ($callback:ident, cold) => {
+        $crate::config_fields!(@emit $callback []);
+    };
+    (@emit $callback:ident [$($live:tt)*]) => {
         $callback! {
         pub library_roots: Vec<PathBuf>,
         /// Maximum directory depth traversed from each requested scan start.
         pub scan_max_depth: u32,
         /// Minimum duration in seconds for newly admitted tracks; 0 disables filtering.
         pub scan_min_duration_seconds: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub output_device: Option<String>,
-        pub volume: f32,
-        pub shuffle: bool,
-        pub repeat: RepeatMode,
+        $($live)*
         pub play_count_threshold_percent: f64,
         /// Confirm GUI and TUI actions that replace a non-empty queue.
         pub confirm_queue_replace: bool,
@@ -575,6 +589,63 @@ macro_rules! config_type {
     };
 }
 config_fields!(config_type);
+
+macro_rules! config_settings_type {
+    ($( $(#[$attr:meta])* pub $field:ident : $ty:ty, )*) => {
+        /// Configuration settings independent of the live playback and output controls.
+        #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct ConfigSettings {
+            $( $(#[$attr])* pub $field: $ty, )*
+        }
+
+        impl From<Config> for ConfigSettings {
+            fn from(config: Config) -> Self {
+                Self { $( $field: config.$field, )* }
+            }
+        }
+
+        impl From<&Config> for ConfigSettings {
+            fn from(config: &Config) -> Self {
+                Self { $( $field: Clone::clone(&config.$field), )* }
+            }
+        }
+
+        impl ConfigSettings {
+            pub fn matches_config(&self, config: &Config) -> bool {
+                true $(&& self.$field == config.$field)*
+            }
+
+            /// Compose a full editing or persistence configuration with explicit live values.
+            pub fn into_config(
+                self,
+                volume: f32,
+                shuffle: bool,
+                repeat: RepeatMode,
+                output_device: Option<String>,
+            ) -> Config {
+                Config { $( $field: self.$field, )* volume, shuffle, repeat, output_device }
+            }
+        }
+    };
+}
+config_fields!(config_settings_type, cold);
+
+impl Default for ConfigSettings {
+    fn default() -> Self {
+        Config::default().into()
+    }
+}
+
+impl ConfigSettings {
+    pub fn gpu_material_budget_bytes(&self) -> u64 {
+        material_budget_bytes(self.gpu_material_budget_mib)
+    }
+}
+
+fn material_budget_bytes(mib: u32) -> u64 {
+    u64::from(mib) * 1024 * 1024
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -696,7 +767,7 @@ impl Config {
     }
 
     pub fn gpu_material_budget_bytes(&self) -> u64 {
-        u64::from(self.gpu_material_budget_mib) * 1024 * 1024
+        material_budget_bytes(self.gpu_material_budget_mib)
     }
 
     /// Validate a candidate before admitting a processing settings change.

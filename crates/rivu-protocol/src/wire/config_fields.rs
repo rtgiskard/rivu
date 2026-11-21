@@ -54,18 +54,15 @@ macro_rules! config_wire_patch_convert {
     };
 }
 
-// Positional binary field order shared by complete and sparse Config messages.
+// Positional binary settings order. A command patch also includes live controls.
 // Keep concrete wire types here, not the human-readable Config serde schema.
 macro_rules! config_wire_fields {
-    ($declare:ident) => {
+    ($declare:ident $(, $live:ident : $live_ty:ty)*) => {
         $declare! {
             library_roots: Vec<PathBuf>,
             scan_max_depth: u32,
             scan_min_duration_seconds: u32,
-            output_device: Option<String>,
-            volume: f32,
-            shuffle: bool,
-            repeat: crate::model::RepeatMode,
+            $( $live: $live_ty, )*
             play_count_threshold_percent: f64,
             tray_enabled: bool,
             confirm_queue_replace: bool,

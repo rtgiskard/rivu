@@ -28,15 +28,11 @@ pub(super) fn open(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>)
         if paths.is_empty() {
             session.get_state(rivu_protocol::response::StateSections::default())?;
         } else {
-            let ack = session.request_ack(rivu_protocol::model::Command::Scan {
+            let ack = session.request_command(rivu_protocol::model::Command::Scan {
                 paths,
                 force: false,
             })?;
-            ensure!(
-                ack.is_success(),
-                "{}",
-                ack.error.as_deref().unwrap_or("Scan failed")
-            );
+            ensure!(ack.is_success(), "{}", ack.error().unwrap_or("Scan failed"));
         }
     }
     rivu_gui::run(data_dir, instance, super::build_info())
@@ -108,7 +104,7 @@ mod tests {
         let mut client = rivu_client::client_session(directory.path());
         assert!(
             client
-                .request_ack(rivu_protocol::AppCommand::ShowWindow)
+                .request_command(rivu_protocol::AppCommand::ShowWindow)
                 .unwrap()
                 .is_success()
         );

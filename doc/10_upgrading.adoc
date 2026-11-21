@@ -89,6 +89,15 @@ The following cutovers describe compatibility changes for upgrades from older
 versions, not the current wire version. See
 link:21_ipc.adoc#session-handshake[IPC handshake] for the current version authority.
 
+Protocol 56 replaces command replies, query cancellation, and state watching.
+Upgrade Core and all clients together, then restart Core. Protocol 50 clients
+cannot attach to the new service; this cutover does not require a database or
+configuration migration.
+
+Protocol 57 distinguishes malformed command bodies that end the session from
+invalid command values that allow reuse. Protocol 56 clients must upgrade with
+Core; no data or configuration migration is needed.
+
 Moving waveform ownership to the GUI changes local side-channel
 compatibility, not database or saved visualization configuration. Frontend and
 Core must be upgraded together: realtime PCM uses `.pcm.v6`/`RIVUPCM6`/SHM6,
