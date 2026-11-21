@@ -2,7 +2,7 @@ use super::*;
 use rivu_format::tags::{TagEncoding, TagValues};
 
 fn wav(path: &Path) {
-    crate::test_support::write_i16_wav(path, 1, 8_000, [123]).unwrap();
+    rivu_audio::test_support::write_i16_wav(path, 1, 8_000, [123]).unwrap();
 }
 
 fn finish(core: &mut Core) -> Ack {
@@ -12,18 +12,6 @@ fn finish(core: &mut Core) -> Ack {
     match futures::executor::block_on(response).unwrap() {
         CoreResponse::Ack(ack) => ack,
         _ => panic!("source tag operation returned a query response"),
-    }
-}
-
-fn immediate_ack(core: &mut Core, command: Command) -> Ack {
-    let (reply, response) = oneshot::channel();
-    core.dispatch_request(Request {
-        operation: Operation::Command(command),
-        reply: Some(reply),
-    });
-    match futures::executor::block_on(response).unwrap() {
-        CoreResponse::Ack(ack) => ack,
-        _ => panic!("tag synchronization returned a query response"),
     }
 }
 
@@ -44,13 +32,23 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
         },
     )
     .unwrap();
-    core.command(Command::LoadSourceTags {
-        track_id: 1,
-        encoding: TagEncoding::Declared,
-    })
-    .unwrap();
+    let (reply, mut response) = oneshot::channel();
+    core.dispatch_request(Request {
+        operation: Operation::Command(Command::LoadSourceTags {
+            track_id: 1,
+            encoding: TagEncoding::Declared,
+        }),
+        reply: Some(reply),
+    });
     core.ensure_source_tag_scan_allowed().unwrap();
-    let ack = finish(&mut core);
+    assert!(response.try_recv().unwrap().is_none());
+    let (_sender, requests) = mpsc::bounded(1);
+    drive_until(&mut core, requests, |event| {
+        matches!(event, dispatch::BusinessEvent::SourceTags(_))
+    });
+    let Some(CoreResponse::Ack(ack)) = response.try_recv().unwrap() else {
+        panic!("expected source tag reply after owner dispatch");
+    };
     assert!(ack.is_success(), "{:?}", ack.error);
     let loaded = ack.source_tags.unwrap();
     assert_eq!(loaded.title, "File title");
@@ -107,13 +105,7 @@ fn bulk_sync_preflights_live_replaygain_before_committing() {
         tags: tags.clone(),
         expected: Box::new(expected.clone()),
     };
-    let (commands, audio) = async_channel::bounded(1);
-    commands
-        .try_send(audio::QueuedAudioCommand::test_unfenced(
-            AudioCommand::Volume(0.5),
-        ))
-        .unwrap();
-    let _idle_commands = core.engine.replace_commands(commands);
+    let (audio, _idle_commands) = prefilled_audio(&mut core, 1, 1);
 
     assert!(core.command(sync()).is_err());
     assert_eq!(core.track(1).unwrap(), before);
@@ -330,7 +322,7 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
             .unwrap();
         assert_eq!(read.title.as_deref(), Some(tags.title.as_str()));
 
-        assert!(immediate_ack(&mut core, Command::DismissError).is_success());
+        assert!(operation_ack(&mut core, Operation::Command(Command::DismissError)).is_success());
         let snapshot = core
             .shared
             .read()
@@ -344,7 +336,7 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
             tags: snapshot.tags.clone(),
         };
         assert!(
-            !immediate_ack(&mut core, retry()).is_success(),
+            !operation_ack(&mut core, Operation::Command(retry())).is_success(),
             "an unsuccessful retry must stay pending"
         );
         connection
@@ -383,7 +375,7 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
         })
         .unwrap();
 
-        let ack = immediate_ack(&mut core, retry());
+        let ack = operation_ack(&mut core, Operation::Command(retry()));
         assert!(ack.is_success(), "{:?}", ack.error);
         assert!(!ack.source_file_saved);
         assert_eq!(ack.source_tags, Some(tags.clone()));
@@ -441,12 +433,12 @@ fn postcommit_refresh_failure_is_not_a_retryable_database_failure() {
             connection
                 .execute_batch("DROP TRIGGER reject_tags;")
                 .unwrap();
-            ack = immediate_ack(
+            ack = operation_ack(
                 &mut core,
-                Command::RetrySourceTagSync {
+                Operation::Command(Command::RetrySourceTagSync {
                     track_id: 1,
                     tags: tags.clone(),
-                },
+                }),
             );
         }
         assert!(ack.is_success(), "{:?}", ack.error);

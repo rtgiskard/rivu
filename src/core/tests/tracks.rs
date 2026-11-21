@@ -1,5 +1,17 @@
 use super::*;
 
+fn mark_track_missing(core: &mut Core, id: i64) {
+    let path = core.track(id).unwrap().path;
+    let impacts = core
+        .store
+        .apply_scan(&ScanResult {
+            roots: vec![path],
+            ..ScanResult::default()
+        })
+        .unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
+}
+
 #[test]
 fn metadata_history_refresh_uses_committed_facts_not_cached_entries_or_title_intent() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
@@ -439,15 +451,7 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
     for missing in [false, true] {
         let (directory, mut core) = fixture_with_database(Some(10.0));
         if missing {
-            let path = core.track(2).unwrap().path;
-            let impacts = core
-                .store
-                .apply_scan(&ScanResult {
-                    roots: vec![path],
-                    ..ScanResult::default()
-                })
-                .unwrap();
-            core.apply_catalog_changes(impacts).unwrap();
+            mark_track_missing(&mut core, 2);
         }
         core.command(Command::CreatePlaylistWithTracks {
             name: "Affected".into(),
@@ -525,16 +529,20 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
         for fail_queue_projection in [false, true] {
             let (directory, mut core) = fixture_with_database(Some(10.0));
             if missing {
-                let path = core.track(2).unwrap().path;
-                let impacts = core
-                    .store
-                    .apply_scan(&ScanResult {
-                        roots: vec![path],
-                        ..ScanResult::default()
+                mark_track_missing(&mut core, 2);
+            }
+            let affected = if !missing && !fail_queue_projection {
+                for (name, track_ids) in [("First", vec![2, 3]), ("Second", vec![2, 4])] {
+                    core.command(Command::CreatePlaylistWithTracks {
+                        name: name.into(),
+                        track_ids,
                     })
                     .unwrap();
-                core.apply_catalog_changes(impacts).unwrap();
-            }
+                }
+                Some(Arc::clone(&core.state.library.playlist_entry_revisions))
+            } else {
+                None
+            };
             core.store.mark_played(2, 7).unwrap();
             core.state.library.history = Arc::new(core.store.history(MAX_QUERY_ROWS).unwrap());
             let history = Arc::clone(&core.state.library.history);
@@ -572,6 +580,17 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
             let committed = core.state.query_revisions();
             assert_ne!(committed.library, before.library);
             assert_ne!(committed.structure, before.structure);
+            if let Some(scopes) = affected {
+                assert_eq!(committed.playlist, before.playlist + 1);
+                assert_eq!(committed.duplicate_members, before.duplicate_members + 1);
+                for (id, survivor) in [(1, 3), (2, 4)] {
+                    assert_ne!(
+                        core.state.library.playlist_entry_revisions[&id],
+                        scopes[&id]
+                    );
+                    assert_eq!(core.store.playlist_track_ids(id, 20).unwrap(), [survivor]);
+                }
+            }
             if fail_queue_projection {
                 assert!(core.state.library.history.is_empty());
                 assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
@@ -600,7 +619,7 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
 #[test]
 fn replaygain_load_uses_database_values_and_started_file_tags_do_not_overwrite_them() {
     let (_directory, mut core) = fixture();
-    crate::test_support::write_i16_wav(&core.track(1).unwrap().path, 1, 8_000, [123]).unwrap();
+    rivu_audio::test_support::write_i16_wav(&core.track(1).unwrap().path, 1, 8_000, [123]).unwrap();
     core.command(Command::SetReplayGain {
         track_id: 1,
         value: Some(-8.5),
@@ -737,13 +756,7 @@ fn replaygain_live_edit_rejects_busy_audio_before_database_commit() {
     playing(&mut core, 1);
     let stored = core.track(1).unwrap();
     let revisions = core.state.query_revisions();
-    let (commands, audio) = async_channel::bounded(1);
-    commands
-        .try_send(audio::QueuedAudioCommand::test_unfenced(
-            AudioCommand::Volume(0.5),
-        ))
-        .unwrap();
-    let _idle_commands = core.engine.replace_commands(commands);
+    let (audio, _idle_commands) = prefilled_audio(&mut core, 1, 1);
     assert!(
         core.command(Command::SetReplayGain {
             track_id: 1,
@@ -980,13 +993,7 @@ fn date_edit_refreshes_current_without_audio_and_preserves_no_op_snapshots() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
     core.publish();
-    let (commands, receive) = async_channel::bounded(1);
-    commands
-        .try_send(audio::QueuedAudioCommand::test_unfenced(
-            AudioCommand::Volume(0.5),
-        ))
-        .unwrap();
-    let _idle_commands = core.engine.replace_commands(commands);
+    let (receive, _idle_commands) = prefilled_audio(&mut core, 1, 1);
     let original = Arc::clone(core.state.current_track.as_ref().unwrap());
     let playback = core.state.playback.clone();
     let generation = core.transport.generation;
@@ -1593,15 +1600,7 @@ fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio()
         ] {
             let (directory, mut core) = fixture_with_database(Some(10.0));
             if missing {
-                let path = core.track(2).unwrap().path;
-                let impacts = core
-                    .store
-                    .apply_scan(&ScanResult {
-                        roots: vec![path],
-                        ..ScanResult::default()
-                    })
-                    .unwrap();
-                core.apply_catalog_changes(impacts).unwrap();
+                mark_track_missing(&mut core, 2);
             }
             playing(&mut core, 3);
             let generation = core.transport.generation;
@@ -1692,15 +1691,7 @@ fn unrelated_track_deletion_preserves_current_occurrence_and_playback_status() {
         ] {
             let (_directory, mut core) = fixture();
             if missing {
-                let path = core.track(1).unwrap().path;
-                let impacts = core
-                    .store
-                    .apply_scan(&ScanResult {
-                        roots: vec![path],
-                        ..ScanResult::default()
-                    })
-                    .unwrap();
-                core.apply_catalog_changes(impacts).unwrap();
+                mark_track_missing(&mut core, 1);
             }
             playing(&mut core, 3);
             match status {
@@ -1801,13 +1792,7 @@ fn metadata_edit_refreshes_published_history_without_rewriting_old_snapshots() {
 fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
-    let (commands, receive) = async_channel::bounded(1);
-    commands
-        .try_send(audio::QueuedAudioCommand::test_unfenced(
-            AudioCommand::Volume(0.5),
-        ))
-        .unwrap();
-    let _idle_commands = core.engine.replace_commands(commands);
+    let (receive, _idle_commands) = prefilled_audio(&mut core, 1, 1);
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
     let before = core.state.query_revisions();
     let edit = || Command::EditTrack {
@@ -1871,13 +1856,7 @@ fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() 
 fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
-    let (commands, receive) = async_channel::bounded(1);
-    commands
-        .try_send(audio::QueuedAudioCommand::test_unfenced(
-            AudioCommand::Volume(0.5),
-        ))
-        .unwrap();
-    let _idle_commands = core.engine.replace_commands(commands);
+    let (receive, _idle_commands) = prefilled_audio(&mut core, 1, 1);
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
     core.store
         .edit_track(
@@ -1946,43 +1925,6 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
 }
 
 #[test]
-fn committed_deletion_invalidates_all_affected_playlists_before_projection_failure() {
-    let (directory, mut core) = fixture_with_database(Some(10.0));
-    for (name, track_ids) in [("First", vec![2, 3]), ("Second", vec![2, 4])] {
-        core.command(Command::CreatePlaylistWithTracks {
-            name: name.into(),
-            track_ids,
-        })
-        .unwrap();
-    }
-    core.store.mark_played(2, 123).unwrap();
-    let before = core.state.query_revisions();
-    let second = core.state.library.playlist_entry_revisions[&2];
-    let first = core.state.library.playlist_entry_revisions[&1];
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TRIGGER fail_delete_projection AFTER DELETE ON tracks WHEN OLD.id=2
-             BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=3; END;",
-        )
-        .unwrap();
-    core.command(Command::RemoveTracks { track_ids: vec![2] })
-        .unwrap_err();
-    assert_eq!(core.state.library.track_total, 3);
-    assert_eq!(core.state.library.playlist_revision, before.playlist + 1);
-    assert_eq!(
-        core.state.library.duplicate_members_revision,
-        before.duplicate_members + 1
-    );
-    assert_ne!(core.state.library.playlist_entry_revisions[&2], second);
-    assert_ne!(core.state.library.playlist_entry_revisions[&1], first);
-    assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
-    assert_eq!(core.state.queue.total, 3);
-    assert_eq!(core.store.playlist_track_ids(1, 20).unwrap(), [3]);
-    assert_eq!(core.store.playlist_track_ids(2, 20).unwrap(), [4]);
-}
-
-#[test]
 fn album_member_queries_follow_library_content_changes() {
     let (_directory, mut core) = fixture();
     core.command(Command::EditTrack {
@@ -2013,7 +1955,8 @@ fn album_member_queries_follow_library_content_changes() {
         release_date: None,
     })
     .unwrap();
-    assert_ne!(query.stamp(core.query_response(&query).revisions), before);
+    let intermediate = query.stamp(core.query_response(&query).revisions);
+    assert_ne!(intermediate, before);
     core.command(Command::EditTrack {
         track_id: 1,
         title: Some("Changed member".into()),
@@ -2024,7 +1967,7 @@ fn album_member_queries_follow_library_content_changes() {
     })
     .unwrap();
     let response = core.query_response(&query);
-    assert_ne!(query.stamp(response.revisions), before);
+    assert_ne!(query.stamp(response.revisions), intermediate);
     let ViewResponse::AlbumTracks(page) = response.result.unwrap() else {
         panic!("expected album members")
     };

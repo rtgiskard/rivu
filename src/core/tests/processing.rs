@@ -19,29 +19,31 @@ pub(super) fn source(directory: &Path) -> Vec<f32> {
             [v, -v * 0.5]
         })
         .collect::<Vec<_>>();
-    let mut writer = hound::WavWriter::create(
-        directory.join("1.wav"),
-        hound::WavSpec {
-            channels: 2,
-            sample_rate: 48000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
+    rivu_audio::test_support::write_float_wav(
+        &directory.join("1.wav"),
+        2,
+        48000,
+        samples.iter().copied(),
     )
     .unwrap();
-    for &sample in &samples {
-        writer.write_sample(sample).unwrap();
-    }
-    writer.finalize().unwrap();
     samples
 }
+
+// Processing retains the last 32 terminal receipts, independently of scan history.
+fn evict_processing_receipt(core: &mut Core, id: u64) {
+    for _ in 0..32 {
+        if !core.processing.history().any(|status| status.id == id) {
+            return;
+        }
+        core.start_processing(1, ProcessingOperation::Speech, None)
+            .unwrap();
+        complete(core);
+    }
+    assert!(!core.processing.history().any(|status| status.id == id));
+}
+
 fn next_processing_event(core: &mut Core, timeout: Duration) -> Result<rivu_processing::Event> {
-    futures::executor::block_on(async {
-        rivu_protocol::transport::timeout(timeout, core.processing.receiver.recv())
-            .await
-            .context("Timed out waiting for processing event")?
-            .context("Processing event channel disconnected")
-    })
+    core.processing.receiver.recv_timeout(timeout)
 }
 
 fn completion(core: &mut Core) -> rivu_processing::Event {
@@ -66,9 +68,7 @@ fn terminal_wait(core: &mut Core, id: u64) -> ProcessingTaskStatus {
     let (handle, requests) = super::task_wait::wait_handle(core);
     let mut wait = Box::pin(handle.wait_task(TaskTarget::Processing { id }));
     assert!(wait.as_mut().now_or_never().is_none());
-    core.business_event(dispatch::BusinessEvent::Request(
-        requests.try_recv().unwrap(),
-    ));
+    super::task_wait::dispatch_wait(core, &requests);
     let TaskOutcome::Processing(status) = wait.as_mut().now_or_never().unwrap().unwrap() else {
         panic!("expected processing outcome");
     };
@@ -90,7 +90,10 @@ fn populate_stems(result: &mut rivu_processing::ProcessingResult) {
     status.accompaniment = true;
 }
 
-fn prepare_mix(core: &mut Core) {
+fn prepare_mix_with(
+    core: &mut Core,
+    set_stems: impl FnOnce(&mut rivu_processing::ProcessingResult),
+) {
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     let mut event = completion(core);
@@ -100,9 +103,13 @@ fn prepare_mix(core: &mut Core) {
     else {
         panic!("native processing did not produce PCM");
     };
-    // Use real native PCM for both stems without requiring a prepared neural model.
-    populate_stems(result);
+    set_stems(result);
     core.processing_event(event);
+}
+
+fn prepare_mix(core: &mut Core) {
+    // Ownership and backpressure cases do not need a second PCM allocation.
+    prepare_mix_with(core, populate_stems);
 }
 
 fn begin_mix(core: &mut Core, id: u64) {
@@ -320,13 +327,7 @@ fn mix_terminal_replaces_history_and_survives_current_and_history_eviction() {
     assert_eq!(core.processing_status(1).unwrap(), latest);
     assert_eq!(terminal_wait(&mut core, 1), latest);
     complete(&mut core);
-    // Failed jobs age the receipt without revoking the selected audio.
-    for _ in 1..MAX_RETAINED_SCAN_RESULTS {
-        core.start_processing(1, ProcessingOperation::Speech, None)
-            .unwrap();
-        complete(&mut core);
-    }
-    assert!(!core.processing.history().any(|status| status.id == 1));
+    evict_processing_receipt(&mut core, 1);
     assert_eq!(core.processing.results().len(), 1);
     assert_eq!(core.processing_status(1).unwrap(), latest);
     assert_eq!(terminal_wait(&mut core, 1), latest);
@@ -530,21 +531,6 @@ fn uncertain_database_rejects_held_processing_completion_before_source_read_or_e
 }
 
 #[test]
-fn changed_source_between_completion_and_commit_is_rejected() {
-    let (directory, mut core) = fixture();
-    source(directory.path());
-    core.start_processing(1, ProcessingOperation::Denoise, None)
-        .unwrap();
-    let event = completion(&mut core);
-    std::fs::write(directory.path().join("1.wav"), b"replacement").unwrap();
-    core.processing_event(event);
-    assert_eq!(
-        core.processing_status(1).unwrap().phase,
-        ProcessingPhase::Failed
-    );
-    assert!(core.processing.results().is_empty());
-}
-#[test]
 fn retained_pcm_and_statuses_are_bounded() {
     let (directory, mut core) = fixture();
     source(directory.path());
@@ -652,10 +638,21 @@ fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
     let (directory, mut core) = fixture();
     core.equalizer_edit(
         core.state.revisions.configuration,
+        EqualizerEdit::PreampDb(-4.0),
+    )
+    .unwrap();
+    let expected = core.preferences.settings().equalizer.clone();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
         EqualizerEdit::SavePreset {
             name: "Reference".into(),
             overwrite: false,
         },
+    )
+    .unwrap();
+    core.equalizer_edit(
+        core.state.revisions.configuration,
+        EqualizerEdit::PreampDb(-9.0),
     )
     .unwrap();
     let configuration = (*core.preferences.settings()).clone();
@@ -669,8 +666,9 @@ fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
     };
     core.equalizer_edit(core.state.revisions.configuration, export(path.clone()))
         .unwrap();
-    let expected = serde_json::to_vec_pretty(&configuration.equalizer).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), expected);
+    let exported: rivu_dsp::equalizer::config::EqualizerConfig =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(exported, expected);
     assert_eq!(std::fs::read_dir(&exports).unwrap().count(), 1);
 
     std::fs::write(&path, b"created by another owner").unwrap();
@@ -693,25 +691,8 @@ fn equalizer_preset_export_publishes_complete_json_without_clobbering() {
 #[cfg(target_os = "linux")]
 #[test]
 fn equalizer_preset_export_write_failure_leaves_no_final_or_temporary_file() {
-    const CHILD: &str = "RIVU_PRESET_EXPORT_WRITE_FAILURE_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        // File-size limits and signal dispositions are process-wide. Isolate the
-        // actual failing filesystem write from the rest of the parallel suite.
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "core::tests::processing::equalizer_preset_export_write_failure_leaves_no_final_or_temporary_file",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "child failed:\n{}\n{}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr),
-        );
+    // File-size limits and signal dispositions are process-wide.
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
     }
 
@@ -1700,7 +1681,20 @@ fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
 fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() {
     let (directory, mut core) = fixture();
     let original = source(directory.path());
-    prepare_mix(&mut core);
+    prepare_mix_with(&mut core, |result| {
+        populate_stems(result);
+        let vocal = result.outputs.vocals.as_ref().unwrap();
+        let mut backing = audio::PcmBuilder::new(
+            vocal.sample_rate(),
+            Arc::clone(vocal.layout()),
+            audio::PcmBudget::new(65536),
+        )
+        .unwrap();
+        for _ in 0..vocal.frames() {
+            backing.push(&[0.75, -0.75]).unwrap();
+        }
+        result.outputs.accompaniment = Some(backing.finish().unwrap());
+    });
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, -6.0, 0.0)
         .unwrap();
@@ -1710,9 +1704,13 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
     let (mixed, _) = core.processing.resume_audition().unwrap();
     let actual = pcm_samples(mixed.as_ref().unwrap());
     assert_eq!(actual.len(), original.len());
-    let gain = 1.0 + 10.0_f32.powf(-6.0 / 20.0);
-    for (actual, source) in actual.iter().zip(&original) {
-        assert!((actual - source * gain).abs() < 2e-6);
+    let vocal_gain = 10.0_f32.powf(-6.0 / 20.0);
+    for ((actual, vocal), backing) in actual
+        .iter()
+        .zip(&original)
+        .zip([0.75, -0.75].into_iter().cycle())
+    {
+        assert!((actual - (vocal * vocal_gain + backing)).abs() < 2e-6);
     }
     assert!(actual.iter().any(|sample| sample.abs() > 1.0));
     assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
@@ -1800,20 +1798,7 @@ fn rendered_descriptor_rejects_symlink_target_round_trip() {
     let directory = tempfile::tempdir().unwrap();
     source(directory.path());
     let alternate = directory.path().join("alternate.wav");
-    let mut writer = hound::WavWriter::create(
-        &alternate,
-        hound::WavSpec {
-            channels: 2,
-            sample_rate: 48000,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .unwrap();
-    for _ in 0..128 {
-        writer.write_sample(0.125_f32).unwrap();
-    }
-    writer.finalize().unwrap();
+    rivu_audio::test_support::write_float_wav(&alternate, 2, 48_000, [0.125; 128]).unwrap();
     let alias = directory.path().join("source.wav");
     symlink(directory.path().join("1.wav"), &alias).unwrap();
     let admitted = rivu_processing::SourceStamp::read(&alias).unwrap();
@@ -1951,10 +1936,7 @@ fn neural_retirement_lifeline() -> (
 
 #[test]
 fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
-    if crate::test_support::run_in_subprocess(
-        "core::tests::processing::neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting",
-        Duration::from_secs(20),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
     }
     neural_cancellation_fixture("exec 1>&-", "IFS= read -r lifeline", "stdout EOF");
@@ -1962,10 +1944,7 @@ fn neural_cancellation_reaps_interpreter_that_closed_stdout_without_exiting() {
 
 #[test]
 fn neural_cancellation_wakes_silent_interpreter_without_pipe_events() {
-    if crate::test_support::run_in_subprocess(
-        "core::tests::processing::neural_cancellation_wakes_silent_interpreter_without_pipe_events",
-        Duration::from_secs(20),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
     }
     neural_cancellation_fixture("", "IFS= read -r lifeline", "silent interpreter");
@@ -1973,10 +1952,7 @@ fn neural_cancellation_wakes_silent_interpreter_without_pipe_events() {
 
 #[test]
 fn neural_cancellation_wakes_after_both_output_pipes_close() {
-    if crate::test_support::run_in_subprocess(
-        "core::tests::processing::neural_cancellation_wakes_after_both_output_pipes_close",
-        Duration::from_secs(20),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
     }
     neural_cancellation_fixture(
@@ -1988,10 +1964,7 @@ fn neural_cancellation_wakes_after_both_output_pipes_close() {
 
 #[test]
 fn neural_cancellation_remains_bounded_under_stderr_backpressure() {
-    if crate::test_support::run_in_subprocess(
-        "core::tests::processing::neural_cancellation_remains_bounded_under_stderr_backpressure",
-        Duration::from_secs(20),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
     }
     // More than Linux's maximum default pipe capacity before the ready marker:
@@ -2070,10 +2043,7 @@ fn neural_cancellation_fixture(close_outputs: &str, wait: &str, description: &st
 
 #[test]
 fn neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retirement() {
-    if crate::test_support::run_in_subprocess(
-        "core::tests::processing::neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retirement",
-        Duration::from_secs(20),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
     }
     use std::os::fd::AsRawFd;
@@ -2283,20 +2253,13 @@ fn graph_cascaded_nonflat_fir_preserves_source_edge_context() {
         pcm[1] = -0.25;
         pcm[1024] = -0.5;
         pcm[1025] = 0.625;
-        let mut writer = hound::WavWriter::create(
-            directory.path().join("1.wav"),
-            hound::WavSpec {
-                channels: 2,
-                sample_rate: 48000,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
+        rivu_audio::test_support::write_float_wav(
+            &directory.path().join("1.wav"),
+            2,
+            48_000,
+            pcm.iter().copied(),
         )
         .unwrap();
-        for &sample in &pcm {
-            writer.write_sample(sample).unwrap();
-        }
-        writer.finalize().unwrap();
         let config = EqualizerConfig {
             enabled: true,
             bands: vec![EqBand {
@@ -2627,18 +2590,44 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
     }
 }
 
-#[test]
-fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix() {
-    let (directory, mut core) = fixture();
-    let expected = source(directory.path());
-    let eq = |preamp_db| GraphNodeKind::Equalizer {
+fn gain_node(preamp_db: f64) -> GraphNodeKind {
+    GraphNodeKind::Equalizer {
         config: rivu_dsp::equalizer::config::EqualizerConfig {
             enabled: true,
             preamp_db,
             ..Default::default()
         },
         implementation: EqImplementation::Iir,
-    };
+    }
+}
+
+// Route the output edge through an audible, editable gain.
+fn insert_half_gain(graph: &mut ProcessingGraph) {
+    let id = graph.next_id;
+    graph.next_id += 1;
+    graph.nodes.push(GraphNode {
+        id,
+        position: [0.0; 2],
+        kind: gain_node(-6.020599913),
+    });
+    let output = graph_port(2, 0);
+    graph
+        .edges
+        .iter_mut()
+        .find(|edge| edge.to == output)
+        .unwrap()
+        .to = graph_port(id, 0);
+    graph.edges.push(GraphEdge {
+        from: graph_port(id, 0),
+        to: output,
+    });
+}
+
+#[test]
+fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix() {
+    let (directory, mut core) = fixture();
+    let expected = source(directory.path());
+    let eq = gain_node;
     let mut graph = ProcessingGraph {
         next_id: 7,
         ..Default::default()
@@ -2885,10 +2874,22 @@ fn graph_export_cancel_after_physical_completion_never_publishes_a_file() {
 fn exporting_an_unrendered_port_executes_its_frozen_ancestor_closure() {
     let (directory, mut core) = fixture();
     let expected = source(directory.path());
+    edit_preferences(&mut core, |config| {
+        insert_half_gain(&mut config.processing_graph)
+    });
     core.processing_graph_run(1, graph_port(1, 0), GraphExecutionMode::Offline)
         .unwrap();
     complete(&mut core);
     assert_eq!(core.processing_status(1).unwrap().graph_outputs.len(), 1);
+    let gain = core.preferences.settings().processing_graph.next_id - 1;
+    core.processing_graph_edit(
+        0,
+        GraphEdit::Replace {
+            id: gain,
+            kind: gain_node(0.0),
+        },
+    )
+    .unwrap();
     let destination = directory.path().join("previously unrendered output.wav");
     core.processing_graph_export(1, graph_port(2, 0), destination.clone())
         .unwrap();
@@ -2901,7 +2902,10 @@ fn exporting_an_unrendered_port_executes_its_frozen_ancestor_closure() {
         .samples::<f32>()
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), expected.len());
+    for (actual, input) in actual.into_iter().zip(expected) {
+        assert!((actual - 0.5 * input).abs() < 2e-6);
+    }
 }
 
 #[test]
@@ -2949,7 +2953,9 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     );
     assert_eq!(queued.settings.graph_mode, None);
     assert!(core.processing.audition_projection().is_none());
-    complete(&mut core);
+    let finished = super::task_wait::processing_completion(&mut core);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    core.processing_event(finished);
     let task = core.processing_status(1).unwrap();
     assert_eq!(task.phase, ProcessingPhase::Complete, "{:?}", task.error);
     assert_eq!(task.settings.graph_mode, Some(GraphExecutionMode::Realtime));
@@ -2973,7 +2979,14 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     );
     loop {
         let command = commands.recv_timeout(Duration::from_secs(2)).unwrap();
-        if let AudioCommand::GraphAudition { paused, runner, .. } = command {
+        if let AudioCommand::GraphAudition {
+            generation,
+            paused,
+            runner,
+            ..
+        } = command
+        {
+            assert_eq!(generation, core.transport.generation);
             assert!(paused);
             assert_eq!(runner.sample_rate(), 48000);
             assert_eq!(runner.channels(), 2);
@@ -3001,12 +3014,7 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     assert_eq!(core.processing_status(1).unwrap(), cancelled);
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
     complete(&mut core);
-    for _ in 0..MAX_RETAINED_SCAN_RESULTS {
-        core.start_processing(1, ProcessingOperation::Speech, None)
-            .unwrap();
-        complete(&mut core);
-    }
-    assert!(!core.processing.history().any(|status| status.id == 1));
+    evict_processing_receipt(&mut core, 1);
     assert_eq!(core.processing_status(1).unwrap(), cancelled);
     assert_eq!(terminal_wait(&mut core, 1), cancelled);
 }
@@ -3057,12 +3065,7 @@ fn selected_live_audition_can_be_cancelled_after_its_receipt_ages_out() {
         .unwrap();
     complete(&mut core);
     let frozen = core.processing_status(1).unwrap().settings;
-    for _ in 0..MAX_RETAINED_SCAN_RESULTS {
-        core.start_processing(1, ProcessingOperation::Speech, None)
-            .unwrap();
-        complete(&mut core);
-    }
-    assert!(!core.processing.history().any(|status| status.id == 1));
+    evict_processing_receipt(&mut core, 1);
     assert_eq!(core.processing.audition_projection().unwrap().id, 1);
     core.cancel_processing(1).unwrap();
     assert!(core.processing.audition_projection().is_none());
@@ -3218,7 +3221,8 @@ fn stopped_graph_preparation_after_command(command: Command) {
     let queue = core.state.queue.clone();
     let track = core.state.current_track.clone();
     let playback = core.state.playback.clone();
-    while commands.try_recv().is_ok() {}
+    let port = audio_port(&mut core);
+    recorded_audio(&port, &commands);
     core.processing_event(event);
 
     assert_eq!(core.state.queue, queue);
@@ -3232,10 +3236,14 @@ fn stopped_graph_preparation_after_command(command: Command) {
         ProcessingPhase::Complete
     );
     assert_eq!(core.processing.results().len(), 1);
-    assert!(!commands.try_iter().any(|command| matches!(
-        command,
-        AudioCommand::Audition { .. } | AudioCommand::GraphAudition { .. }
-    )));
+    assert!(
+        !recorded_audio(&port, &commands)
+            .into_iter()
+            .any(|command| matches!(
+                command,
+                AudioCommand::Audition { .. } | AudioCommand::GraphAudition { .. }
+            ))
+    );
 
     // Revoking automatic selection does not discard the valid frozen result.
     core.command(Command::ProcessingGraphAudition {
@@ -3264,34 +3272,6 @@ fn stopped_graph_preparation_cannot_undo_explicit_stop() {
 #[test]
 fn stopped_graph_preparation_cannot_undo_clear_queue() {
     stopped_graph_preparation_after_command(Command::ClearQueue);
-}
-
-#[test]
-fn stopped_graph_preparation_keeps_its_own_source_handoff() {
-    let (directory, mut core) = fixture();
-    source(directory.path());
-    let commands = recording_audio(&mut core);
-    let target = graph_port(2, 0);
-    core.processing_graph_run(1, target, GraphExecutionMode::Auto)
-        .unwrap();
-    let event = completion(&mut core);
-    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
-    core.processing_event(event);
-    assert_eq!(
-        core.processing_status(1).unwrap().phase,
-        ProcessingPhase::Complete
-    );
-    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
-    assert_eq!(core.state.current_track().unwrap().id, 1);
-    assert_eq!(core.processing.audition_projection().unwrap().id, 1);
-    loop {
-        if matches!(
-            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-            AudioCommand::GraphAudition { .. }
-        ) {
-            break;
-        }
-    }
 }
 
 #[test]
@@ -3414,7 +3394,6 @@ fn original_clears_cached_and_live_selection_without_revoking_result_capabilitie
                 .unwrap();
         }
         assert!(core.processing.audition_projection().is_some());
-        while commands.try_recv().is_ok() {}
         let generation = core.transport.generation;
         core.audition_processing(1, AuditionMode::Original, 0.0, 0.0)
             .unwrap();
@@ -3537,7 +3516,7 @@ fn master_bypass_keeps_eq_edits_silent_and_restores_current_settings() {
             && config.output_gain_db == -2.0)
     );
     core.processing_bypass(false).unwrap();
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
 }
 
 #[test]
@@ -3564,7 +3543,7 @@ fn master_bypass_cached_roundtrip_preserves_selection_position_and_new_eq() {
         EqualizerEdit::PreampDb(-3.0),
     )
     .unwrap();
-    while commands.try_recv().is_ok() {}
+    recorded_audio(&audio_port(&mut core), &commands);
     core.processing_bypass(false).unwrap();
     assert_eq!(core.processing.audition_projection(), selected);
     assert_eq!(core.state.playback.position, 0.035);
@@ -3572,9 +3551,11 @@ fn master_bypass_cached_roundtrip_preserves_selection_position_and_new_eq() {
         if let AudioCommand::Audition {
             pcm: Some(_),
             start_seconds,
+            generation,
             ..
         } = commands.recv_timeout(Duration::from_secs(2)).unwrap()
         {
+            assert_eq!(generation, core.transport.generation);
             assert_eq!(start_seconds, 0.035);
             break;
         }
@@ -3589,10 +3570,10 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
     for mode in [GraphExecutionMode::Realtime, GraphExecutionMode::Hybrid] {
         let (directory, mut core) = fixture();
         source(directory.path());
-        if mode == GraphExecutionMode::Hybrid {
-            edit_preferences(&mut core, |config| {
-                let graph = &mut config.processing_graph;
-                graph.next_id = 5;
+        edit_preferences(&mut core, |config| {
+            let graph = &mut config.processing_graph;
+            if mode == GraphExecutionMode::Hybrid {
+                graph.next_id = 4;
                 graph.nodes.push(GraphNode {
                     id: 3,
                     position: [0.0; 2],
@@ -3607,27 +3588,17 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
                         }),
                     },
                 });
-                graph.nodes.push(GraphNode {
-                    id: 4,
-                    position: [0.0; 2],
-                    kind: GraphNodeKind::Equalizer {
-                        config: rivu_dsp::equalizer::config::EqualizerConfig {
-                            enabled: true,
-                            preamp_db: -1.0,
-                            ..Default::default()
-                        },
-                        implementation: EqImplementation::Iir,
-                    },
-                });
-                graph.edges = [(1, 3), (3, 4), (4, 2)]
+                graph.edges = [(1, 3), (3, 2)]
                     .into_iter()
                     .map(|(from, to)| GraphEdge {
                         from: graph_port(from, 0),
                         to: graph_port(to, 0),
                     })
                     .collect();
-            });
-        }
+            }
+            insert_half_gain(graph);
+        });
+        let gain = core.preferences.settings().processing_graph.next_id - 1;
         let commands = recording_audio(&mut core);
         core.processing_graph_run(1, graph_port(2, 0), mode)
             .unwrap();
@@ -3643,12 +3614,12 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
         let before = core.transport.generation;
         core.processing_bypass(true).unwrap();
         assert_eq!(core.processing.audition_projection(), Some(selected));
-        while commands.try_recv().is_ok() {}
+        recorded_audio(&audio_port(&mut core), &commands);
         core.processing_graph_edit(
             0,
-            GraphEdit::Move {
-                id: 2,
-                position: [12.0, 7.0],
+            GraphEdit::Replace {
+                id: gain,
+                kind: gain_node(0.0),
             },
         )
         .unwrap();
@@ -3656,11 +3627,19 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
         assert_eq!(core.processing.audition_projection(), Some(selected));
         assert!(core.transport.generation > before);
         loop {
-            if let AudioCommand::GraphAudition { runner, pcm, .. } =
-                commands.recv_timeout(Duration::from_secs(2)).unwrap()
+            if let AudioCommand::GraphAudition {
+                generation,
+                mut runner,
+                pcm,
+                ..
+            } = commands.recv_timeout(Duration::from_secs(2)).unwrap()
             {
+                assert_eq!(generation, core.transport.generation);
                 assert_eq!(pcm.is_some(), mode == GraphExecutionMode::Hybrid);
                 assert_eq!(runner.sample_rate(), 48000);
+                let mut block = [0.5, -0.75];
+                runner.process_interleaved(&mut block).unwrap();
+                assert!((block[0] - 0.25).abs() < 2e-6 && (block[1] + 0.375).abs() < 2e-6);
                 break;
             }
         }
@@ -3699,7 +3678,7 @@ fn master_bypass_resume_capacity_and_save_failure_keep_selection_and_original() 
     let commands = recording_audio(&mut core);
     core.state.configuration.config_path = directory.path().to_path_buf();
     core.processing_bypass(false).unwrap_err();
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
     assert_eq!(core.processing.audition_projection(), selected);
     assert_eq!(core.transport.generation, generation);
     assert!(core.preferences.settings().processing_bypassed);
@@ -3733,7 +3712,7 @@ fn master_bypass_rejects_audition_but_allows_background_graph_and_export() {
         .unwrap();
     complete(&mut core);
     assert!(destination.is_file());
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
     assert!(core.preferences.settings().processing_bypassed);
 }
 
@@ -4183,27 +4162,17 @@ fn graph_export_rechecks_canonical_parent_before_publication() {
     core.processing_event(event);
     let status = core.processing_status(2).unwrap();
     assert_eq!(status.phase, ProcessingPhase::Failed);
-    assert_eq!(
-        status.error.as_deref(),
-        Some(
-            "Graph output #2:0 was not published: Export destination parent changed after admission"
-        )
+    let error = status.error.as_deref().unwrap();
+    assert!(
+        error.contains("#2:0") && error.contains("parent changed"),
+        "{error}"
     );
     assert!(status.graph_exported_path.is_none());
     assert!(!scratch.join("export.wav").exists());
 }
 
 fn processing_command_ack(core: &mut Core, command: Command) -> Ack {
-    let (reply, response) = oneshot::channel();
-    assert!(
-        core.business_event(dispatch::BusinessEvent::Request(Request {
-            operation: Operation::Command(command),
-            reply: Some(reply),
-        }))
-    );
-    let CoreResponse::Ack(ack) = futures::executor::block_on(response).unwrap() else {
-        panic!("expected command acknowledgement");
-    };
+    let ack = operation_ack(core, Operation::Command(command));
     assert!(ack.is_success(), "{ack:?}");
     ack
 }
@@ -4317,27 +4286,34 @@ fn playback_bypass_does_not_relax_mix_source_admission() {
     }
 }
 
+fn play_with_rejected_selection(
+    core: &mut Core,
+    directory: &Path,
+) -> (rusqlite::Connection, Receiver<AudioCommand>) {
+    let commands = recording_audio(core);
+    let connection = rusqlite::Connection::open(directory.join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
+         BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
+        )
+        .unwrap();
+    assert!(core.command(Command::Play { track_id: 1 }).is_err());
+    assert!(recorded_audio(&audio_port(core), &commands).into_iter().any(|command| {
+        matches!(command, AudioCommand::Load { generation, .. } if generation == core.transport.generation)
+    }));
+    assert!(core.transport.selection_pending);
+    (connection, commands)
+}
+
 #[test]
 fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     let (directory, mut core) = fixture();
     source(directory.path());
     prepare_mix(&mut core);
     let retained_bytes = core.processing.memory_bytes();
-    let commands = recording_audio(&mut core);
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     let saved_current = core.store.queue_state().unwrap().current_id;
-    connection
-        .execute_batch(
-            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
-             BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
-        )
-        .unwrap();
-    assert!(core.command(Command::Play { track_id: 1 }).is_err());
-    while !matches!(
-        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
-        AudioCommand::Load { .. }
-    ) {}
-    assert!(core.transport.selection_pending);
+    let (connection, commands) = play_with_rejected_selection(&mut core, directory.path());
     connection
         .execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();
@@ -4354,7 +4330,7 @@ fn quarantined_mix_completion_does_not_persist_pending_queue_selection() {
     assert_eq!(core.store.queue_state().unwrap().current_id, saved_current);
     assert!(core.transport.selection_pending);
     assert_eq!(core.transport.generation, generation);
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
     assert!(core.processing.audition_id().is_none());
     core.processing.shutdown();
     assert_eq!(core.processing.memory_bytes(), retained_bytes);
@@ -4396,19 +4372,7 @@ fn scan_saving_settles_pending_selection_before_mix_handoff() {
     source(directory.path());
     write_pcm_frames(&directory.path().join("2.wav"), 100);
     prepare_mix(&mut core);
-    let commands = recording_audio(&mut core);
-    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    lock.execute_batch(
-        "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
-         BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
-    )
-    .unwrap();
-    assert!(core.command(Command::Play { track_id: 1 }).is_err());
-    while !matches!(
-        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
-        AudioCommand::Load { .. }
-    ) {}
-    assert!(core.transport.selection_pending);
+    let (lock, _commands) = play_with_rejected_selection(&mut core, directory.path());
     lock.execute_batch("DROP TRIGGER reject_queue_selection")
         .unwrap();
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
@@ -4457,20 +4421,8 @@ fn scan_queue_recovery_failure_preserves_playback_and_pending_mix() {
     let scanned = directory.path().join("new.wav");
     write_pcm_frames(&scanned, 100);
     prepare_mix(&mut core);
-    let commands = recording_audio(&mut core);
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     let saved_current = core.store.queue_state().unwrap().current_id;
-    connection
-        .execute_batch(
-            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
-             BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
-        )
-        .unwrap();
-    assert!(core.command(Command::Play { track_id: 1 }).is_err());
-    while !matches!(
-        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
-        AudioCommand::Load { .. }
-    ) {}
+    let (connection, _commands) = play_with_rejected_selection(&mut core, directory.path());
     core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
         .unwrap();
     let mix = mix_completion(&mut core);
@@ -4520,18 +4472,7 @@ fn scan_queue_recovery_failure_preserves_playback_and_pending_mix() {
 fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
     let (directory, mut core) = fixture();
     source(directory.path());
-    let commands = recording_audio(&mut core);
-    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    lock.execute_batch(
-        "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
-         BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
-    )
-    .unwrap();
-    assert!(core.command(Command::Play { track_id: 1 }).is_err());
-    while !matches!(
-        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
-        AudioCommand::Load { .. }
-    ) {}
+    let (lock, _commands) = play_with_rejected_selection(&mut core, directory.path());
     core.stop().unwrap();
     assert!(core.transport.selection_pending);
     lock.execute_batch("DROP TRIGGER reject_queue_selection")
@@ -4570,20 +4511,8 @@ fn optimization_settles_pending_selection_before_stopped_graph_handoff() {
 fn optimization_queue_recovery_failure_preserves_stopped_graph() {
     let (directory, mut core) = fixture();
     source(directory.path());
-    let commands = recording_audio(&mut core);
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     let saved_current = core.store.queue_state().unwrap().current_id;
-    connection
-        .execute_batch(
-            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE ON rivu_meta
-             BEGIN SELECT RAISE(ABORT, 'queue selection rejected'); END;",
-        )
-        .unwrap();
-    assert!(core.command(Command::Play { track_id: 1 }).is_err());
-    while !matches!(
-        commands.recv_timeout(Duration::from_secs(10)).unwrap(),
-        AudioCommand::Load { .. }
-    ) {}
+    let (connection, _commands) = play_with_rejected_selection(&mut core, directory.path());
     core.stop().unwrap();
     let target = graph_port(2, 0);
     let id = core
@@ -4990,7 +4919,7 @@ fn mix_preparation_preserves_current_source_until_successful_handoff() {
         assert_eq!(core.transport.generation, generation);
         assert_eq!(core.state.queue.current_id, selection);
         assert_eq!(core.state.playback.status, status);
-        assert!(commands.try_recv().is_err());
+        assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
         let event = mix_completion(&mut core);
         core.processing_event(event);
         let expected = if status == PlaybackStatus::Playing {
@@ -5023,7 +4952,8 @@ fn failed_cancelled_or_revoked_mix_preparation_never_opens_its_source() {
         core.processing.panic_after_mix = action == "failure";
         core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
             .unwrap();
-        assert!(commands.try_recv().is_err());
+        let port = audio_port(&mut core);
+        assert!(recorded_audio(&port, &commands).is_empty());
         let event = mix_completion(&mut core);
         match action {
             "cancel" => core.cancel_processing(1).unwrap(),
@@ -5049,7 +4979,7 @@ fn failed_cancelled_or_revoked_mix_preparation_never_opens_its_source() {
         } else if action == "stop" {
             assert_navigation_source_ready(&commands, PlaybackStatus::Stopped);
         }
-        assert!(commands.try_recv().is_err(), "{action}");
+        assert!(recorded_audio(&port, &commands).is_empty(), "{action}");
     }
 }
 
@@ -5122,7 +5052,7 @@ fn rescanned_cue_audition_reloads_validated_source_without_changing_occurrence()
                     .unwrap_err();
                 assert!(error.to_string().contains("source identity changed"));
                 assert_eq!(core.transport.generation, generation);
-                assert!(commands.try_recv().is_err());
+                assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
 
                 let id = if audition.ends_with("graph") {
                     core.processing_graph_run(

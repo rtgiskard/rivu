@@ -14,27 +14,30 @@ fn navigation_fixture(status: PlaybackStatus) -> (tempfile::TempDir, Core) {
     (directory, core)
 }
 
-fn assert_navigation_audio(commands: &Receiver<AudioCommand>, status: PlaybackStatus, path: &Path) {
-    assert!(matches!(
-        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-        AudioCommand::StopAndSnapshot(_)
-    ));
-    if status != PlaybackStatus::Stopped {
-        match commands.recv_timeout(Duration::from_secs(2)).unwrap() {
+fn assert_navigation_audio(
+    port: &AudioPort,
+    commands: &Receiver<AudioCommand>,
+    status: PlaybackStatus,
+    path: &Path,
+) {
+    match recorded_audio(port, commands).as_slice() {
+        [AudioCommand::StopAndSnapshot(_)] => assert_eq!(status, PlaybackStatus::Stopped),
+        [
+            AudioCommand::StopAndSnapshot(_),
             AudioCommand::Load {
                 path: loaded,
                 paused,
                 start_seconds,
                 ..
-            } => {
-                assert_eq!(loaded, path);
-                assert_eq!(paused, status == PlaybackStatus::Paused);
-                assert_eq!(start_seconds, 0.0);
-            }
-            _ => panic!("navigation must load exactly once with the requested status"),
+            },
+        ] => {
+            assert_ne!(status, PlaybackStatus::Stopped);
+            assert_eq!(loaded, path);
+            assert_eq!(*paused, status == PlaybackStatus::Paused);
+            assert_eq!(*start_seconds, 0.0);
         }
+        _ => panic!("navigation must stop, then load at most once with the requested status"),
     }
-    assert!(commands.try_recv().is_err());
 }
 
 #[test]
@@ -61,6 +64,7 @@ fn navigation_commands_preserve_execution_status_and_occurrence_selection() {
                 .unwrap()
                 .path;
             let commands = recording_audio(&mut core);
+            let port = audio_port(&mut core);
             let (handle, control, worker, publications) = navigation_runtime(core);
             let ack = futures::executor::block_on(handle.request_ack(command));
             assert!(ack.is_success(), "{:?}", ack.error);
@@ -78,7 +82,7 @@ fn navigation_commands_preserve_execution_status_and_occurrence_selection() {
                     .iter()
                     .all(|state| state.playback.status == status)
             );
-            assert_navigation_audio(&commands, status, &path);
+            assert_navigation_audio(&port, &commands, status, &path);
             control.request_shutdown().unwrap();
             let core = worker.join().unwrap();
             assert_eq!(
@@ -106,6 +110,7 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
             .unwrap();
         let generation = core.transport.generation;
         let commands = recording_audio(&mut core);
+        let port = audio_port(&mut core);
         core.command(Command::Pause).unwrap();
         core.audio_event(AudioEvent::Ended {
             generation,
@@ -115,21 +120,8 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
         .unwrap();
         assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
         assert_eq!(core.state.queue.current_id, Some(expected));
-        // Core sends Load synchronously, but the recorder forwards it on
-        // another thread. Its snapshot reply follows recording every earlier
-        // FIFO command, so draining cannot race the final paused Load.
-        let (snapshot, recorded_through_snapshot) = oneshot::channel();
-        core.engine
-            .send(AudioCommand::StopAndSnapshot(snapshot))
-            .unwrap();
-        futures::executor::block_on(async {
-            rivu_protocol::transport::timeout(Duration::from_secs(5), recorded_through_snapshot)
-                .await
-                .unwrap()
-                .unwrap()
-        });
-        let loads: Vec<_> = commands
-            .try_iter()
+        let loads: Vec<_> = recorded_audio(&port, &commands)
+            .into_iter()
             .filter_map(|command| match command {
                 AudioCommand::Load { paused, .. } => Some(paused),
                 _ => None,
@@ -205,6 +197,7 @@ fn invalid_seek_ack_preserves_paused_playback_and_valid_seek_stays_paused() {
     core.state.playback.position = 0.25;
     let revision = core.state.playback.seek_revision;
     let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     let (handle, control, worker, _) = navigation_runtime(core);
     for seconds in [f64::NAN, f64::INFINITY, -1.0, 1e300, i64::MAX as f64] {
         let ack = futures::executor::block_on(handle.request_ack(Command::Seek { seconds }));
@@ -213,7 +206,7 @@ fn invalid_seek_ack_preserves_paused_playback_and_valid_seek_stays_paused() {
         assert_eq!(snapshot.playback.status, PlaybackStatus::Paused);
         assert_eq!(snapshot.playback.position, 0.25);
         assert_eq!(snapshot.playback.seek_revision, revision);
-        assert!(commands.try_recv().is_err());
+        assert!(recorded_audio(&port, &commands).is_empty());
     }
     let ack = futures::executor::block_on(handle.request_ack(Command::Seek { seconds: 0.5 }));
     assert!(ack.is_success());
@@ -222,10 +215,9 @@ fn invalid_seek_ack_preserves_paused_playback_and_valid_seek_stays_paused() {
     assert_eq!(snapshot.playback.position, 0.5);
     assert_eq!(snapshot.playback.seek_revision, revision.wrapping_add(1));
     assert!(matches!(
-        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-        AudioCommand::Seek { seconds: 0.5, revision: actual } if actual == revision.wrapping_add(1)
+        recorded_audio(&port, &commands).as_slice(),
+        [AudioCommand::Seek { seconds: 0.5, revision: actual }] if *actual == revision.wrapping_add(1)
     ));
-    assert!(commands.try_recv().is_err());
     control.request_shutdown().unwrap();
     worker.join().unwrap();
 }
@@ -235,6 +227,7 @@ fn backend_seek_rejection_restores_paused_position_without_stopping() {
     for opened in [false, true] {
         let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
         let commands = recording_audio(&mut core);
+        let port = audio_port(&mut core);
         if opened {
             started(&mut core, Some(20.0)).unwrap();
         }
@@ -265,7 +258,7 @@ fn backend_seek_rejection_restores_paused_position_without_stopping() {
         );
         assert!(core.transport.session.is_some());
         assert!(
-            commands.try_recv().is_err(),
+            recorded_audio(&port, &commands).is_empty(),
             "rejection must not stop output"
         );
     }
@@ -362,6 +355,7 @@ fn drained_eof_after_seek_rejection_advances_once_or_stops_at_queue_end() {
 fn old_seek_rejections_cannot_roll_back_newer_seek_or_generation() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     core.command(Command::Seek { seconds: 1e16 }).unwrap();
     let rejected_revision = core.state.playback.seek_revision;
     core.command(Command::Seek { seconds: 0.5 }).unwrap();
@@ -425,7 +419,7 @@ fn old_seek_rejections_cannot_roll_back_newer_seek_or_generation() {
             Some("Current backend rejection")
         );
     }
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&port, &commands).is_empty());
 }
 
 #[test]
@@ -433,6 +427,7 @@ fn queued_pause_is_authoritative_for_navigation_not_the_callers_snapshot() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
     let expected = core.store.queue_id_at(2).unwrap().unwrap();
     let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     let (handle, control, worker, publications) = navigation_runtime(core);
     assert_eq!(
         handle.mpris_snapshot().playback.status,
@@ -461,7 +456,7 @@ fn queued_pause_is_authoritative_for_navigation_not_the_callers_snapshot() {
         .unwrap()
         .path
         .clone();
-    assert_navigation_audio(&commands, PlaybackStatus::Paused, &path);
+    assert_navigation_audio(&port, &commands, PlaybackStatus::Paused, &path);
     control.request_shutdown().unwrap();
     worker.join().unwrap();
 }
@@ -480,6 +475,7 @@ fn shuffle_previous_preserves_status_and_follows_occurrence_history() {
         core.transport.history = vec![ids[0], ids[2], ids[3]];
         core.transport.history_cursor = 3;
         let commands = recording_audio(&mut core);
+        let port = audio_port(&mut core);
         let (handle, control, worker, publications) = navigation_runtime(core);
         for expected in [ids[2], ids[0]] {
             assert!(
@@ -488,7 +484,12 @@ fn shuffle_previous_preserves_status_and_follows_occurrence_history() {
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.queue.current_id, Some(expected));
             assert_eq!(snapshot.playback.status, status);
-            assert_navigation_audio(&commands, status, &snapshot.current_track().unwrap().path);
+            assert_navigation_audio(
+                &port,
+                &commands,
+                status,
+                &snapshot.current_track().unwrap().path,
+            );
         }
         assert!(
             publications
@@ -537,6 +538,7 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
             edit_preferences(&mut core, |config| config.shuffle = shuffle);
             edit_preferences(&mut core, |config| config.repeat = repeat);
             let commands = recording_audio(&mut core);
+            let port = audio_port(&mut core);
             let (handle, control, worker, publications) = navigation_runtime(core);
             assert!(futures::executor::block_on(handle.request_ack(Command::Next)).is_success());
             let snapshot = handle.mpris_snapshot();
@@ -548,7 +550,12 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
                     .iter()
                     .all(|state| state.playback.status == status)
             );
-            assert_navigation_audio(&commands, status, &snapshot.current_track().unwrap().path);
+            assert_navigation_audio(
+                &port,
+                &commands,
+                status,
+                &snapshot.current_track().unwrap().path,
+            );
             control.request_shutdown().unwrap();
             worker.join().unwrap();
         }
@@ -573,11 +580,12 @@ fn previous_without_predecessor_preserves_position_and_status() {
             core.state.playback.position = 4.0;
             edit_preferences(&mut core, |config| config.shuffle = shuffle);
             let commands = recording_audio(&mut core);
+            let port = audio_port(&mut core);
             core.command(Command::Previous).unwrap();
             assert_eq!(core.state.queue.current_id, Some(current));
             assert_eq!(core.state.playback.status, status);
             assert_eq!(core.state.playback.position, 4.0);
-            assert!(commands.try_recv().is_err());
+            assert!(recorded_audio(&port, &commands).is_empty());
         }
     }
 }
@@ -748,32 +756,37 @@ fn repeat_one_only_repeats_natural_end_and_repeat_all_revisits_singleton() {
 
 #[test]
 fn random_draws_include_current_weight_duplicates_and_ignore_forward_history() {
-    use rand::SeedableRng;
+    use rand::{RngExt, SeedableRng};
     let (_directory, mut core) = fixture();
     core.state.queue.current_id = Some(3);
     core.transport.history = vec![1, 3, 5];
     core.transport.history_cursor = 1;
+    // Each draw is uniform over occurrence slots, so track 2's two slots
+    // double its weight while the current and forward entries stay eligible.
+    let slots = core.store.queue_ids().unwrap();
     let mut rng = rand::rngs::StdRng::seed_from_u64(9);
-    let mut counts = [0usize; 5];
-    let mut immediate_repeat = false;
-    let mut previous = 3;
-    for _ in 0..30_000 {
-        let id = core.random_queue_id(&mut rng).unwrap().unwrap();
-        immediate_repeat |= previous == id;
-        counts[id as usize - 1] += 1;
-        previous = id;
-    }
-    assert!(immediate_repeat);
-    assert!(counts.iter().all(|count| (5_500..6_500).contains(count)));
-    assert!(counts[1] + counts[2] > counts[0] * 18 / 10);
+    let mut reference = rand::rngs::StdRng::seed_from_u64(9);
+    let draws: Vec<_> = (0..64)
+        .map(|_| core.random_queue_id(&mut rng).unwrap().unwrap())
+        .collect();
+    let expected: Vec<_> = (0..64)
+        .map(|_| slots[reference.random_range(0..core.state.queue.total)])
+        .collect();
+    assert_eq!(draws, expected);
+    assert!(slots.iter().all(|slot| draws.contains(slot)));
+    assert!(draws.windows(2).any(|pair| pair[0] == pair[1]));
     core.command(Command::ClearQueue).unwrap();
     core.enqueue(&[1]).unwrap();
     let id = core.store.queue_id_at(0).unwrap().unwrap();
     assert_eq!(core.random_queue_id(&mut rng).unwrap(), Some(id));
-    for _ in 0..5000 {
+    // Saturation evicts the oldest entry.
+    core.transport.reset_history();
+    for id in 0..=4096 {
         core.transport.record_history(id);
     }
     assert_eq!(core.transport.history.len(), 4096);
+    assert_eq!(core.transport.history.first(), Some(&1));
+    assert_eq!(core.transport.history.last(), Some(&4096));
     assert_eq!(core.transport.history_cursor, 4096);
 }
 
@@ -1007,6 +1020,7 @@ fn mpris_over_end_seek_recovers_an_appended_old_tail_without_replaying_enqueue()
         assert_eq!(saved.len(), 6);
         let revision = core.state.queue.revision;
         let commands = recording_audio(&mut core);
+        let port = audio_port(&mut core);
         let seek = |core: &mut Core, offset| {
             operation_ack(
                 core,
@@ -1025,10 +1039,9 @@ fn mpris_over_end_seek_recovers_an_appended_old_tail_without_replaying_enqueue()
         assert_eq!(core.state.playback.status, status);
         assert!(core.transport.projection_stale);
         assert!(matches!(
-            commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-            AudioCommand::Seek { seconds: 1.0, .. }
+            recorded_audio(&port, &commands).as_slice(),
+            [AudioCommand::Seek { seconds: 1.0, .. }]
         ));
-        assert!(commands.try_recv().is_err());
         repair_queue_projection(&connection);
         assert!(seek(&mut core, i64::MAX).is_success());
         assert!(!core.transport.projection_stale);
@@ -1039,7 +1052,7 @@ fn mpris_over_end_seek_recovers_an_appended_old_tail_without_replaying_enqueue()
         assert_eq!(core.state.playback.status, status);
         assert_eq!(core.state.queue.revision, revision);
         assert_eq!(core.store.queue_ids().unwrap(), saved);
-        assert_navigation_audio(&commands, status, &directory.path().join("1.wav"));
+        assert_navigation_audio(&port, &commands, status, &directory.path().join("1.wav"));
         assert_queue_saved(&core);
     }
 }
@@ -1053,6 +1066,7 @@ fn mpris_over_end_seek_recovers_a_surviving_tail_after_committed_removal() {
     repair_queue_scalar(&connection);
     let generation = core.transport.generation;
     let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     let ack = operation_ack(
         &mut core,
         Operation::MprisSeek {
@@ -1068,7 +1082,7 @@ fn mpris_over_end_seek_recovers_a_surviving_tail_after_committed_removal() {
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     assert_eq!(core.transport.generation, generation);
     assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&port, &commands).is_empty());
 }
 
 #[test]
@@ -1153,12 +1167,31 @@ fn stale_queue_shuffle_previous_prunes_deleted_occurrences_before_reading_cursor
     assert_eq!(core.transport.history_cursor, 1);
 }
 
+// Fail exactly the persisted queue selection write until the trigger is
+// dropped, without holding a SQLite lock against Core's busy timeout.
+fn reject_queue_selection(directory: &Path) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(directory.join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_queue_selection BEFORE UPDATE OF current_queue_entry_id ON rivu_meta
+             BEGIN SELECT RAISE(ABORT,'selection rejected'); END;",
+        )
+        .unwrap();
+    connection
+}
+
+fn allow_queue_selection(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch("DROP TRIGGER reject_queue_selection")
+        .unwrap();
+}
+
 #[test]
 fn stopped_navigation_write_failure_preserves_new_occurrence_until_dedup_can_commit() {
     let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
     let commands = recording_audio(&mut core);
-    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let port = audio_port(&mut core);
+    let connection = reject_queue_selection(directory.path());
     assert!(core.command(Command::Next).is_err());
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.queue.current_position, Some(2));
@@ -1168,18 +1201,18 @@ fn stopped_navigation_write_failure_preserves_new_occurrence_until_dedup_can_com
     assert!(core.command(Command::DeduplicateQueue).is_err());
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5]);
-    // A pending database write cannot prevent releasing the audio owner.
+    // A failing selection write cannot prevent releasing the audio owner.
     core.command(Command::Stop).unwrap();
     assert_eq!(core.state.queue.current_id, Some(3));
-    lock.execute_batch("ROLLBACK").unwrap();
+    allow_queue_selection(&connection);
     core.command(Command::DeduplicateQueue).unwrap();
     assert_eq!(queue_entries(&core), [(1, 1), (3, 2), (4, 3), (5, 4)]);
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.queue.current_position, Some(1));
     assert_queue_saved(&core);
     assert!(
-        commands
-            .try_iter()
+        recorded_audio(&port, &commands)
+            .iter()
             .all(|command| matches!(command, AudioCommand::StopAndSnapshot(_)))
     );
 }
@@ -1189,11 +1222,10 @@ fn authoritative_queue_removal_retires_unsaved_selection_without_resurrecting_it
     for clear in [false, true] {
         let (directory, mut core) = navigation_fixture(PlaybackStatus::Stopped);
         let _commands = recording_audio(&mut core);
-        let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let connection = reject_queue_selection(directory.path());
         assert!(core.command(Command::Next).is_err());
         assert_eq!(core.state.queue.current_id, Some(3));
-        lock.execute_batch("ROLLBACK").unwrap();
+        allow_queue_selection(&connection);
         core.command(if clear {
             Command::ClearQueue
         } else {
@@ -1218,11 +1250,10 @@ fn authoritative_queue_replacement_supersedes_unsaved_old_selection() {
         .create_playlist_with_tracks("Replacement", &[1, 4])
         .unwrap();
     let _commands = recording_audio(&mut core);
-    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let connection = reject_queue_selection(directory.path());
     assert!(core.command(Command::Next).is_err());
     assert_eq!(core.state.queue.current_id, Some(3));
-    lock.execute_batch("ROLLBACK").unwrap();
+    allow_queue_selection(&connection);
     core.command(Command::PlayPlaylist { playlist_id }).unwrap();
     assert_eq!(
         queue_entries(&core)
@@ -1247,11 +1278,8 @@ fn accepted_load_survives_selection_save_failure_and_late_projection() {
     let old_selection = core.store.queue_state().unwrap().current_id;
     let delayed = core.store.queue_projection(core.state.queue.revision);
     let commands = recording_audio(&mut core);
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection.execute_batch(
-        "CREATE TRIGGER reject_queue_selection BEFORE UPDATE OF current_queue_entry_id ON rivu_meta
-         BEGIN SELECT RAISE(ABORT,'selection rejected'); END;",
-    ).unwrap();
+    let port = audio_port(&mut core);
+    let connection = reject_queue_selection(directory.path());
     assert!(core.start(3, QueueHistory::Record).is_err());
     let source = core.transport.generation;
     assert_ne!(source, old_source);
@@ -1261,23 +1289,21 @@ fn accepted_load_survives_selection_save_failure_and_late_projection() {
     assert_eq!(core.transport.session.as_ref().unwrap().loaded_track.id, 2);
     assert_eq!(core.store.queue_state().unwrap().current_id, old_selection);
     assert!(matches!(
-        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-        AudioCommand::StopAndSnapshot(_)
+        recorded_audio(&port, &commands).as_slice(),
+        [
+            AudioCommand::StopAndSnapshot(_),
+            AudioCommand::Load { generation, .. },
+        ] if *generation == source
     ));
-    assert!(
-        matches!(commands.recv_timeout(Duration::from_secs(2)).unwrap(), AudioCommand::Load { generation, .. } if generation == source)
-    );
     assert!(core.accept_queue_projection(delayed).is_err());
     assert_eq!(core.state.queue.current_id, Some(3));
-    connection
-        .execute_batch("DROP TRIGGER reject_queue_selection")
-        .unwrap();
+    allow_queue_selection(&connection);
     core.ensure_queue_control_ready().unwrap();
     assert_queue_saved(&core);
     assert_eq!(core.transport.generation, source);
     assert_eq!(core.state.queue.current_id, Some(3));
     assert!(
-        commands.try_recv().is_err(),
+        recorded_audio(&port, &commands).is_empty(),
         "selection recovery must not replay Load"
     );
     core.audio_event(AudioEvent::Ended {
@@ -1296,24 +1322,17 @@ fn shuffle_previous_commits_history_cursor_before_a_selection_save_can_fail() {
     edit_preferences(&mut core, |config| config.shuffle = true);
     core.transport.history = vec![5, 4, 2];
     core.transport.history_cursor = 3;
-    let commands = recording_audio(&mut core);
-    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection.execute_batch(
-        "CREATE TRIGGER reject_queue_selection BEFORE UPDATE OF current_queue_entry_id ON rivu_meta
-         BEGIN SELECT RAISE(ABORT,'selection rejected'); END;",
-    ).unwrap();
+    let _commands = recording_audio(&mut core);
+    let connection = reject_queue_selection(directory.path());
     assert!(core.command(Command::Previous).is_err());
     assert_eq!(core.state.queue.current_id, Some(4));
     assert_eq!(core.transport.history_cursor, 2);
-    connection
-        .execute_batch("DROP TRIGGER reject_queue_selection")
-        .unwrap();
+    allow_queue_selection(&connection);
     core.ensure_queue_control_ready().unwrap();
     core.command(Command::Previous).unwrap();
     assert_eq!(core.state.queue.current_id, Some(5));
     assert_eq!(core.transport.history_cursor, 1);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
-    drop(commands);
 }
 
 #[test]
@@ -1337,12 +1356,13 @@ fn manual_tail_next_preserves_source_while_natural_eof_stops() {
         core.state.playback.position = 4.0;
         let generation = core.transport.generation;
         let commands = recording_audio(&mut core);
+        let port = audio_port(&mut core);
         core.command(Command::Next).unwrap();
         assert_eq!(core.state.queue.current_id, Some(tail));
         assert_eq!(core.state.playback.status, status);
         assert_eq!(core.state.playback.position, 4.0);
         assert_eq!(core.transport.generation, generation);
-        assert!(commands.try_recv().is_err());
+        assert!(recorded_audio(&port, &commands).is_empty());
         if status != PlaybackStatus::Stopped {
             core.audio_event(AudioEvent::Ended {
                 generation,
@@ -1363,6 +1383,7 @@ fn empty_navigation_and_resume_do_not_send_audio_commands() {
     core.command(Command::ClearQueue).unwrap();
     let generation = core.transport.generation;
     let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     for command in [Command::Next, Command::Previous, Command::Resume] {
         let ack = operation_ack(&mut core, Operation::Command(command));
         assert!(ack.is_success(), "{:?}", ack.error);
@@ -1370,7 +1391,7 @@ fn empty_navigation_and_resume_do_not_send_audio_commands() {
         assert_eq!(core.state.queue.current_id, None);
         assert_eq!(core.transport.generation, generation);
         assert!(core.state.system.last_error.is_none());
-        assert!(commands.try_recv().is_err());
+        assert!(recorded_audio(&port, &commands).is_empty());
     }
 }
 
@@ -1392,12 +1413,13 @@ fn shuffle_history_exhaustion_never_falls_back_to_physical_predecessor() {
             core.state.playback.position = 4.0;
             let generation = core.transport.generation;
             let commands = recording_audio(&mut core);
+            let port = audio_port(&mut core);
             core.command(Command::Previous).unwrap();
             assert_eq!(core.state.queue.current_id, Some(current));
             assert_eq!(core.state.playback.status, status);
             assert_eq!(core.state.playback.position, 4.0);
             assert_eq!(core.transport.generation, generation);
-            assert!(commands.try_recv().is_err());
+            assert!(recorded_audio(&port, &commands).is_empty());
         }
     }
 }
@@ -1430,6 +1452,7 @@ fn stopped_resume_preserves_history_cursor_and_forward_visits_but_explicit_play_
 fn queued_resume_uses_execution_status_and_playing_resume_is_a_noop() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
     let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     let (handle, control, worker, _) = navigation_runtime(core);
     handle.send(Command::Pause).unwrap();
     assert!(futures::executor::block_on(handle.request_ack(Command::Resume)).is_success());
@@ -1438,15 +1461,11 @@ fn queued_resume_uses_execution_status_and_playing_resume_is_a_noop() {
         PlaybackStatus::Playing
     );
     assert!(matches!(
-        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-        AudioCommand::Pause(true)
-    ));
-    assert!(matches!(
-        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-        AudioCommand::Pause(false)
+        recorded_audio(&port, &commands).as_slice(),
+        [AudioCommand::Pause(true), AudioCommand::Pause(false)]
     ));
     assert!(futures::executor::block_on(handle.request_ack(Command::Resume)).is_success());
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&port, &commands).is_empty());
     control.request_shutdown().unwrap();
     worker.join().unwrap();
 }
@@ -1456,6 +1475,7 @@ fn mpris_set_position_uses_execution_duration_and_ignores_stale_or_stopped_occur
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     let queue_id = core.state.queue.current_id.unwrap();
     let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     let intent = Operation::MprisSetPosition {
         queue_id,
         position: 5_000_001,
@@ -1465,7 +1485,7 @@ fn mpris_set_position_uses_execution_duration_and_ignores_stale_or_stopped_occur
     let revision = core.state.playback.seek_revision;
     assert!(operation_ack(&mut core, intent).is_success());
     assert_eq!(core.state.playback.seek_revision, revision);
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&port, &commands).is_empty());
     for position in [-1, 5_000_001, i64::MAX] {
         let ack = operation_ack(
             &mut core,
@@ -1473,7 +1493,7 @@ fn mpris_set_position_uses_execution_duration_and_ignores_stale_or_stopped_occur
         );
         assert!(ack.is_success(), "{:?}", ack.error);
         assert_eq!(core.state.playback.seek_revision, revision);
-        assert!(commands.try_recv().is_err());
+        assert!(recorded_audio(&port, &commands).is_empty());
     }
     for position in [1_250_000, 5_000_000] {
         let ack = operation_ack(
@@ -1530,12 +1550,13 @@ fn mpris_set_position_uses_execution_duration_and_ignores_stale_or_stopped_occur
 
 #[test]
 fn mpris_set_position_allows_unknown_duration_without_queue_recovery() {
-    let (_directory, mut core) = fixture_with_duration(None);
+    let (_directory, mut core) = fixture_with_database(None);
     pending(&mut core, 1);
     core.state.playback.status = PlaybackStatus::Paused;
     core.transport.selection_pending = true;
     core.transport.projection_stale = true;
     let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     assert!(
         operation_ack(
             &mut core,
@@ -1551,10 +1572,9 @@ fn mpris_set_position_allows_unknown_duration_without_queue_recovery() {
     assert!(core.transport.selection_pending);
     assert!(core.transport.projection_stale);
     assert!(matches!(
-        commands.recv_timeout(Duration::from_secs(2)).unwrap(),
-        AudioCommand::Seek { seconds: 1.25, .. }
+        recorded_audio(&port, &commands).as_slice(),
+        [AudioCommand::Seek { seconds: 1.25, .. }]
     ));
-    assert!(commands.try_recv().is_err());
 }
 
 fn natural_end(core: &mut Core) {
@@ -1567,13 +1587,20 @@ fn natural_end(core: &mut Core) {
 }
 
 /// Report each missing source the way the decoder would, until one loads.
+/// A revisited failed occurrence fails here instead of looping forever.
 fn fail_missing_sources(core: &mut Core) {
+    let mut failed = std::collections::HashSet::new();
     while core.state.playback.status != PlaybackStatus::Stopped
         && core
             .state
             .current_track()
             .is_some_and(|track| !track.path.is_file())
     {
+        let current = core.state.queue.current_id.unwrap();
+        assert!(
+            failed.insert(current),
+            "autoplay revisited failed occurrence {current}"
+        );
         fail_current_source(core, audio::AudioFailureKind::Source);
     }
 }

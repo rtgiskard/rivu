@@ -37,13 +37,18 @@ fn saving_with_write_lock_and_processing(
     (directory, core, lock)
 }
 
-fn finish_saving(core: &mut Core, lock: rusqlite::Connection) {
-    lock.execute_batch("ROLLBACK").unwrap();
+fn drain_scan(core: &mut Core, mut handle: impl FnMut(&mut Core, ScanEvent)) {
     while core.active_scan.is_some() {
         let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        core.scan_event(event);
+        handle(core, event);
     }
-    core.flush_deferred_playback().unwrap();
+}
+
+fn finish_saving(core: &mut Core, lock: rusqlite::Connection) {
+    lock.execute_batch("ROLLBACK").unwrap();
+    drain_scan(core, |core, event| {
+        assert!(core.business_event(dispatch::BusinessEvent::Scan(event)));
+    });
 }
 
 #[test]
@@ -52,15 +57,11 @@ fn processing_cancellation_remains_available_while_scan_holds_saving_phase() {
     assert!(core.database_maintenance_active());
     core.command(Command::CancelProcessing { id: 1 }).unwrap();
     loop {
-        let event = futures::executor::block_on(async {
-            rivu_protocol::transport::timeout(
-                Duration::from_secs(5),
-                core.processing.receiver.recv(),
-            )
-            .await
-            .unwrap()
-            .unwrap()
-        });
+        let event = core
+            .processing
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
         let finished = matches!(event, rivu_processing::Event::Finished { .. });
         core.processing_event(event);
         if finished {
@@ -251,8 +252,9 @@ fn eof_during_scan_saving_preserves_later_pause_intent() {
         Some(PlaybackStatus::Paused)
     );
     finish_saving(&mut core, lock);
-    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
-    assert_eq!(core.state.queue.current_id, Some(1));
+    assert_eq!(core.transport.pending_navigation, None);
+    assert_eq!(core.shared.read().playback.status, PlaybackStatus::Paused);
+    assert_eq!(core.shared.read().queue.current_id, Some(1));
     assert_eq!(play_count(&core, 1), 1);
 }
 
@@ -288,43 +290,10 @@ fn stop_after_saving_eof_cancels_navigation_without_reopening_the_source() {
     assert_eq!(core.transport.pending_navigation, None);
     assert_eq!(play_count(&core, 1), 1);
     assert!(
-        commands
-            .try_iter()
+        recorded_audio(&audio_port(&mut core), &commands)
+            .into_iter()
             .all(|command| matches!(command, AudioCommand::StopAndSnapshot(_)))
     );
-}
-
-#[test]
-fn export_cancelled_after_last_row_preserves_existing_destination() {
-    let (directory, core) = fixture();
-    let destination = directory.path().join("playlist.m3u8");
-    std::fs::write(&destination, b"original\n").unwrap();
-    let cancellation = library::ScanCancellation::default();
-    let final_check = cancellation.clone();
-    let id = core
-        .store
-        .create_playlist_with_tracks("Cancel", &[1])
-        .unwrap();
-    let track = core
-        .store
-        .playlist_export_batch(id, None, 1)
-        .unwrap()
-        .rows
-        .remove(0);
-    let tracks = std::iter::once(Ok(track)).chain(std::iter::from_fn(move || {
-        final_check.cancel();
-        None
-    }));
-    assert!(
-        futures::executor::block_on(library::export_m3u(
-            &core.workers,
-            &destination,
-            futures::stream::iter(tracks),
-            &cancellation
-        ),)
-        .is_err()
-    );
-    assert_eq!(std::fs::read(&destination).unwrap(), b"original\n");
 }
 
 #[test]
@@ -336,10 +305,7 @@ fn failed_deferred_activity_preserves_controls_and_guards_producer_replacement()
     progress(&mut core, 3.0, 3.0);
     core.command(Command::Stop).unwrap();
     lock.execute_batch("ROLLBACK").unwrap();
-    while core.active_scan.is_some() {
-        let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        core.scan_event(event);
-    }
+    drain_scan(&mut core, Core::scan_event);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_activity BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(FAIL,'activity unavailable'); END").unwrap();
     assert!(core.flush_deferred_playback().is_err());
@@ -371,10 +337,7 @@ fn failed_deferred_activity_preserves_controls_and_guards_producer_replacement()
         force: true,
     })
     .unwrap();
-    while core.active_scan.is_some() {
-        let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        core.scan_event(event);
-    }
+    drain_scan(&mut core, Core::scan_event);
     let failed_scan = core.scan_results.back().unwrap();
     assert_eq!(failed_scan.progress.phase, ScanPhase::Failed);
     assert!(!failed_scan.library_committed);
@@ -397,10 +360,7 @@ fn failed_active_deferred_writes_recover_on_progress_without_replaying_commits()
         started(&mut core, Some(10.0)).unwrap();
         progress(&mut core, 3.0, 3.0);
         lock.execute_batch("ROLLBACK").unwrap();
-        while core.active_scan.is_some() {
-            let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            core.scan_event(event);
-        }
+        drain_scan(&mut core, Core::scan_event);
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         connection.execute_batch(match failure {
             "activity" => "CREATE TRIGGER reject_deferred_write BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(ABORT,'activity unavailable'); END;",
@@ -466,10 +426,7 @@ fn deferred_eof_history_failure_releases_source_and_preserves_navigation() {
         Some(PlaybackStatus::Playing)
     );
     lock.execute_batch("ROLLBACK").unwrap();
-    while core.active_scan.is_some() {
-        let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        core.scan_event(event);
-    }
+    drain_scan(&mut core, Core::scan_event);
     let history = Arc::clone(&core.state.library.history);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_deferred_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;").unwrap();

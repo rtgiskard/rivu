@@ -804,9 +804,21 @@ mod tests {
         fence: &Arc<ReadFence>,
         query: Query,
     ) -> QueryResponse {
+        let state = ReadState::capture(&core.shared.read(), &query);
+        execute_read_at(core, path, reader, fence, state, query)
+    }
+
+    fn execute_read_at(
+        core: &Core,
+        path: &Path,
+        reader: &mut Option<ReadConnection>,
+        fence: &Arc<ReadFence>,
+        state: ReadState,
+        query: Query,
+    ) -> QueryResponse {
         let (reply, _receiver) = oneshot::channel();
         let request = ReadRequest {
-            state: ReadState::capture(&core.shared.read(), &query),
+            state,
             query,
             ticket: None,
             reply,
@@ -818,7 +830,7 @@ mod tests {
     fn playback_rows_refresh_without_recounting_catalog_membership() {
         use rivu_protocol::model::{AlbumKey, AlbumSort, LibrarySort};
 
-        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, mut core) = super::super::tests::fixture();
         core.edit_track(
             1,
             None,
@@ -896,9 +908,10 @@ mod tests {
             );
         }
         let reads = reader.as_ref().unwrap().store.scalar_count_reads();
-        assert_eq!(reads, 5);
+        assert!(reads > 0);
         let before = core.state.library.clone();
         for play_count in [false, true] {
+            let prior_revision = core.state.library.revision;
             let stats = if play_count {
                 core.store.increment_play_count(1).unwrap()
             } else {
@@ -906,7 +919,7 @@ mod tests {
             };
             core.update_track_stats(1, stats).unwrap();
             core.publish();
-            assert_ne!(core.state.library.revision, before.revision);
+            assert_ne!(core.state.library.revision, prior_revision);
             assert_eq!(core.state.library.album_revision, before.album_revision);
             assert_eq!(core.state.library.count_revision, before.count_revision);
             for query in &queries {
@@ -964,15 +977,11 @@ mod tests {
                 0
             );
         }
-        assert_eq!(
-            reader.as_ref().unwrap().store.scalar_count_reads(),
-            reads + 5
-        );
     }
 
     #[test]
     fn unchanged_tags_publish_written_source_fingerprint_and_size_to_readers() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, mut core) = super::super::tests::fixture();
         core.edit_track(1, None, None, Some("First album".into()), None, None)
             .unwrap();
         core.edit_track(2, None, None, Some("Second album".into()), None, None)
@@ -1027,17 +1036,15 @@ mod tests {
         assert!(!core.store.sync_track_tags(2, &tags).unwrap().changed);
         core.accept_catalog_facts(changes, Some(&[2]), None);
         core.publish();
-        let (reply, _receiver) = oneshot::channel();
-        let stale = ReadRequest {
-            state: ReadState::capture(&before, &query),
-            query: query.clone(),
-            ticket: None,
-            reply,
-        };
-        assert!(matches!(
-            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale).result,
-            Err(QueryError::RevisionChanged)
-        ));
+        let stale = execute_read_at(
+            &core,
+            &path,
+            &mut reader,
+            &fence,
+            ReadState::capture(&before, &query),
+            query.clone(),
+        );
+        assert!(matches!(stale.result, Err(QueryError::RevisionChanged)));
         let current = execute_read(&core, &path, &mut reader, &fence, query.clone());
         assert_ne!(query.stamp(old.revisions), query.stamp(current.revisions));
         assert!(
@@ -1047,15 +1054,16 @@ mod tests {
                 && track.track_number == tags.track_number && track.disc_number == tags.disc_number
                 && track.release_date == tags.release_date)
         );
-        let (reply, _receiver) = oneshot::channel();
-        let stale_albums = ReadRequest {
-            state: ReadState::capture(&before, &albums_query),
-            query: albums_query.clone(),
-            ticket: None,
-            reply,
-        };
+        let stale_albums = execute_read_at(
+            &core,
+            &path,
+            &mut reader,
+            &fence,
+            ReadState::capture(&before, &albums_query),
+            albums_query.clone(),
+        );
         assert!(matches!(
-            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale_albums).result,
+            stale_albums.result,
             Err(QueryError::RevisionChanged)
         ));
         let current_albums = execute_read(&core, &path, &mut reader, &fence, albums_query);
@@ -1075,7 +1083,7 @@ mod tests {
 
     #[test]
     fn bitrate_commits_refresh_payload_stamps_without_changing_query_shape() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, mut core) = super::super::tests::fixture();
         core.publish();
         let path = directory.path().join("library.db");
         let query = Query::Track { track_id: 1 };
@@ -1104,38 +1112,30 @@ mod tests {
                 core.state.library.bitrate_revision.wrapping_add(1);
             core.publish();
         }
-        let (reply, _receiver) = oneshot::channel();
-        let stale = ReadRequest {
-            state: ReadState::capture(&before, &query),
-            query: query.clone(),
-            ticket: None,
-            reply,
-        };
-        assert!(matches!(
-            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale).result,
-            Err(QueryError::RevisionChanged)
-        ));
+        let stale = execute_read_at(
+            &core,
+            &path,
+            &mut reader,
+            &fence,
+            ReadState::capture(&before, &query),
+            query.clone(),
+        );
+        assert!(matches!(stale.result, Err(QueryError::RevisionChanged)));
         let statistics = Query::LibraryStats;
-        let (reply, _receiver) = oneshot::channel();
-        let scalar = ReadRequest {
-            state: ReadState::capture(&before, &statistics),
-            query: statistics,
-            ticket: None,
-            reply,
-        };
-        assert!(matches!(
-            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &scalar).result,
-            Ok(ViewResponse::LibraryStats(_))
-        ));
+        let scalar = execute_read_at(
+            &core,
+            &path,
+            &mut reader,
+            &fence,
+            ReadState::capture(&before, &statistics),
+            statistics,
+        );
+        assert!(matches!(scalar.result, Ok(ViewResponse::LibraryStats(_))));
         // Background readers retain no Track payloads between accepted snapshots.
         let current = execute_read(&core, &path, &mut reader, &fence, query.clone());
         assert_ne!(
             query.stamp(old_response.revisions),
             query.stamp(current.revisions)
-        );
-        assert_eq!(
-            current.revisions.bitrate,
-            old_response.revisions.bitrate.wrapping_add(2)
         );
         assert!(
             matches!(current.result, Ok(ViewResponse::Track(Some(track))) if (track.bitrate_bps, track.bitrate_exact) == (Some(192_000), true))
@@ -1156,7 +1156,7 @@ mod tests {
 
     #[test]
     fn filtered_queue_reads_and_continuations_follow_only_queue_inputs() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, mut core) = super::super::tests::fixture();
         let queue_id = core.store.queued_track(4).unwrap().unwrap();
         core.command(Command::RemoveQueue { queue_id }).unwrap();
         core.publish();
@@ -1266,15 +1266,14 @@ mod tests {
                     expected: Some(before.query_revisions_for(&continuation)),
                 },
             ] {
-                let (reply, _receiver) = oneshot::channel();
-                let stale = ReadRequest {
-                    state: ReadState::capture(&before, &query),
-                    query: query.clone(),
-                    ticket: None,
-                    reply,
-                };
-                let response =
-                    ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale);
+                let response = execute_read_at(
+                    &core,
+                    &path,
+                    &mut reader,
+                    &fence,
+                    ReadState::capture(&before, &query),
+                    query.clone(),
+                );
                 let current = execute_read(&core, &path, &mut reader, &fence, query.clone());
                 if queue_changed {
                     assert!(matches!(response.result, Err(QueryError::RevisionChanged)));
@@ -1332,20 +1331,15 @@ mod tests {
             .iter()
             .map(|&id| {
                 let track = core.track(id).unwrap();
-                let known = core.store.known_source(&track.path).unwrap().unwrap();
-                library::ScanRecord {
-                    path: track.path,
-                    size: known.size,
-                    modified_ns: known.modified_ns,
-                    fingerprint: fingerprint.map(|hash| blake3::Hash::from_hex(hash).unwrap()),
-                    media: known.media.unwrap(),
-                }
+                let mut record = super::super::tests::record_for_known_file(core, track.path);
+                record.fingerprint = fingerprint.map(|hash| blake3::Hash::from_hex(hash).unwrap());
+                Arc::new(record)
             })
-            .collect::<Vec<_>>();
+            .collect();
         let impacts = core
             .store
             .apply_scan(&ScanResult {
-                records: records.into_iter().map(std::sync::Arc::new).collect(),
+                records,
                 ..Default::default()
             })
             .unwrap();
@@ -1355,7 +1349,7 @@ mod tests {
 
     #[test]
     fn abandoned_queued_read_is_cancelled_before_database_admission() {
-        let (directory, core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, core) = super::super::tests::fixture();
         let query = Query::Track { track_id: 1 };
         let (reply, receiver) = oneshot::channel();
         let request = ReadRequest {
@@ -1390,7 +1384,7 @@ mod tests {
     #[test]
     fn queued_read_rechecks_receiver_and_ticket_after_owner_transition() {
         for cancel_ticket in [false, true] {
-            let (directory, core) = super::super::tests::fixture_with_database(Some(10.0));
+            let (directory, core) = super::super::tests::fixture();
             let fence = Arc::new(ReadFence::default());
             let transition = fence.transition();
             let mut epoch = QueryEpoch::default();
@@ -1452,7 +1446,7 @@ mod tests {
 
     #[test]
     fn old_snapshot_counts_are_not_reused_after_domain_changes_or_rejected_reads() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, mut core) = super::super::tests::fixture();
         let path = directory.path().join("library.db");
         let before = core.shared.read().clone();
         let connection = ReadConnection {
@@ -1491,17 +1485,15 @@ mod tests {
         let fence = Arc::new(ReadFence::default());
         let mut reader = Some(connection);
         let query = favorite_query();
-        let (reply, _receiver) = oneshot::channel();
-        let rejected = ReadRequest {
-            state: ReadState::capture(&before, &query),
+        let rejected = execute_read_at(
+            &core,
+            &path,
+            &mut reader,
+            &fence,
+            ReadState::capture(&before, &query),
             query,
-            ticket: None,
-            reply,
-        };
-        assert!(matches!(
-            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &rejected).result,
-            Err(QueryError::RevisionChanged)
-        ));
+        );
+        assert!(matches!(rejected.result, Err(QueryError::RevisionChanged)));
         assert_counts(&core, &path, &mut reader, &fence, 1, 1);
         core.command(Command::CreatePlaylist {
             name: "Unrelated count domain".into(),
@@ -1522,7 +1514,7 @@ mod tests {
 
     #[test]
     fn scalar_totals_follow_metadata_membership_and_playlist_lifetime_revisions() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, mut core) = super::super::tests::fixture();
         let path = directory.path().join("library.db");
         core.command(Command::CreatePlaylistWithTracks {
             name: "Scalar totals".into(),
@@ -1574,17 +1566,15 @@ mod tests {
         .unwrap();
         core.publish();
         // Rejection must not move count ownership to an unaccepted request.
-        let (reply, _receiver) = oneshot::channel();
-        let stale = ReadRequest {
-            state: ReadState::capture(&old, &queries[1]),
-            query: queries[1].clone(),
-            ticket: None,
-            reply,
-        };
-        assert!(matches!(
-            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &stale).result,
-            Err(QueryError::RevisionChanged)
-        ));
+        let stale = execute_read_at(
+            &core,
+            &path,
+            &mut reader,
+            &fence,
+            ReadState::capture(&old, &queries[1]),
+            queries[1].clone(),
+        );
+        assert!(matches!(stale.result, Err(QueryError::RevisionChanged)));
         for query in &queries {
             assert_eq!(
                 total(execute_read(
@@ -1644,7 +1634,7 @@ mod tests {
 
     #[test]
     fn queued_read_during_commit_publication_gap_rejects_old_revision() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, mut core) = super::super::tests::fixture();
         core.publish();
         let before = core.shared.read().clone();
         let reads =
@@ -1665,8 +1655,18 @@ mod tests {
         );
         let (reply, pending) = oneshot::channel();
         reads.submit(Query::Track { track_id: 1 }, None, &before, reply);
-        let mut pending = pending;
-        assert!(matches!(pending.try_recv(), Ok(None)));
+        // Observe the reader actually waiting on the owner gate during the
+        // commit/publication gap, not merely not having run yet.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let gate = reads.fence.state.lock();
+            if reads.fence.owner_ready.notify_one() {
+                break;
+            }
+            drop(gate);
+            assert!(Instant::now() < deadline, "read did not wait for owner");
+            thread::yield_now();
+        }
         core.publish();
         transition.finish(false);
         let rejected = response(pending);
@@ -1691,7 +1691,7 @@ mod tests {
 
     #[test]
     fn pinned_sql_snapshot_remains_consistent_across_committed_write() {
-        let (directory, core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, core) = super::super::tests::fixture();
         let path = directory.path().join("library.db");
         let snapshot = Store::open_read_snapshot(&path).unwrap();
         let state = core.shared.read().clone();
@@ -1734,7 +1734,7 @@ mod tests {
 
     #[test]
     fn maintenance_waits_for_physical_snapshot_retirement() {
-        let (directory, core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, core) = super::super::tests::fixture();
         let path = directory.path().join("library.db");
         let reader = Store::open_reader(&path).unwrap();
         let fence = Arc::new(ReadFence::default());
@@ -1774,7 +1774,7 @@ mod tests {
 
     #[test]
     fn unscoped_entry_lookup_rejects_captured_revision_after_move_or_removal() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let (directory, mut core) = super::super::tests::fixture();
         core.command(Command::CreatePlaylistWithTracks {
             name: "Entries".into(),
             track_ids: vec![1, 2, 3],

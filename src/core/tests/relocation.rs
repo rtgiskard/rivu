@@ -68,12 +68,9 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
 }
 
 fn receive_relocation(core: &mut Core) -> RelocationFinished {
-    futures::executor::block_on(async {
-        rivu_protocol::transport::timeout(Duration::from_secs(5), core.relocation_rx.recv())
-            .await
-            .unwrap()
-            .unwrap()
-    })
+    core.relocation_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
 }
 
 fn settle_relocation(core: &mut Core) -> RelocationTaskStatus {
@@ -352,31 +349,17 @@ fn relocation_rejects_source_marked_independent_during_hash() {
 #[test]
 fn relocation_rejects_database_identity_drift_after_fresh_verification() {
     for change_source in [false, true] {
-        let (directory, mut core, source, target) = relocation_fixture();
+        let (_directory, mut core, source, target) = relocation_fixture();
         core.relocate_track(source, target).unwrap();
         let event = receive_relocation(&mut core);
         let changed_id = if change_source { source } else { target };
-        let known = core
-            .store
-            .stored_scan_files(&[directory.path().to_path_buf()])
-            .unwrap()
-            .into_iter()
-            .find(|file| file.track_id == changed_id)
-            .unwrap();
-        let changed_path = known.path.clone();
+        let changed_path = core.track(changed_id).unwrap().path;
+        let mut record = record_for_known_file(&core, changed_path.clone());
+        record.fingerprint = Some(blake3::hash(b"different historical identity"));
         let impacts = core
             .store
             .apply_scan(&ScanResult {
-                records: (vec![ScanRecord {
-                    path: known.path,
-                    size: known.size,
-                    modified_ns: known.modified_ns,
-                    fingerprint: Some(blake3::hash(b"different historical identity")),
-                    media: known.media.unwrap(),
-                }])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+                records: vec![Arc::new(record)],
                 ..ScanResult::default()
             })
             .unwrap();
@@ -401,9 +384,12 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
     }
 }
 
-#[test]
-fn verification_panic_retires_the_task_without_committing_and_allows_retry() {
-    let (_directory, mut core, source, target) = relocation_fixture();
+fn install_verification(
+    core: &mut Core,
+    source: i64,
+    target: i64,
+    verify: impl Future<Output = Result<crate::core::relocation::VerifiedTarget>> + Send + 'static,
+) -> u64 {
     let id = core.next_relocation_id;
     core.next_relocation_id += 1;
     let prepared = core.store.prepare_relocation(source, target).unwrap();
@@ -414,13 +400,21 @@ fn verification_panic_retires_the_task_without_committing_and_allows_retry() {
         phase: RelocationPhase::Verifying,
         error: None,
     };
-    let worker =
-        core.spawn_relocation_verification(id, async { panic!("injected verification panic") });
+    let worker = core.spawn_relocation_verification(id, verify);
     core.active_relocation = Some(RelocationTask {
         status,
         prepared,
         cancellation: library::ScanCancellation::default(),
         worker: Some(worker),
+    });
+    id
+}
+
+#[test]
+fn verification_panic_retires_the_task_without_committing_and_allows_retry() {
+    let (_directory, mut core, source, target) = relocation_fixture();
+    install_verification(&mut core, source, target, async {
+        panic!("injected verification panic")
     });
     let result = settle_relocation(&mut core);
     assert_eq!(result.phase, RelocationPhase::Failed);
@@ -436,27 +430,12 @@ fn verification_panic_retires_the_task_without_committing_and_allows_retry() {
 #[test]
 fn cancellation_keeps_relocation_admission_until_the_async_worker_retires() {
     let (_directory, mut core, source, target) = relocation_fixture();
-    let id = core.next_relocation_id;
-    core.next_relocation_id += 1;
-    let prepared = core.store.prepare_relocation(source, target).unwrap();
     let (started, observe_started) = oneshot::channel();
     let (release, released) = oneshot::channel();
-    let worker = core.spawn_relocation_verification(id, async move {
+    let id = install_verification(&mut core, source, target, async move {
         let _ = started.send(());
         let _ = released.await;
         Err(anyhow::anyhow!("released verification"))
-    });
-    core.active_relocation = Some(RelocationTask {
-        status: RelocationTaskStatus {
-            id,
-            source_id: source,
-            target_id: target,
-            phase: RelocationPhase::Verifying,
-            error: None,
-        },
-        prepared,
-        cancellation: library::ScanCancellation::default(),
-        worker: Some(worker),
     });
     futures::executor::block_on(observe_started).unwrap();
     core.cancel_relocation(id).unwrap();

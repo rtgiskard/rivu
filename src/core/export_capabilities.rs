@@ -66,7 +66,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovery_completion_reaches_system_subscribers_without_playback_changes() {
+    fn discovery_completion_publishes_system_state_without_playback_changes() {
         let (_directory, mut core) = super::super::tests::fixture_with_database(Some(1.0));
         core.publish();
         let before = core.shared.read().clone();

@@ -2,19 +2,10 @@ use super::*;
 use crate::core::task_wait::MAX_TASK_WAITERS;
 
 pub(super) fn wait_handle(core: &Core) -> (CoreHandle, mpsc::Receiver<Request>) {
-    let (sender, requests) = mpsc::bounded(MAX_TASK_WAITERS + 1);
-    let handle = CoreHandle {
-        state: Arc::clone(&core.shared),
-        pcm: Arc::clone(&core.engine.pcm),
-        sender,
-        revision_updates: Arc::clone(&core.revision_updates),
-        task_waiters: Arc::clone(&core.task_waiters),
-        mpris_status: Arc::clone(&core.mpris_status),
-    };
-    (handle, requests)
+    request_handle(core, MAX_TASK_WAITERS + 1)
 }
 
-fn dispatch_wait(core: &mut Core, requests: &mpsc::Receiver<Request>) {
+pub(super) fn dispatch_wait(core: &mut Core, requests: &mpsc::Receiver<Request>) {
     assert!(core.business_event(dispatch::BusinessEvent::Request(
         requests.try_recv().unwrap(),
     )));
@@ -27,7 +18,7 @@ fn finish_scan(core: &mut Core) {
     }
 }
 
-fn processing_completion(core: &mut Core) -> rivu_processing::Event {
+pub(super) fn processing_completion(core: &mut Core) -> rivu_processing::Event {
     loop {
         let event = core
             .processing
@@ -60,8 +51,8 @@ fn registration_and_completion_are_serialized_in_either_order() {
             assert!(wait.as_mut().now_or_never().is_none());
             finish_scan(&mut core);
         }
-        let TaskOutcome::Scan(status) = futures::executor::block_on(wait).unwrap() else {
-            panic!("Expected scan outcome");
+        let Some(Ok(TaskOutcome::Scan(status))) = wait.now_or_never() else {
+            panic!("Expected scan outcome after the owner's final turn");
         };
         assert_eq!(status.id, id);
         assert_eq!(status.progress.phase, ScanPhase::Completed);
@@ -106,8 +97,8 @@ fn worker_completion_does_not_return_before_scan_owner_commits_state() {
         ScanPhase::Saving
     );
     core.scan_event(saved);
-    let TaskOutcome::Scan(status) = futures::executor::block_on(wait).unwrap() else {
-        panic!("Expected scan outcome");
+    let Some(Ok(TaskOutcome::Scan(status))) = wait.now_or_never() else {
+        panic!("Expected scan outcome after the owner's commit");
     };
     assert!(status.library_committed);
     assert_eq!(status.progress.phase, ScanPhase::Completed);
@@ -142,7 +133,11 @@ fn waiter_capacity_is_bounded_and_drop_recovers_it_without_owner_work() {
             }
         }
         assert_eq!(
-            futures::executor::block_on(handle.wait_task(TaskTarget::Scan { id })).unwrap_err(),
+            handle
+                .wait_task(TaskTarget::Scan { id })
+                .now_or_never()
+                .unwrap()
+                .unwrap_err(),
             QueryError::Message("Task wait capacity exhausted".into()),
         );
         drop(waits);
@@ -160,8 +155,8 @@ fn waiter_capacity_is_bounded_and_drop_recovers_it_without_owner_work() {
         dispatch_wait(&mut core, &requests);
         assert!(recovered.as_mut().now_or_never().is_none());
         finish_scan(&mut core);
-        assert!(matches!(futures::executor::block_on(recovered),
-            Ok(TaskOutcome::Scan(status)) if status.progress.phase == ScanPhase::Completed));
+        assert!(matches!(recovered.now_or_never(),
+            Some(Ok(TaskOutcome::Scan(status))) if status.progress.phase == ScanPhase::Completed));
     }
 }
 
@@ -202,6 +197,10 @@ fn processing_worker_phase_and_result_cannot_publish_a_terminal_reply_early() {
         .start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
     let completion = processing_completion(&mut core);
+    assert!(matches!(
+        completion,
+        rivu_processing::Event::Finished { result: Ok(_), .. }
+    ));
     // A terminal-looking worker progress report is not the owner's acceptance.
     core.processing_event(rivu_processing::Event::Progress {
         id,
@@ -217,11 +216,12 @@ fn processing_worker_phase_and_result_cannot_publish_a_terminal_reply_early() {
     // Owner-side source revalidation rejects the completed worker's output.
     std::fs::write(directory.path().join("1.wav"), b"replacement").unwrap();
     core.processing_event(completion);
-    let TaskOutcome::Processing(status) = futures::executor::block_on(wait).unwrap() else {
-        panic!("Expected processing outcome");
+    let Some(Ok(TaskOutcome::Processing(status))) = wait.now_or_never() else {
+        panic!("Expected processing outcome after the owner's rejection");
     };
     assert_eq!(status.phase, ProcessingPhase::Failed);
     assert!(status.outputs.is_none());
+    assert!(core.processing.results().is_empty());
     assert_eq!(
         core.shared.read().processing.as_ref().unwrap().phase,
         ProcessingPhase::Failed
@@ -243,7 +243,7 @@ fn shutdown_publishes_processing_cancellation_before_reply() {
     assert!(wait.as_mut().now_or_never().is_none());
     core.publish();
     assert!(
-        matches!(futures::executor::block_on(wait), Ok(TaskOutcome::Processing(status))
+        matches!(wait.now_or_never(), Some(Ok(TaskOutcome::Processing(status)))
         if status.phase == ProcessingPhase::Cancelled)
     );
     assert_eq!(
@@ -281,16 +281,20 @@ fn unknown_and_expired_waits_are_errors_and_core_drop_retires_pending_waits() {
         assert!(wait.as_mut().now_or_never().is_none());
         dispatch_wait(&mut core, &requests);
         assert_eq!(
-            futures::executor::block_on(wait).unwrap_err(),
+            wait.now_or_never().unwrap().unwrap_err(),
             QueryError::Message(message.into())
         );
     }
     let mut undispatched = Box::pin(handle.wait_task(TaskTarget::Scan { id: 2 }));
     assert!(undispatched.as_mut().now_or_never().is_none());
     drop(core);
-    assert!(futures::executor::block_on(undispatched).is_err());
+    assert!(undispatched.now_or_never().unwrap().is_err());
     assert_eq!(
-        futures::executor::block_on(handle.wait_task(TaskTarget::Scan { id: 2 })).unwrap_err(),
+        handle
+            .wait_task(TaskTarget::Scan { id: 2 })
+            .now_or_never()
+            .unwrap()
+            .unwrap_err(),
         QueryError::Message("Core is stopped".into()),
     );
 }
@@ -323,8 +327,8 @@ fn scan_failure_cancellation_and_shutdown_wake_registered_waits() {
                 }
                 finish_scan(&mut core);
             }
-            let TaskOutcome::Scan(status) = futures::executor::block_on(wait).unwrap() else {
-                panic!("Expected scan outcome");
+            let Some(Ok(TaskOutcome::Scan(status))) = wait.now_or_never() else {
+                panic!("Expected scan outcome after the owner's final turn");
             };
             assert_eq!(status.progress.phase, expected);
             assert!(!status.library_committed);

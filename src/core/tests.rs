@@ -39,14 +39,40 @@ impl<T> TaskReceiverExt<T> for async_channel::Receiver<T> {
     }
 }
 
-// An idle real audio worker handles stop/snapshot, but these tests never load
-// audio. Missing-file errors expose the selected entry without opening output.
-fn fixture() -> (tempfile::TempDir, Core) {
-    fixture_with_duration(Some(10.0))
+// Like Core::run, poll the event source before entering the synchronous owner.
+fn drive_until(
+    core: &mut Core,
+    mut requests: mpsc::Receiver<Request>,
+    done: impl Fn(&dispatch::BusinessEvent) -> bool,
+) {
+    let (control, mut shutdown) = CoreLifecycle::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .expect("owner did not dispatch the expected event");
+        let event = futures::executor::block_on(rivu_protocol::transport::timeout(
+            remaining,
+            core.next_event(&mut requests, &mut shutdown, &control),
+        ))
+        .expect("owner did not dispatch the expected event")
+        .expect("owner event source closed");
+        let last = done(&event);
+        assert!(
+            core.business_event(event),
+            "owner stopped before the expected event"
+        );
+        if last {
+            return;
+        }
+    }
 }
 
-fn fixture_with_duration(duration: Option<f64>) -> (tempfile::TempDir, Core) {
-    fixture_with_database(duration)
+// Seed four 10-second catalog rows whose files initially don't exist, plus five
+// queue occurrences (track 2 twice). The idle real audio worker handles
+// stop/snapshot; tests that need decodable media write the files themselves.
+pub(super) fn fixture() -> (tempfile::TempDir, Core) {
+    fixture_with_database(Some(10.0))
 }
 
 pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir, Core) {
@@ -61,33 +87,32 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
             skipped_directories_truncated: false,
             scan_incomplete: false,
             uncertainties: Vec::new(),
-            records: ((1..=4)
-                .map(|id| ScanRecord {
-                    path: directory.path().join(format!("{id}.wav")),
-                    size: 1,
-                    modified_ns: 1,
-                    fingerprint: None,
-                    media: MediaInfo {
-                        title: format!("Track {id}"),
-                        artist: String::new(),
-                        album: String::new(),
-                        duration,
-                        codec: "pcm".into(),
-                        channels: 2,
-                        sample_rate: 48000,
-                        bitrate_bps: None,
-                        bitrate_exact: false,
-                        track_number: None,
-                        disc_number: None,
-                        bits_per_sample: None,
-                        release_date: None,
-                        replaygain_track_gain: None,
-                    },
+            records: (1..=4)
+                .map(|id| {
+                    Arc::new(ScanRecord {
+                        path: directory.path().join(format!("{id}.wav")),
+                        size: 1,
+                        modified_ns: 1,
+                        fingerprint: None,
+                        media: MediaInfo {
+                            title: format!("Track {id}"),
+                            artist: String::new(),
+                            album: String::new(),
+                            duration,
+                            codec: "pcm".into(),
+                            channels: 2,
+                            sample_rate: 48000,
+                            bitrate_bps: None,
+                            bitrate_exact: false,
+                            track_number: None,
+                            disc_number: None,
+                            bits_per_sample: None,
+                            release_date: None,
+                            replaygain_track_gain: None,
+                        },
+                    })
                 })
-                .collect::<Vec<_>>())
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+                .collect(),
             errors: Vec::new(),
             ..Default::default()
         })
@@ -217,6 +242,70 @@ fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
     recorded
 }
 
+type AudioPort = async_channel::Sender<audio::QueuedAudioCommand>;
+
+pub(super) fn record_for_known_file(core: &Core, path: PathBuf) -> ScanRecord {
+    let known = core.store.known_source(&path).unwrap().unwrap();
+    ScanRecord {
+        path,
+        size: known.size,
+        modified_ns: known.modified_ns,
+        fingerprint: known.fingerprint,
+        media: known.media.unwrap(),
+    }
+}
+
+fn prefilled_audio(
+    core: &mut Core,
+    capacity: usize,
+    occupied: usize,
+) -> (
+    async_channel::Receiver<audio::QueuedAudioCommand>,
+    AudioPort,
+) {
+    let (commands, receive) = async_channel::bounded(capacity);
+    for _ in 0..occupied {
+        commands
+            .try_send(audio::QueuedAudioCommand::test_unfenced(
+                AudioCommand::Volume(0.5),
+            ))
+            .unwrap();
+    }
+    (receive, core.engine.replace_commands(commands))
+}
+
+// Another sender into the engine's current command port. Tests keep it to
+// mark the recorder FIFO after Core moved onto its owner thread.
+fn audio_port(core: &mut Core) -> AudioPort {
+    let (placeholder, _) = async_channel::bounded(1);
+    let port = core.engine.replace_commands(placeholder);
+    core.engine.replace_commands(port.clone());
+    port
+}
+
+// The recorder forwards on another thread, so neither an ACK nor a return from
+// Core proves every earlier command was recorded. Its snapshot reply follows
+// recording every earlier FIFO command; the marker itself is not returned.
+fn recorded_audio(port: &AudioPort, commands: &Receiver<AudioCommand>) -> Vec<AudioCommand> {
+    let (marker, recorded_through_marker) = oneshot::channel();
+    port.try_send(audio::QueuedAudioCommand::test_unfenced(
+        AudioCommand::StopAndSnapshot(marker),
+    ))
+    .unwrap();
+    futures::executor::block_on(async {
+        rivu_protocol::transport::timeout(Duration::from_secs(5), recorded_through_marker)
+            .await
+            .expect("audio recorder did not reach the marker")
+            .unwrap()
+    });
+    let mut recorded: Vec<_> = commands.try_iter().collect();
+    assert!(matches!(
+        recorded.pop(),
+        Some(AudioCommand::StopAndSnapshot(_))
+    ));
+    recorded
+}
+
 fn operation_ack(core: &mut Core, operation: Operation) -> Ack {
     let (reply, response) = oneshot::channel();
     assert!(
@@ -231,6 +320,21 @@ fn operation_ack(core: &mut Core, operation: Operation) -> Ack {
     ack
 }
 
+fn request_handle(core: &Core, capacity: usize) -> (CoreHandle, mpsc::Receiver<Request>) {
+    let (sender, requests) = mpsc::bounded(capacity);
+    (
+        CoreHandle {
+            state: core.shared.clone(),
+            pcm: core.engine.pcm.clone(),
+            sender,
+            revision_updates: core.revision_updates.clone(),
+            task_waiters: core.task_waiters.clone(),
+            mpris_status: core.mpris_status.clone(),
+        },
+        requests,
+    )
+}
+
 fn navigation_runtime(
     mut core: Core,
 ) -> (
@@ -240,15 +344,7 @@ fn navigation_runtime(
     Arc<Mutex<Vec<MprisSnapshot>>>,
 ) {
     core.publish();
-    let (sender, requests) = async_channel::bounded(64);
-    let handle = CoreHandle {
-        state: core.shared.clone(),
-        pcm: core.engine.pcm.clone(),
-        sender,
-        revision_updates: core.revision_updates.clone(),
-        task_waiters: core.task_waiters.clone(),
-        mpris_status: Arc::clone(&core.mpris_status),
-    };
+    let (handle, requests) = request_handle(&core, 64);
     let publications = Arc::new(Mutex::new(Vec::new()));
     let observed = publications.clone();
     let state = core.shared.clone();

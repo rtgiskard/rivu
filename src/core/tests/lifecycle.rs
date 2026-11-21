@@ -1,6 +1,13 @@
 use super::*;
 use crate::core::catalog::ScanFinished;
 
+pub(super) fn attach_read_owner(core: &mut Core, directory: &Path) {
+    core.read_queries = Some(
+        query_worker::ReadQueries::start(directory.join("library.db"), Arc::clone(&core.shared))
+            .unwrap(),
+    );
+}
+
 #[test]
 fn latest_mpris_status_survives_a_full_external_request_queue() {
     let (_directory, mut core) = fixture();
@@ -10,18 +17,9 @@ fn latest_mpris_status_survives_a_full_external_request_queue() {
     handle.report_mpris_status("connected".into());
     handle.report_mpris_status("disconnected".into());
     assert_eq!(core.mpris_status.ready.len(), 1);
-    let (control, mut shutdown) = CoreLifecycle::new();
-    let mut requests = requests;
-    loop {
-        let event =
-            futures::executor::block_on(core.next_event(&mut requests, &mut shutdown, &control))
-                .unwrap();
-        let status = matches!(event, dispatch::BusinessEvent::MprisStatus);
-        core.business_event(event);
-        if status {
-            break;
-        }
-    }
+    drive_until(&mut core, requests, |event| {
+        matches!(event, dispatch::BusinessEvent::MprisStatus)
+    });
     assert_eq!(core.shared.read().system.mpris_status, "disconnected");
     handle.report_mpris_status("connected again".into());
     core.business_event(dispatch::BusinessEvent::MprisStatus);
@@ -46,21 +44,10 @@ fn device_enumeration_errors_and_panics_are_visible_but_empty_success_is_not_an_
             drop(sender);
             core.initial_devices.as_mut().unwrap().finished = receiver;
         }
-        let (_sender, mut requests) = mpsc::bounded(1);
-        let (control, mut shutdown) = CoreLifecycle::new();
-        loop {
-            let event = futures::executor::block_on(core.next_event(
-                &mut requests,
-                &mut shutdown,
-                &control,
-            ))
-            .unwrap();
-            let completed = matches!(event, dispatch::BusinessEvent::DevicesEnumerated(_));
-            core.business_event(event);
-            if completed {
-                break;
-            }
-        }
+        let (_sender, requests) = mpsc::bounded(1);
+        drive_until(&mut core, requests, |event| {
+            matches!(event, dispatch::BusinessEvent::DevicesEnumerated(_))
+        });
         assert!(core.state.system.devices.is_empty());
         assert!(core.initial_devices.is_none());
         if outcome == "empty" {
@@ -111,13 +98,7 @@ fn incomplete_startup_domains_recover_counts_history_and_playlist_edit_tokens() 
         assert!(core.transport.history_pending);
         connection.execute_batch(restore_read).unwrap();
         core.publish();
-        core.read_queries = Some(
-            query_worker::ReadQueries::start(
-                directory.path().join("library.db"),
-                Arc::clone(&core.shared),
-            )
-            .unwrap(),
-        );
+        attach_read_owner(&mut core, directory.path());
         core.recover_projections_on_demand();
         let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(matches!(event, ScanEvent::Projections { .. }));
@@ -202,13 +183,7 @@ fn first_playlist_queries_after_partial_startup_capture_recovered_tokens() {
                 .unwrap();
             core.publish();
             if worker {
-                core.read_queries = Some(
-                    query_worker::ReadQueries::start(
-                        directory.path().join("library.db"),
-                        Arc::clone(&core.shared),
-                    )
-                    .unwrap(),
-                );
+                attach_read_owner(&mut core, directory.path());
             }
             let query = match kind {
                 0 => Query::PlaylistEntries {
@@ -294,13 +269,7 @@ fn playlist_token_recovery_failure_blocks_only_dependent_current_queries() {
             .unwrap();
         core.publish();
         if worker {
-            core.read_queries = Some(
-                query_worker::ReadQueries::start(
-                    directory.path().join("library.db"),
-                    Arc::clone(&core.shared),
-                )
-                .unwrap(),
-            );
+            attach_read_owner(&mut core, directory.path());
         }
         let query = Query::PlaylistEntries {
             playlist_id: playlist,
@@ -348,13 +317,7 @@ fn synchronous_projection_refreshes_do_not_admit_duplicate_background_reads() {
         core.projections.playlist_total = catalog || entry == "playlist";
         core.transport.history_pending = catalog || entry == "history";
         core.publish();
-        core.read_queries = Some(
-            query_worker::ReadQueries::start(
-                directory.path().join("library.db"),
-                Arc::clone(&core.shared),
-            )
-            .unwrap(),
-        );
+        attach_read_owner(&mut core, directory.path());
         let transition = core.read_queries.as_ref().unwrap().fence.transition();
         let command = match entry {
             "edit" => Command::EditTrack {
@@ -408,13 +371,7 @@ fn remaining_dirty_domains_recover_once_and_failures_wait_for_new_demand() {
         .execute_batch("ALTER TABLE playlists RENAME COLUMN name TO unavailable_name")
         .unwrap();
     core.publish();
-    core.read_queries = Some(
-        query_worker::ReadQueries::start(
-            directory.path().join("library.db"),
-            Arc::clone(&core.shared),
-        )
-        .unwrap(),
-    );
+    attach_read_owner(&mut core, directory.path());
     let transition = core.read_queries.as_ref().unwrap().fence.transition();
     let ack = operation_ack(
         &mut core,
@@ -477,13 +434,7 @@ fn synchronous_refresh_does_not_retire_an_admitted_projection_worker() {
     core.projections.playlist_total = true;
     core.transport.history_pending = true;
     core.publish();
-    core.read_queries = Some(
-        query_worker::ReadQueries::start(
-            directory.path().join("library.db"),
-            Arc::clone(&core.shared),
-        )
-        .unwrap(),
-    );
+    attach_read_owner(&mut core, directory.path());
     let transition = core.read_queries.as_ref().unwrap().fence.transition();
     core.recover_projections_on_demand();
     assert!(core.projections.in_flight);
@@ -522,13 +473,7 @@ fn failed_synchronous_reads_wait_for_new_demand_even_when_the_domain_was_already
                 .execute_batch("UPDATE tracks SET last_played='unreadable' WHERE id=4")
                 .unwrap();
             core.publish();
-            core.read_queries = Some(
-                query_worker::ReadQueries::start(
-                    directory.path().join("library.db"),
-                    Arc::clone(&core.shared),
-                )
-                .unwrap(),
-            );
+            attach_read_owner(&mut core, directory.path());
             let transition = core.read_queries.as_ref().unwrap().fence.transition();
             let command = if entry == "catalog" {
                 Command::EditTrack {
@@ -1004,14 +949,6 @@ fn owner_disconnect_after_admission_reports_unknown_not_rejection() {
     );
     assert_eq!(ack.status, AckStatus::Unknown);
     owner.join().unwrap();
-}
-
-#[test]
-fn shutdown_acknowledgement_does_not_claim_runtime_teardown_is_finished() {
-    let (control, _shutdown) = CoreLifecycle::new();
-    control.acknowledge(Ack::from_result(Ok(()), 9));
-    assert!(futures::executor::block_on(control.shutdown_ack_async(|| 0)).is_success());
-    assert!(!control.is_complete());
 }
 
 #[test]

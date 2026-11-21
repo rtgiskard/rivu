@@ -85,6 +85,7 @@ fn output_diagnostics_reject_old_sources_segments_and_reactivation() {
     core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state.clone())))
         .unwrap();
     let retired = core.state.playback.audio_output.clone();
+    assert!(matches!(retired.as_deref(), Some(output) if output.segment == 3 && !output.active));
     state.active = true;
     core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state)))
         .unwrap();
@@ -585,7 +586,7 @@ fn bitrate_commit_rejects_payload_batch_baselines_and_occurrence_continuations()
 
 #[test]
 fn audio_eof_resolved_duration_publishes_final_count_without_album_invalidation() {
-    let (_directory, mut core) = fixture_with_duration(None);
+    let (_directory, mut core) = fixture_with_database(None);
     add_test_album(&mut core);
     pending(&mut core, 1);
     started(&mut core, None).unwrap();
@@ -902,24 +903,25 @@ fn playback_publication_does_not_invalidate_unchanged_sections() {
     );
 }
 
-fn precision_pending(core: &mut Core) {
-    let track = core.store.track(1).unwrap().unwrap();
-    std::fs::write(&track.path, b"encoded source").unwrap();
-    let metadata = std::fs::metadata(&track.path).unwrap();
+pub(super) fn scan_written_source(
+    core: &mut Core,
+    path: PathBuf,
+    edit: impl FnOnce(&mut MediaInfo),
+) {
+    let metadata = std::fs::metadata(&path).unwrap();
     let mut media = core
         .store
-        .known_source(&track.path)
+        .known_source(&path)
         .unwrap()
         .unwrap()
         .media
         .unwrap();
-    media.bitrate_bps = Some(128_000);
-    media.bitrate_exact = false;
+    edit(&mut media);
     let impacts = core
         .store
         .apply_scan(&ScanResult {
-            records: (vec![ScanRecord {
-                path: track.path,
+            records: vec![Arc::new(ScanRecord {
+                path,
                 size: metadata.len(),
                 modified_ns: metadata
                     .modified()
@@ -929,14 +931,20 @@ fn precision_pending(core: &mut Core) {
                     .as_nanos() as i64,
                 fingerprint: None,
                 media,
-            }])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+            })],
             ..ScanResult::default()
         })
         .unwrap();
     core.apply_catalog_changes(impacts).unwrap();
+}
+
+fn precision_pending(core: &mut Core) {
+    let path = core.store.track(1).unwrap().unwrap().path;
+    std::fs::write(&path, b"encoded source").unwrap();
+    scan_written_source(core, path, |media| {
+        media.bitrate_bps = Some(128_000);
+        media.bitrate_exact = false;
+    });
     core.command(Command::ClearQueue).unwrap();
     core.enqueue(&[1]).unwrap();
     let queue_id = core.store.queue_id_at(0).unwrap().unwrap();
@@ -1331,32 +1339,30 @@ fn repeated_progress_pause_seek_and_resume_count_only_once() {
 #[test]
 fn paused_confirmations_do_not_advance_activity_at_stop() {
     let (_directory, mut core) = fixture();
-    playing(&mut core, 1);
-    progress(&mut core, 2.0, 2.0);
-    let heard_at = core.state.playback.last_heard_at;
+    pending(&mut core, 1);
+    core.transport.session.as_mut().unwrap().paused_at = Some(16);
+    started(&mut core, Some(10.0)).unwrap();
+    core.transport.session.as_mut().unwrap().paused_at = None;
     core.command(Command::Pause).unwrap();
-    let pause_bound = core.transport.session.as_ref().unwrap().paused_at.unwrap();
-    progress(&mut core, 20.0, 20.0);
-    assert!(core.state.playback.last_heard_at.unwrap() <= pause_bound);
-    assert_eq!(core.transport.session.as_ref().unwrap().heard, 20.0);
-    assert_eq!(play_count(&core, 1), 1);
+    assert!(core.transport.session.as_ref().unwrap().paused_at.is_some());
+    // Fix the pause boundary well before wall-clock time and after startup.
+    core.transport.session.as_mut().unwrap().paused_at = Some(17);
+    progress(&mut core, 1.0, 1.0);
+    assert_eq!(core.state.playback.last_heard_at, Some(17));
+    assert_eq!(core.transport.session.as_ref().unwrap().heard, 1.0);
+    assert_eq!(play_count(&core, 1), 0);
     let generation = core.transport.generation;
     core.finish_playback(
         Ok(Some(rivu_audio::AudioSnapshot {
             generation,
-            position_seconds: 20.0,
-            listened_seconds: 20.0,
+            position_seconds: 3.0,
+            listened_seconds: 3.0,
         })),
         Ok(()),
     )
     .unwrap();
-    assert_eq!(
-        core.store.history(200).unwrap()[0].played_at,
-        core.state
-            .playback
-            .last_heard_at
-            .unwrap_or(heard_at.unwrap())
-    );
+    assert_eq!(core.store.history(200).unwrap()[0].played_at, 17);
+    assert_eq!(play_count(&core, 1), 1);
 }
 
 #[test]
@@ -1364,27 +1370,11 @@ fn failed_load_and_stale_events_neither_count_nor_record_recent() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
     let generation = core.transport.generation;
-    let track = core.state.current_track().unwrap();
-    core.audio_event(AudioEvent::Started {
-        generation: generation.wrapping_sub(1),
-        info: MediaInfo {
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
-            duration: Some(10.0),
-            codec: track.codec.clone(),
-            channels: track.channels,
-            sample_rate: track.sample_rate,
-            bitrate_bps: None,
-            bitrate_exact: false,
-            track_number: None,
-            disc_number: None,
-            bits_per_sample: None,
-            release_date: None,
-            replaygain_track_gain: None,
-        },
-    })
-    .unwrap();
+    let mut stale = started_event(&core, Some(10.0));
+    if let AudioEvent::Started { generation, .. } = &mut stale {
+        *generation = generation.wrapping_sub(1);
+    }
+    core.audio_event(stale).unwrap();
     progress(&mut core, 10.0, 10.0);
     core.audio_event(AudioEvent::Failed {
         generation,
@@ -1821,7 +1811,7 @@ fn rejected_recent_update_stops_without_counting_the_start() {
 
 #[test]
 fn stale_completed_duration_cannot_resolve_new_generation() {
-    let (_directory, mut core) = fixture_with_duration(None);
+    let (_directory, mut core) = fixture_with_database(None);
     pending(&mut core, 1);
     started(&mut core, None).unwrap();
     progress(&mut core, 10.0, 8.0);
@@ -1839,7 +1829,7 @@ fn stale_completed_duration_cannot_resolve_new_generation() {
 #[test]
 fn unknown_duration_waits_for_complete_traversal_eof() {
     for (heard, expected) in [(2.0, 0), (2.01, 1), (8.0, 1)] {
-        let (_directory, mut core) = fixture_with_duration(None);
+        let (_directory, mut core) = fixture_with_database(None);
         pending(&mut core, 1);
         started(&mut core, None).unwrap();
         progress(&mut core, 10.0, heard);
@@ -1862,7 +1852,7 @@ fn unknown_duration_waits_for_complete_traversal_eof() {
 
 #[test]
 fn natural_eof_never_infers_duration_from_final_snapshot() {
-    let (_directory, mut core) = fixture_with_duration(None);
+    let (_directory, mut core) = fixture_with_database(None);
     pending(&mut core, 1);
     started(&mut core, None).unwrap();
     progress(&mut core, 1.0, 1.0);
@@ -1891,7 +1881,7 @@ fn invalid_completed_duration_cannot_resolve_unknown_duration() {
         Some(f64::NAN),
         Some(f64::INFINITY),
     ] {
-        let (_directory, mut core) = fixture_with_duration(None);
+        let (_directory, mut core) = fixture_with_database(None);
         pending(&mut core, 1);
         started(&mut core, None).unwrap();
         progress(&mut core, 100.0, 3.0);
@@ -1933,7 +1923,7 @@ fn completed_duration_preserves_known_duration() {
 
 #[test]
 fn unknown_duration_never_uses_seek_targets_heard_time_or_manual_stop() {
-    let (_directory, mut core) = fixture_with_duration(None);
+    let (_directory, mut core) = fixture_with_database(None);
     pending(&mut core, 1);
     started(&mut core, None).unwrap();
     core.command(Command::Seek { seconds: 10.0 }).unwrap();
@@ -2005,7 +1995,7 @@ fn stopped_decoder_snapshot_counts_once_and_fences_late_events() {
 
 #[test]
 fn completed_duration_count_failure_still_retires_and_retries_once() {
-    let (directory, mut core) = fixture_with_duration(None);
+    let (directory, mut core) = fixture_with_database(None);
     pending(&mut core, 1);
     started(&mut core, None).unwrap();
     progress(&mut core, 100.0, 3.0);
@@ -2542,7 +2532,7 @@ fn play_count_uses_session_duration_not_the_presentation_snapshot() {
 
 #[test]
 fn retired_duration_and_pending_bitrate_settle_without_republishing_transport() {
-    let (_directory, mut core) = fixture_with_duration(None);
+    let (_directory, mut core) = fixture_with_database(None);
     precision_pending(&mut core);
     let source = core.transport.generation;
     let mut start = started_event(&core, Some(20.0));

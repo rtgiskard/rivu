@@ -509,7 +509,8 @@ fn runtime_validates_config_path_before_reading_or_rewriting_config() {
         .join(OsString::from_vec(b"config-\xff.toml".to_vec()));
     let original = b"intentionally not valid TOML";
     std::fs::write(&path, original).unwrap();
-    assert!(CoreRuntime::start(directory.path(), &path).is_err());
+    let error = CoreRuntime::start(directory.path(), &path).err().unwrap();
+    assert!(error.to_string().contains("path is not valid UTF-8"));
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert!(!directory.path().join("library.db").exists());
 }
@@ -887,15 +888,7 @@ fn replaygain_apply_reserves_the_complete_audio_batch_before_committing() {
         core.flush_config().unwrap();
         let baseline = core.preferences.checkpoint();
         let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
-        let (commands, audio) = async_channel::bounded(2);
-        for _ in 0..2 - available {
-            commands
-                .try_send(audio::QueuedAudioCommand::test_unfenced(
-                    AudioCommand::Volume(0.5),
-                ))
-                .unwrap();
-        }
-        let _idle_commands = core.engine.replace_commands(commands);
+        let (audio, _idle_commands) = prefilled_audio(&mut core, 2, 2 - available);
         let mut draft = baseline.clone();
         draft.replaygain_enabled = true;
 
@@ -1038,15 +1031,8 @@ fn configuration_admission_preserves_saved_state_until_the_changed_batch_fits() 
             core.flush_config().unwrap();
             let baseline = core.preferences.settings().clone();
             let saved = std::fs::read(&core.state.configuration.config_path).unwrap();
-            let (commands, _receive) = async_channel::bounded(2);
-            for _ in 0..2 - available {
-                commands
-                    .try_send(audio::QueuedAudioCommand::test_unfenced(
-                        AudioCommand::Volume(0.5),
-                    ))
-                    .unwrap();
-            }
-            core.engine.replace_commands(commands);
+            let (_receive, displaced) = prefilled_audio(&mut core, 2, 2 - available);
+            drop(displaced);
             let mut config = core.preferences.checkpoint();
             config.query_batch_size = 42;
             if change_volume {
@@ -1526,36 +1512,6 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
 }
 
 #[test]
-fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
-    let (_directory, mut core) = fixture();
-    let (commands, receiver) = async_channel::bounded(64);
-    drop(receiver);
-    core.engine.replace_commands(commands);
-    let baseline = core.preferences.settings().clone();
-    let mut draft = baseline.as_ref().clone();
-    draft.scan_max_depth = 7;
-    draft.replaygain_enabled = true;
-    let error = core
-        .mutate_config(ConfigMutation::Settings(Box::new(ConfigPatch::between(
-            &baseline, &draft,
-        ))))
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("Configuration saved, but audio application failed")
-    );
-    core.publish();
-    let visible = &core.shared.read().clone();
-    assert_eq!(visible.configuration.config.scan_max_depth, 7);
-    assert!(visible.configuration.config.replaygain_enabled);
-    assert_eq!(
-        Config::load(&core.state.configuration.config_path).unwrap(),
-        *visible.configuration.config
-    );
-}
-
-#[test]
 fn configure_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
     let (_directory, mut core) = fixture();
     let (commands, audio) = async_channel::bounded(64);
@@ -1758,6 +1714,8 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     core.engine.replace_commands(commands);
     let mut config = core.preferences.settings().as_ref().clone();
     config.volume = 0.25;
+    config.scan_max_depth = 7;
+    config.replaygain_enabled = true;
     config.shuffle = true;
     config.repeat = RepeatMode::All;
     config.visualization_enabled = false;
@@ -1769,14 +1727,20 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     core.transport.history_cursor = 2;
     let expected = config.clone();
 
-    core.command(Command::MutateConfig {
-        change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
-            &core.preferences.checkpoint(),
-            &config,
-        ))),
-    })
-    .unwrap_err();
+    let error = core
+        .command(Command::MutateConfig {
+            change: ConfigMutation::Settings(Box::new(ConfigPatch::between(
+                &core.preferences.checkpoint(),
+                &config,
+            ))),
+        })
+        .unwrap_err();
 
+    assert!(
+        error
+            .to_string()
+            .contains("Configuration saved, but audio application failed")
+    );
     assert_eq!(**core.preferences.settings(), expected);
     assert_eq!(core.preferences.live().volume, expected.volume);
     assert_eq!(core.preferences.live().shuffle, expected.shuffle);
@@ -1849,10 +1813,7 @@ fn visualization_enabled_applied_but_disconnected_audio_retains_unsaved_settings
 
 #[test]
 fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
-    if crate::test_support::run_in_subprocess(
-        "core::tests::settings::ffmpeg_external_load_result_survives_runtime_disable_and_reenable",
-        Duration::from_secs(20),
-    ) {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
     }
     #[cfg(feature = "ffmpeg")]

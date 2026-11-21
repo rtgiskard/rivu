@@ -1,7 +1,23 @@
 use super::*;
 
-fn admission_fixture() -> (tempfile::TempDir, Core) {
-    fixture_with_database(Some(10.0))
+fn drive_to_saving(core: &mut Core) {
+    while !core.active_external_admission.as_ref().unwrap().is_saving() {
+        let event = next_admission_event(core);
+        core.external_admission_event(event);
+    }
+}
+
+fn take_admission_event(
+    core: &mut Core,
+    wanted: impl Fn(&crate::core::admission::Event) -> bool,
+) -> crate::core::admission::Event {
+    loop {
+        let event = next_admission_event(core);
+        if wanted(&event) {
+            return event;
+        }
+        core.external_admission_event(event);
+    }
 }
 
 fn next_admission_event(core: &mut Core) -> crate::core::admission::Event {
@@ -27,7 +43,7 @@ fn finish_admission(core: &mut Core) {
 
 #[test]
 fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_changes() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     let first = directory.path().join("external-first.wav");
     let second = directory.path().join("external-second.wav");
     write_pcm_frames(&first, 1);
@@ -119,7 +135,7 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
 #[test]
 fn external_insertions_invalidate_queue_intents_even_for_unchanged_registered_sources() {
     for index in [None, Some(0)] {
-        let (directory, mut core) = admission_fixture();
+        let (directory, mut core) = fixture();
         let path = directory.path().join("external.wav");
         write_pcm_frames(&path, 1);
         for _ in 0..2 {
@@ -148,7 +164,7 @@ fn external_insertions_invalidate_queue_intents_even_for_unchanged_registered_so
 
 #[test]
 fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_append() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
     let before_total = core.state.library.track_total;
@@ -178,7 +194,7 @@ fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_ap
 
 #[test]
 fn cancel_scan_is_intent_until_preparation_joins_and_leaves_no_residue() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
     let queue = core.store.queue_ids().unwrap();
@@ -217,7 +233,7 @@ fn cancel_scan_is_intent_until_preparation_joins_and_leaves_no_residue() {
 
 #[test]
 fn admission_owns_media_slot_and_requires_versioned_positions() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
     assert!(
@@ -261,7 +277,7 @@ fn admission_owns_media_slot_and_requires_versioned_positions() {
 
 #[test]
 fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
-    let (directory, core) = admission_fixture();
+    let (directory, core) = fixture();
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
     let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
@@ -301,7 +317,7 @@ fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
 
 #[test]
 fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
     let total = core.state.library.track_total;
@@ -311,10 +327,7 @@ fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts()
     core.start_external_admission(vec![path.clone(), path.clone()], None, None)
         .unwrap();
     let id = core.active_external_admission.as_ref().unwrap().status.id;
-    while !core.active_external_admission.as_ref().unwrap().is_saving() {
-        let event = next_admission_event(&mut core);
-        core.external_admission_event(event);
-    }
+    drive_to_saving(&mut core);
     assert!(core.database_maintenance_active());
     assert!(core.command(Command::CancelScan { id }).is_err());
     core.command(Command::Volume { value: 0.42 }).unwrap();
@@ -345,7 +358,7 @@ fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts()
 
 #[test]
 fn dispatched_mpris_seek_stays_local_during_external_saving() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     let _audio = recording_audio(&mut core);
     playing(&mut core, 1);
     core.command(Command::Pause).unwrap();
@@ -355,10 +368,7 @@ fn dispatched_mpris_seek_stays_local_during_external_saving() {
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     core.start_external_admission(vec![path], None, None)
         .unwrap();
-    while !core.active_external_admission.as_ref().unwrap().is_saving() {
-        let event = next_admission_event(&mut core);
-        core.external_admission_event(event);
-    }
+    drive_to_saving(&mut core);
     core.transport.selection_pending = true;
     assert!(
         operation_ack(
@@ -392,7 +402,7 @@ fn dispatched_mpris_seek_stays_local_during_external_saving() {
 
 #[test]
 fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     let path = directory.path().join("1.wav");
     write_pcm_frames(&path, 1);
     core.store
@@ -433,7 +443,7 @@ fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
 
 #[test]
 fn unrelated_external_admission_does_not_refresh_broken_current_projection() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     core.store.set_queue_current(Some(1)).unwrap();
     core.refresh_queue_tracks().unwrap();
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
@@ -463,7 +473,7 @@ fn unrelated_external_admission_does_not_refresh_broken_current_projection() {
 
 #[test]
 fn queue_structure_recovery_stays_complete_when_current_recovery_fails() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     core.store.set_queue_current(Some(1)).unwrap();
     core.refresh_queue_tracks().unwrap();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
@@ -505,7 +515,7 @@ fn external_media_waits_share_scan_identity_and_report_all_terminal_paths() {
             if shutdown && expected != ScanPhase::Cancelled {
                 continue;
             }
-            let (directory, mut core) = admission_fixture();
+            let (directory, mut core) = fixture();
             let path = directory.path().join("external.wav");
             if expected != ScanPhase::Failed {
                 write_pcm(&path);
@@ -555,7 +565,7 @@ fn external_media_waits_share_scan_identity_and_report_all_terminal_paths() {
 
 #[test]
 fn stale_queue_external_paths_command_recovers_before_accepting_task() {
-    let (directory, mut core) = admission_fixture();
+    let (directory, mut core) = fixture();
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
     let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
@@ -578,20 +588,16 @@ fn stale_queue_external_paths_command_recovers_before_accepting_task() {
 #[test]
 fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot() {
     for repaired in [false, true] {
-        let (directory, mut core) = admission_fixture();
+        let (directory, mut core) = fixture();
         let path = directory.path().join("external.wav");
         write_pcm_frames(&path, 1);
         core.store.set_queue_current(Some(1)).unwrap();
         core.refresh_queue_tracks().unwrap();
         core.start_external_admission(vec![path.clone()], None, None)
             .unwrap();
-        let prepared = loop {
-            let event = next_admission_event(&mut core);
-            if matches!(&event, crate::core::admission::Event::Prepared(_)) {
-                break event;
-            }
-            core.external_admission_event(event);
-        };
+        let prepared = take_admission_event(&mut core, |event| {
+            matches!(event, crate::core::admission::Event::Prepared(_))
+        });
         let id = core.active_external_admission.as_ref().unwrap().status.id;
         let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
         if repaired {
@@ -638,7 +644,7 @@ fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot
 #[test]
 fn saving_queue_bundle_remains_usable_when_later_scalar_reads_fail() {
     for (revision, index) in [(7, None), (u64::MAX, Some(0))] {
-        let (directory, mut core) = admission_fixture();
+        let (directory, mut core) = fixture();
         core.state.queue.current_id = Some(5);
         core.save_queue().unwrap();
         core.refresh_queue_tracks().unwrap();
@@ -648,13 +654,9 @@ fn saving_queue_bundle_remains_usable_when_later_scalar_reads_fail() {
         write_pcm_frames(&path, 1);
         core.start_external_admission(vec![path], index, index.map(|_| revision))
             .unwrap();
-        let completion = loop {
-            let event = next_admission_event(&mut core);
-            if matches!(event, crate::core::admission::Event::SavingRetired(_)) {
-                break event;
-            }
-            core.external_admission_event(event);
-        };
+        let completion = take_admission_event(&mut core, |event| {
+            matches!(event, crate::core::admission::Event::SavingRetired(_))
+        });
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         connection
             .execute_batch(
@@ -686,7 +688,7 @@ fn saving_queue_bundle_remains_usable_when_later_scalar_reads_fail() {
 #[test]
 fn saving_queue_bundle_preserves_newer_structure_and_already_saved_selection() {
     for changed_structure in [false, true] {
-        let (directory, mut core) = admission_fixture();
+        let (directory, mut core) = fixture();
         core.state.queue.current_id = Some(1);
         core.save_queue().unwrap();
         core.refresh_queue_tracks().unwrap();
@@ -696,13 +698,9 @@ fn saving_queue_bundle_preserves_newer_structure_and_already_saved_selection() {
         write_pcm_frames(&path, 1);
         core.start_external_admission(vec![path], Some(0), Some(revision))
             .unwrap();
-        let completion = loop {
-            let event = next_admission_event(&mut core);
-            if matches!(event, crate::core::admission::Event::SavingRetired(_)) {
-                break event;
-            }
-            core.external_admission_event(event);
-        };
+        let completion = take_admission_event(&mut core, |event| {
+            matches!(event, crate::core::admission::Event::SavingRetired(_))
+        });
         if changed_structure {
             core.store.enqueue_tracks(&[2]).unwrap();
             core.advance_queue_revision();
@@ -733,7 +731,7 @@ fn saving_queue_bundle_preserves_newer_structure_and_already_saved_selection() {
 #[test]
 fn committed_external_queue_projection_failure_recovers_before_navigation() {
     for index in [None, Some(0)] {
-        let (directory, mut core) = admission_fixture();
+        let (directory, mut core) = fixture();
         core.state.queue.current_id = Some(5);
         core.save_queue().unwrap();
         core.refresh_queue_tracks().unwrap();
@@ -752,7 +750,7 @@ fn committed_external_queue_projection_failure_recovers_before_navigation() {
         assert_eq!(status.progress.phase, ScanPhase::Failed);
         let commands = recording_audio(&mut core);
         assert!(core.command(Command::Previous).is_err());
-        assert!(commands.try_recv().is_err());
+        assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
         repair_queue_projection(&connection);
         core.command(Command::Previous).unwrap();
         assert_eq!(core.state.queue.current_id, Some(4));

@@ -164,7 +164,7 @@ fn playlist_catalog_moves_change_only_catalog_order_and_its_revision() {
             QueryError::RevisionChanged
         );
     }
-    assert!(audio.try_iter().next().is_none());
+    assert!(recorded_audio(&audio_port(&mut core), &audio).is_empty());
 }
 
 #[test]
@@ -439,7 +439,7 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
     );
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
-    assert!(audio.try_iter().next().is_none());
+    assert!(recorded_audio(&audio_port(&mut core), &audio).is_empty());
 }
 
 #[test]
@@ -2229,33 +2229,7 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
     let (directory, mut core) = fixture();
     let track = core.track(1).unwrap();
     write_pcm_frames(&track.path, 1);
-    let metadata = std::fs::metadata(&track.path).unwrap();
-    let media = core
-        .store
-        .known_source(&track.path)
-        .unwrap()
-        .unwrap()
-        .media
-        .unwrap();
-    let impacts = core
-        .store
-        .apply_scan(&ScanResult {
-            records: vec![Arc::new(ScanRecord {
-                path: track.path,
-                size: metadata.len(),
-                modified_ns: metadata
-                    .modified()
-                    .unwrap()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as i64,
-                fingerprint: None,
-                media,
-            })],
-            ..ScanResult::default()
-        })
-        .unwrap();
-    core.apply_catalog_changes(impacts).unwrap();
+    super::playback::scan_written_source(&mut core, track.path, |_| {});
     pending(&mut core, 1);
     let source = core
         .transport
@@ -2321,7 +2295,7 @@ fn stale_queue_recovery_retries_projection_and_prunes_shuffle_history_without_re
         ),
         source_facts
     );
-    assert!(commands.try_recv().is_err());
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
 }
 
 #[test]
@@ -2354,13 +2328,7 @@ fn queue_queries_recover_committed_structure_before_reply_without_replaying_muta
             let commands = recording_audio(&mut core);
             core.publish();
             if worker {
-                core.read_queries = Some(
-                    query_worker::ReadQueries::start(
-                        directory.path().join("library.db"),
-                        Arc::clone(&core.shared),
-                    )
-                    .unwrap(),
-                );
+                super::lifecycle::attach_read_owner(&mut core, directory.path());
             }
             let query = match kind {
                 "page" => Query::QueuePage {
@@ -2429,7 +2397,7 @@ fn queue_queries_recover_committed_structure_before_reply_without_replaying_muta
                 assert_eq!(core.store.queue_ids().unwrap(), [1, 4, 5]);
                 assert_eq!(core.state.queue.revision, revision);
                 assert_eq!(core.transport.generation, generation);
-                assert!(commands.try_recv().is_err());
+                assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
             }
         }
     }
@@ -2437,85 +2405,45 @@ fn queue_queries_recover_committed_structure_before_reply_without_replaying_muta
 
 #[test]
 fn incremental_queue_commits_recover_projection_before_previous() {
-    let cases = [
-        ("INSERT", Command::Enqueue { track_ids: vec![1] }),
-        (
-            "INSERT",
-            Command::EnqueueSources {
-                other_tracks: false,
-                directories: vec![],
-                track_ids: vec![1],
-            },
-        ),
-        (
-            "INSERT",
-            Command::InsertQueue {
-                track_ids: vec![1],
-                index: 0,
-                expected_revision: 0,
-            },
-        ),
-        (
-            "INSERT",
-            Command::InsertQueueSources {
-                other_tracks: false,
-                directories: vec![],
-                track_ids: vec![1],
-                index: 0,
-                expected_revision: 0,
-            },
-        ),
-        (
-            "DELETE",
-            Command::RemoveQueueEntries {
-                queue_ids: vec![1, 2],
-            },
-        ),
-        (
-            "UPDATE OF position",
+    type QueueEdit = fn(u64) -> Command;
+    let cases: &[(&str, QueueEdit)] = &[
+        ("INSERT", |_| Command::Enqueue { track_ids: vec![1] }),
+        ("INSERT", |_| Command::EnqueueSources {
+            other_tracks: false,
+            directories: vec![],
+            track_ids: vec![1],
+        }),
+        ("INSERT", |expected_revision| Command::InsertQueue {
+            track_ids: vec![1],
+            index: 0,
+            expected_revision,
+        }),
+        ("INSERT", |expected_revision| Command::InsertQueueSources {
+            other_tracks: false,
+            directories: vec![],
+            track_ids: vec![1],
+            index: 0,
+            expected_revision,
+        }),
+        ("DELETE", |_| Command::RemoveQueueEntries {
+            queue_ids: vec![1, 2],
+        }),
+        ("UPDATE OF position", |expected_revision| {
             Command::MoveQueueEntries {
                 queue_ids: vec![5],
                 index: 0,
-                expected_revision: 0,
-            },
-        ),
-        ("UPDATE OF position", Command::RandomizeQueue),
+                expected_revision,
+            }
+        }),
+        ("UPDATE OF position", |_| Command::RandomizeQueue),
     ];
-    for (event, command) in cases {
+    for &(event, command) in cases {
         let (directory, mut core) = fixture();
         core.state.queue.current_id = Some(5);
         core.save_queue().unwrap();
         core.refresh_queue_tracks().unwrap();
-        let command = match command {
-            Command::InsertQueue {
-                track_ids, index, ..
-            } => Command::InsertQueue {
-                track_ids,
-                index,
-                expected_revision: core.state.queue.revision,
-            },
-            Command::InsertQueueSources {
-                other_tracks,
-                directories,
-                track_ids,
-                index,
-                ..
-            } => Command::InsertQueueSources {
-                other_tracks,
-                directories,
-                track_ids,
-                index,
-                expected_revision: core.state.queue.revision,
-            },
-            Command::MoveQueueEntries {
-                queue_ids, index, ..
-            } => Command::MoveQueueEntries {
-                queue_ids,
-                index,
-                expected_revision: core.state.queue.revision,
-            },
-            command => command,
-        };
+        let command = command(core.state.queue.revision);
+        let append = matches!(command, Command::Enqueue { .. });
         let connection = fail_queue_projection_after(directory.path(), event);
         let commands = recording_audio(&mut core);
         // Seed randomization so the mutation is deterministic, not a possible no-op.
@@ -2528,9 +2456,21 @@ fn incremental_queue_commits_recover_projection_before_previous() {
         } else {
             assert!(core.command(command).is_err());
         }
+        assert!(core.transport.projection_stale);
+        if append {
+            assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
+        }
         assert!(core.command(Command::Previous).is_err());
-        assert!(commands.try_recv().is_err());
+        assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
         repair_queue_projection(&connection);
+        if append {
+            core.ensure_queue_control_ready().unwrap();
+            assert_eq!(core.state.queue.total, 6);
+            assert_eq!(core.state.queue.current_id, Some(5));
+            assert_eq!(core.state.queue.current_position, Some(4));
+            assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
+            assert_queue_saved(&core);
+        }
         let ids = core.store.queue_ids().unwrap();
         let position = ids.iter().position(|&id| id == 5).unwrap();
         let expected = ids[position.saturating_sub(1)];
@@ -2597,31 +2537,6 @@ fn delayed_queue_projection_preserves_pending_selection_at_its_committed_positio
     assert!(!core.transport.projection_stale);
     assert_eq!(core.state.queue.current_id, Some(3));
     assert_eq!(core.state.queue.current_position, Some(1));
-    assert_queue_saved(&core);
-}
-
-#[test]
-fn committed_append_scalar_failure_recovers_without_replaying_insertion() {
-    let (directory, mut core) = fixture();
-    core.state.queue.current_id = Some(5);
-    core.save_queue().unwrap();
-    core.refresh_queue_tracks().unwrap();
-    let connection = fail_queue_projection_after(directory.path(), "INSERT");
-    assert!(
-        core.command(Command::Enqueue { track_ids: vec![1] })
-            .is_err()
-    );
-    assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
-    assert!(core.transport.projection_stale);
-    let commands = recording_audio(&mut core);
-    assert!(core.command(Command::Previous).is_err());
-    assert!(commands.try_recv().is_err());
-    repair_queue_projection(&connection);
-    core.ensure_queue_control_ready().unwrap();
-    assert_eq!(core.state.queue.total, 6);
-    assert_eq!(core.state.queue.current_id, Some(5));
-    assert_eq!(core.state.queue.current_position, Some(4));
-    assert_eq!(core.store.queue_ids().unwrap(), [1, 2, 3, 4, 5, 6]);
     assert_queue_saved(&core);
 }
 

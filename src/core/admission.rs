@@ -651,6 +651,23 @@ mod tests {
 
     // Keep authoritative facts independent from the supervisor's result, just
     // like production. Both the blocking closure and supervisor can unwind.
+    fn status_at(phase: ScanPhase, processed: usize) -> ScanTaskStatus {
+        ScanTaskStatus {
+            id: 1,
+            progress: ScanProgress {
+                phase,
+                processed,
+                total: Some(1),
+                errors: 0,
+                path: None,
+            },
+            message: String::new(),
+            library_committed: false,
+            playlist_id: None,
+            error: None,
+        }
+    }
+
     fn install_panicking_saving(core: &mut Core, work: impl FnOnce(&mut Saved) + Send + 'static) {
         let (_, events) = async_channel::bounded(3);
         let (finished_tx, finished) = oneshot::channel();
@@ -671,20 +688,7 @@ mod tests {
             panic!("injected saving supervisor panic before forwarding retirement");
         });
         core.active_external_admission = Some(ExternalAdmissionTask {
-            status: ScanTaskStatus {
-                id: 1,
-                progress: ScanProgress {
-                    phase: ScanPhase::Saving,
-                    processed: 1,
-                    total: Some(1),
-                    errors: 0,
-                    path: None,
-                },
-                message: String::new(),
-                library_committed: false,
-                playlist_id: None,
-                error: None,
-            },
+            status: status_at(ScanPhase::Saving, 1),
             events,
             finished,
             saving_facts: Some(saving_facts),
@@ -870,10 +874,7 @@ mod tests {
 
     #[test]
     fn preparation_drop_joins_physical_worker_after_cancellation() {
-        if crate::test_support::run_in_subprocess(
-            "core::admission::tests::preparation_drop_joins_physical_worker_after_cancellation",
-            Duration::from_secs(15),
-        ) {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
         let runtime = TaskRuntime::start().unwrap();
@@ -898,20 +899,7 @@ mod tests {
             let _ = finished_tx.send(Event::Prepared(Ok(library::ExternalAdmission::default())));
         });
         let task = ExternalAdmissionTask {
-            status: ScanTaskStatus {
-                id: 1,
-                progress: ScanProgress {
-                    phase: ScanPhase::ReadingMetadata,
-                    processed: 0,
-                    total: Some(1),
-                    errors: 0,
-                    path: None,
-                },
-                message: String::new(),
-                library_committed: false,
-                playlist_id: None,
-                error: None,
-            },
+            status: status_at(ScanPhase::ReadingMetadata, 0),
             events,
             finished,
             saving_facts: None,
@@ -928,68 +916,6 @@ mod tests {
     }
 
     #[test]
-    fn retirement_failure_preserves_known_committed_revisions_without_quarantine() {
-        let (directory, mut core) = super::super::tests::fixture_with_database(None);
-        let before = core.state.query_revisions();
-        let (_, events) = async_channel::bounded(3);
-        let (_, finished) = oneshot::channel();
-        core.active_external_admission = Some(ExternalAdmissionTask {
-            status: ScanTaskStatus {
-                id: 1,
-                progress: ScanProgress {
-                    phase: ScanPhase::Saving,
-                    processed: 1,
-                    total: Some(1),
-                    errors: 0,
-                    path: None,
-                },
-                message: String::new(),
-                library_committed: false,
-                playlist_id: None,
-                error: None,
-            },
-            events,
-            finished,
-            saving_facts: None,
-            database_path: directory.path().join("library.db"),
-            index: None,
-            expected_revision: None,
-            cancellation: library::ScanCancellation::default(),
-            worker: None,
-        });
-        let mut saved = Saved::new(0, Vec::new());
-        saved.admit(|| {
-            Ok((
-                1,
-                crate::store::CatalogChanges {
-                    changed: true,
-                    library: true,
-                    structure: true,
-                    queue: true,
-                    albums: true,
-                    duplicate_groups: true,
-                    duplicate_members: true,
-                    ..Default::default()
-                },
-                1,
-            ))
-        });
-        saved.failed(anyhow::anyhow!("retirement failed after commit"));
-        core.finish_external_saving(saved);
-        let after = core.state.query_revisions();
-        assert_ne!(after.library, before.library);
-        assert_ne!(after.structure, before.structure);
-        assert_ne!(after.queue, before.queue);
-        assert_ne!(after.album, before.album);
-        assert_ne!(after.duplicate_groups, before.duplicate_groups);
-        assert_ne!(after.duplicate_members, before.duplicate_members);
-        assert!(!core.database_maintenance_active());
-        let status = core.scan_results.back().unwrap();
-        assert!(status.library_committed);
-        assert_eq!(status.progress.phase, ScanPhase::Failed);
-    }
-
-    #[test]
     fn shutdown_preserves_saving_supervisor_failure_after_completion() {
         let (directory, mut core) = super::super::tests::fixture_with_database(None);
         let (_, events) = async_channel::bounded(3);
@@ -1003,20 +929,7 @@ mod tests {
             panic!("injected saving supervisor failure after completion");
         });
         core.active_external_admission = Some(ExternalAdmissionTask {
-            status: ScanTaskStatus {
-                id: 1,
-                progress: ScanProgress {
-                    phase: ScanPhase::Saving,
-                    processed: 1,
-                    total: Some(1),
-                    errors: 0,
-                    path: None,
-                },
-                message: String::new(),
-                library_committed: false,
-                playlist_id: None,
-                error: None,
-            },
+            status: status_at(ScanPhase::Saving, 1),
             events,
             finished,
             saving_facts: Some(saving_facts),
@@ -1038,7 +951,7 @@ mod tests {
     fn lost_commit_facts_block_database_operations_without_replaying_the_save() {
         let (directory, mut core) = super::super::tests::fixture_with_database(None);
         let path = directory.path().join("uncertain.wav");
-        crate::test_support::write_i16_wav(&path, 1, 8_000, std::iter::repeat_n(0, 40_000))
+        rivu_audio::test_support::write_i16_wav(&path, 1, 8_000, std::iter::repeat_n(0, 40_000))
             .unwrap();
         let before = core.store.queue_ids().unwrap();
         let before_total = core.state.queue.total;

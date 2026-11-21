@@ -459,28 +459,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn relocation_fifo_replacement_is_rejected_without_waiting_for_a_writer() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(10)) {
+            return;
+        }
         let (_directory, prepared) = prepared();
         std::fs::remove_file(&prepared.target.path).unwrap();
         let name =
             std::ffi::CString::new(prepared.target.path.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let (completed, receive) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let result = futures::executor::block_on(verify_target(
+        assert!(
+            futures::executor::block_on(verify_target(
                 prepared,
                 library::ScanCancellation::default(),
                 BlockingExecutor::new(4),
-            ));
-            let _ = completed.send(result);
-        });
-        // On timeout do not join: a FIFO-open regression must fail, not hang
-        // while a test runtime waits for a stuck blocking filesystem operation.
-        receive
-            .recv_timeout(Duration::from_secs(2))
-            .expect("FIFO admission must not block")
-            .err()
-            .unwrap();
-        worker.join().unwrap();
+            ))
+            .is_err()
+        );
     }
 }

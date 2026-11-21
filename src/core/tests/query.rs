@@ -153,16 +153,11 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
 fn retained_query_waits_for_physical_reply_or_disconnect() {
     for disconnect in [false, true] {
         let (handle, _analysis, requests) = pcm_fixture();
-        let (finished, completion) = bounded(1);
-        let worker = thread::spawn(move || {
-            finished
-                .send(futures::executor::block_on(
-                    handle.query_retained(Query::Track { track_id: 1 }),
-                ))
-                .unwrap();
-        });
-        let request = requests.recv_blocking().unwrap();
-        assert!(completion.try_recv().is_err());
+        let mut pending = Box::pin(handle.query_retained(Query::Track { track_id: 1 }));
+        let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        assert!(pending.as_mut().poll(&mut context).is_pending());
+        let request = requests.try_recv().unwrap();
+        assert!(pending.as_mut().poll(&mut context).is_pending());
         if disconnect {
             drop(request);
         } else {
@@ -175,13 +170,16 @@ fn retained_query_waits_for_physical_reply_or_disconnect() {
                 }))
                 .unwrap();
         }
-        let response = completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        let response = futures::executor::block_on(rivu_protocol::transport::timeout(
+            Duration::from_secs(2),
+            pending,
+        ))
+        .unwrap();
         if disconnect {
             assert!(matches!(response.result, Err(QueryError::Message(_))));
         } else {
             assert!(matches!(response.result, Ok(ViewResponse::Track(None))));
         }
-        worker.join().unwrap();
     }
 }
 
@@ -192,7 +190,7 @@ fn query_timeout_does_not_wait_for_physical_retirement() {
         handle.query_with_timeout(Query::Track { track_id: 1 }, Duration::ZERO),
     );
     assert!(matches!(result.result, Err(QueryError::Message(_))));
-    let request = requests.recv_blocking().unwrap();
+    let request = requests.try_recv().unwrap();
     assert!(
         request
             .reply

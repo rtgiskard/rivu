@@ -1,11 +1,6 @@
 use super::*;
 use crate::core::catalog::{ScanFinished, ScanMode};
 
-// Scan commits use another connection; all catalog task tests need a real DB.
-fn fixture() -> (tempfile::TempDir, Core) {
-    fixture_with_database(Some(10.0))
-}
-
 #[test]
 fn committed_scan_invalidates_before_failed_refresh() {
     let (directory, mut core) = fixture_with_database(Some(10.0));
@@ -98,16 +93,13 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
     let mut impacts = core
         .store
         .apply_scan(&ScanResult {
-            records: (vec![ScanRecord {
+            records: vec![Arc::new(ScanRecord {
                 path: directory.path().join("committed.wav"),
                 size: 1,
                 modified_ns: 1,
                 fingerprint: Some(blake3::hash(b"committed fingerprint")),
                 media,
-            }])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+            })],
             ..ScanResult::default()
         })
         .unwrap();
@@ -175,7 +167,7 @@ fn startup_and_catalog_refresh_retain_the_same_recent_history() {
         .collect(),
         ..ScanResult::default()
     };
-    let impacts = core.store.apply_scan(&result).unwrap();
+    core.store.apply_scan(&result).unwrap();
     let ids: Vec<_> = core
         .store
         .stored_scan_files(&[directory.path().to_path_buf()])
@@ -204,7 +196,20 @@ fn startup_and_catalog_refresh_retain_the_same_recent_history() {
         .map(|entry| entry.track_id)
         .collect();
     assert_eq!(initial, expected);
+    let mut changed = result;
+    let latest = core.track(expected[0]).unwrap();
+    let record = changed
+        .records
+        .iter_mut()
+        .find(|r| r.path == latest.path)
+        .unwrap();
+    Arc::make_mut(record).media.title = "Refreshed history title".into();
+    let impacts = core.store.apply_scan(&changed).unwrap();
     core.apply_catalog_changes(impacts).unwrap();
+    assert_eq!(
+        core.state.library.history[0].title,
+        "Refreshed history title"
+    );
     let refreshed: Vec<_> = core
         .state
         .library
@@ -535,16 +540,13 @@ fn failed_playlist_import_keeps_committed_scan_visible() {
     let scan = ScanFinished {
         id: 0,
         result: Ok(ScanResult {
-            records: (vec![ScanRecord {
+            records: vec![Arc::new(ScanRecord {
                 path: directory.path().join("1.wav"),
                 size: 1,
                 modified_ns: 2,
                 fingerprint: None,
                 media,
-            }])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+            })],
             ..ScanResult::default()
         }),
         mode: ScanMode::PlaylistImport(("empty".into(), vec![])),
@@ -747,12 +749,7 @@ fn resumed_import_preserves_latest_playlist_tokens_and_snapshot_isolation() {
         let path = directory.path().join("mix.m3u8");
         std::fs::write(&path, "imported.wav\n").unwrap();
         core.import_playlist(path, "Imported".into()).unwrap();
-        let finished = loop {
-            match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                ScanEvent::Finished(scan) => break scan,
-                event => core.scan_event(event),
-            }
-        };
+        let finished = take_finished_scan(&mut core);
         // A relocation may defer an otherwise completed traversal. Playlist
         // changes before resuming must be in the snapshot Saving captures.
         core.active_scan.as_mut().unwrap().pending_save = Some(finished);
@@ -908,31 +905,24 @@ fn forced_duration_scan_refreshes_cached_short_existing_tracks() {
     write_pcm(&path);
     core.scan(vec![path.clone()], false).unwrap();
     assert!(settle_scan(&mut core));
-    let known = core.store.known_source(&path).unwrap().unwrap();
-    let mut media = known.media.unwrap();
-    media.title = "Cached title".into();
-    media.duration = Some(99.0);
+    let mut record = record_for_known_file(&core, path.clone());
+    let probed_title = std::mem::replace(&mut record.media.title, "Cached title".into());
+    record.media.duration = Some(99.0);
     core.store
         .apply_scan(&ScanResult {
-            records: (vec![ScanRecord {
-                path: path.clone(),
-                size: known.size,
-                modified_ns: known.modified_ns,
-                fingerprint: known.fingerprint,
-                media,
-            }])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+            records: vec![Arc::new(record)],
             ..ScanResult::default()
         })
         .unwrap();
     edit_preferences(&mut core, |config| config.scan_min_duration_seconds = 1);
+    core.scan(vec![path.clone()], false).unwrap();
+    assert!(settle_scan(&mut core));
+    assert_eq!(core.track(1).unwrap().title, "Cached title");
     core.scan(vec![path], true).unwrap();
     assert!(settle_scan(&mut core));
     let track = core.store.track(1).unwrap().unwrap();
     assert!(!track.missing);
-    assert_ne!(track.title, "Cached title");
+    assert_eq!(track.title, probed_title);
     assert!(
         track
             .duration
@@ -1143,21 +1133,12 @@ fn completed_scan_wait_is_independent_of_later_scans_and_global_errors() {
 fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages() {
     let (_directory, mut core) = fixture();
     let path = core.track(1).unwrap().path;
-    let known = core.store.known_source(&path).unwrap().unwrap();
-    let mut record = ScanRecord {
-        path,
-        size: known.size,
-        modified_ns: known.modified_ns,
-        fingerprint: Some(blake3::hash(b"same encoded audio")),
-        media: known.media.unwrap(),
-    };
+    let mut record = record_for_known_file(&core, path);
+    record.fingerprint = Some(blake3::hash(b"same encoded audio"));
     let impacts = core
         .store
         .apply_scan(&ScanResult {
-            records: (vec![record.clone()])
-                .into_iter()
-                .map(std::sync::Arc::new)
-                .collect(),
+            records: vec![Arc::new(record.clone())],
             ..Default::default()
         })
         .unwrap();
@@ -1172,16 +1153,14 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
     let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
     let before = core.state.query_revisions();
     record.modified_ns += 1;
+    let modified_ns = record.modified_ns;
     let fingerprint = record.fingerprint.unwrap().to_hex().to_string();
     let status = save_prepared_scan(
         &mut core,
         ScanFinished {
             id: 1,
             result: Ok(ScanResult {
-                records: (vec![record])
-                    .into_iter()
-                    .map(std::sync::Arc::new)
-                    .collect(),
+                records: vec![Arc::new(record)],
                 ..Default::default()
             }),
             mode: ScanMode::Library,
@@ -1232,7 +1211,7 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
     else {
         panic!("expected current member facts");
     };
-    assert_eq!(members.rows[0].modified_ns, known.modified_ns + 1);
+    assert_eq!(members.rows[0].modified_ns, modified_ns);
 }
 
 #[test]
@@ -1244,13 +1223,7 @@ fn scan_lookup_wait_observes_cancel_and_shutdown_without_committing() {
         let total = core.state.library.track_total;
         core.scan(vec![path], false).unwrap();
         let id = core.active_scan.as_ref().unwrap().status.id;
-        let lookup = loop {
-            let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            if matches!(event, ScanEvent::KnownSources { .. }) {
-                break event;
-            }
-            core.scan_event(event);
-        };
+        let lookup = take_known_sources(&mut core);
         // Keep the request alive without replying: cancellation must wake the
         // worker even when owner disconnection cannot release its reply wait.
         if shutdown {
@@ -1277,16 +1250,7 @@ fn cancelling_finished_but_uncommitted_scan_discards_its_result() {
     let total = core.state.library.track_total;
     core.scan(vec![path], false).unwrap();
     let id = core.active_scan.as_ref().unwrap().status.id;
-    let finished = loop {
-        match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-            ScanEvent::Progress { .. } => {}
-            event @ (ScanEvent::KnownSources { .. } | ScanEvent::Projections { .. }) => {
-                core.scan_event(event)
-            }
-            ScanEvent::Finished(scan) => break scan,
-            ScanEvent::Saved(_) => panic!("Scan cannot save before Core authorizes it"),
-        }
-    };
+    let finished = take_finished_scan(&mut core);
     core.command(Command::CancelScan { id }).unwrap();
     core.scan_event(ScanEvent::Finished(finished));
     assert_eq!(core.state.library.track_total, total);
@@ -1306,16 +1270,7 @@ fn saving_scan_rejects_cancellation_and_invalidates_the_owner_cache() {
     let source = cached.path.clone();
     write_pcm(&source);
     core.scan(vec![source], true).unwrap();
-    let finished = loop {
-        match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-            ScanEvent::Progress { .. } => {}
-            event @ (ScanEvent::KnownSources { .. } | ScanEvent::Projections { .. }) => {
-                core.scan_event(event)
-            }
-            ScanEvent::Finished(scan) => break scan,
-            ScanEvent::Saved(_) => panic!("Saving requires Core authorization"),
-        }
-    };
+    let finished = take_finished_scan(&mut core);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
     core.scan_event(ScanEvent::Finished(finished));
@@ -1393,9 +1348,13 @@ fn scan_terminal_retention_is_bounded_and_unknown_ids_fail() {
     let (directory, mut core) = fixture();
     let path = directory.path().join("1.wav");
     write_pcm(&path);
-    for _ in 0..MAX_RETAINED_SCAN_RESULTS + 1 {
-        core.scan(vec![path.clone()], false).unwrap();
-        assert!(settle_scan(&mut core));
+    core.scan(vec![path], false).unwrap();
+    assert!(settle_scan(&mut core));
+    let status = core.scan_results.back().unwrap().clone();
+    for id in 2..=MAX_RETAINED_SCAN_RESULTS as u64 + 1 {
+        let mut retained = status.clone();
+        retained.id = id;
+        core.retain_scan_outcome(retained, rivu_protocol::model::MediaTaskOwner::Library);
     }
     assert_eq!(core.scan_results.len(), MAX_RETAINED_SCAN_RESULTS);
     assert!(core.view(&Query::ScanTask { id: 1 }).is_err());
@@ -1870,16 +1829,13 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
             skipped_directories_truncated: false,
             scan_incomplete: true,
             uncertainties: Vec::new(),
-            records: (vec![ScanRecord {
+            records: vec![Arc::new(ScanRecord {
                 path: known.path,
                 size: known.size,
                 modified_ns: known.modified_ns + 1,
                 fingerprint: known.fingerprint,
                 media,
-            }])
-            .into_iter()
-            .map(std::sync::Arc::new)
-            .collect(),
+            })],
             errors: Vec::new(),
             ..Default::default()
         })
@@ -1910,38 +1866,6 @@ fn database_optimization_requires_stopped_playback_and_no_scan() {
 }
 
 #[test]
-fn forced_scan_reprobes_unchanged_files_instead_of_reusing_cached_metadata() {
-    let (_directory, mut core) = fixture();
-    let path = core.track(1).unwrap().path.clone();
-    write_pcm(&path);
-    let mut scanned = library::scan_paths(
-        std::slice::from_ref(&path),
-        |paths| Ok(vec![None; paths.len()]),
-        false,
-        &[_directory.path().to_path_buf()],
-        core.preferences.settings().scan_max_depth,
-        &library::ScanCancellation::default(),
-        |_, _, _, _, _| {},
-    )
-    .unwrap();
-    let probed_title = scanned.records[0].media.title.clone();
-    std::sync::Arc::make_mut(&mut scanned.records[0])
-        .media
-        .title = "Cached metadata".into();
-    let impacts = core.store.apply_scan(&scanned).unwrap();
-    core.apply_catalog_changes(impacts).unwrap();
-    for (force, expected) in [(false, "Cached metadata"), (true, probed_title.as_str())] {
-        core.command(Command::Scan {
-            paths: vec![path.clone()],
-            force,
-        })
-        .unwrap();
-        assert!(settle_scan(&mut core));
-        assert_eq!(core.track(1).unwrap().title, expected);
-    }
-}
-
-#[test]
 fn m3u_playlist_and_queue_preserve_occurrence_order() {
     let (directory, mut core) = fixture();
     for track_id in [1, 2, 3] {
@@ -1956,20 +1880,16 @@ fn m3u_playlist_and_queue_preserve_occurrence_order() {
     .unwrap();
     assert!(settle_scan(&mut core));
     let playlist_id = core.store.playlist_summary_page(None, 0, 1).unwrap().rows[0].id;
-    assert_eq!(
-        core.store
-            .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
-            .unwrap()
-            .rows
-            .iter()
-            .map(|entry| entry.track_id)
-            .collect::<Vec<_>>(),
-        [2, 1, 2, 3, 1]
-    );
-    core.command(Command::Enqueue {
-        track_ids: vec![2, 1, 2, 3, 1],
-    })
-    .unwrap();
+    let track_ids = core
+        .store
+        .playlist_entries_page(playlist_id, None, 0, MAX_QUERY_ROWS)
+        .unwrap()
+        .rows
+        .iter()
+        .map(|entry| entry.track_id)
+        .collect::<Vec<_>>();
+    assert_eq!(track_ids, [2, 1, 2, 3, 1]);
+    core.command(Command::Enqueue { track_ids }).unwrap();
     assert_eq!(
         core.store
             .queue_page(None, 5, MAX_QUERY_ROWS)
@@ -2128,14 +2048,19 @@ fn repeated_m3u_sources_scan_once_and_keep_ordered_playlist_occurrences() {
 
 #[test]
 fn import_input_failures_are_terminal_tasks_without_database_changes() {
-    for kind in [
-        "missing",
-        "fifo",
-        "nested_fifo",
-        "oversized",
-        "expansion",
-        "invalid_utf8",
-    ] {
+    check_import_input_failures(&["missing", "oversized", "expansion", "invalid_utf8"]);
+}
+
+#[test]
+fn fifo_import_failures_are_terminal_without_waiting_for_a_writer() {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+        return;
+    }
+    check_import_input_failures(&["fifo", "nested_fifo"]);
+}
+
+fn check_import_input_failures(kinds: &[&str]) {
+    for &kind in kinds {
         let (directory, mut core) = fixture();
         let path = directory.path().join("bounded.m3u");
         match kind {
@@ -2238,13 +2163,7 @@ fn accepted_import_allows_dispatch_and_cancellation_before_commit() {
         .unwrap();
     let id = core.active_scan.as_ref().unwrap().status.id;
     // Hold the worker at its existing owner lookup, without timing assumptions.
-    let lookup = loop {
-        let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        if matches!(&event, ScanEvent::KnownSources { .. }) {
-            break event;
-        }
-        core.scan_event(event);
-    };
+    let lookup = take_known_sources(&mut core);
     core.command(Command::SetFavorite {
         track_ids: vec![1],
         favorite: true,
@@ -2375,9 +2294,23 @@ fn prepare_other_check(core: &mut Core, force: bool) -> ScanFinished {
     let id = core.start_other_tracks_check(force).unwrap();
     assert!(core.state.system.scanning);
     assert_eq!(core.state.system.scan_task_id, Some(id));
+    take_finished_scan(core)
+}
+
+fn take_finished_scan(core: &mut Core) -> ScanFinished {
     loop {
         match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-            ScanEvent::Finished(finished) => return finished,
+            ScanEvent::Finished(scan) => return scan,
+            ScanEvent::Saved(_) => panic!("Saving requires Core authorization"),
+            event => core.scan_event(event),
+        }
+    }
+}
+
+fn take_known_sources(core: &mut Core) -> ScanEvent {
+    loop {
+        match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            lookup @ ScanEvent::KnownSources { .. } => return lookup,
             event => core.scan_event(event),
         }
     }
@@ -2439,13 +2372,7 @@ fn other_check_cancel_and_shutdown_join_preparation_waiting_on_owner() {
         write_pcm(&directory.path().join("1.wav"));
         edit_preferences(&mut core, |config| config.library_roots.clear());
         let id = core.start_other_tracks_check(false).unwrap();
-        let lookup = loop {
-            let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            if matches!(event, ScanEvent::KnownSources { .. }) {
-                break event;
-            }
-            core.scan_event(event);
-        };
+        let lookup = take_known_sources(&mut core);
         if shutdown {
             core.shutdown_scan();
         } else {
@@ -2547,10 +2474,7 @@ fn projection_read_failure_recovers_on_query_without_replaying_committed_writes(
     core.store.set_queue_current(Some(1)).unwrap();
     core.refresh_queue_tracks().unwrap();
     core.publish();
-    core.read_queries = Some(
-        super::super::query_worker::ReadQueries::start(database.clone(), Arc::clone(&core.shared))
-            .unwrap(),
-    );
+    super::lifecycle::attach_read_owner(&mut core, directory.path());
     // Warm the sole reader before the next committed writes.
     let (reply, response) = oneshot::channel();
     core.read_queries.as_ref().unwrap().submit(
