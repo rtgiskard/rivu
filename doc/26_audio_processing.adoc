@@ -177,14 +177,14 @@ input is disabled. Export encoding and rate/channel conversion are independent
 of that input preference; their availability follows the build and runtime
 libraries.
 
-Standalone restoration and native-only graphs decode blocks, retaining final PCM
-plus bounded DSP/delay state. Uncached entirely native exports stream to an
-unpublished encoded file in the selected format without whole-output PCM;
-cached exports share existing PCM. Model ancestors and Hybrid boundaries retain
-their PCM requirements. For fixed graph/format, streaming output memory is
-duration-independent, not total RSS: decoder, DSP/profile, delays and caches
-remain costs. Synchronous native execution borrows format-checked decoder blocks
-until the next mutable decoder operation, avoiding caller staging copies.
+Standalone restoration and native-only graph auditions retain final PCM plus
+bounded DSP/delay state. Exports stream the final native stage to an unpublished
+encoded file, including native processing downstream of a model. A target that
+already has PCM shares it with the encoder. The streamed final stage needs no
+second full-length output; model inputs and outputs, Hybrid boundaries and
+audition results still have their own PCM requirements. Synchronous native
+execution borrows format-checked decoder blocks until the next mutable decoder
+operation, avoiding caller staging copies.
 Retained PCM and DSP-owned buffers have independent lifetimes.
 
 Profile capture reads the required prefix including upstream context/latency.
@@ -216,8 +216,10 @@ complete once its runner is prepared; a prepared Hybrid suffix stays complete
 even when the offline prefix fails or is cancelled. Final compilation, rendering
 or publication failures and cancellations are attributed to the requested target
 unless already attributed to a specific node. A publication failure does not
-undo completed node phases, and a cached export does not report graph node
-execution.
+undo completed node phases. When streaming the native stage downstream of a
+model, an encoding error belongs to the export task, not to a graph node. The
+stage stays complete if its last causal block has been rendered, even when
+writing that block fails. A cached export does not report graph node execution.
 
 [[graph-resource-admission]]
 === Graph resource admission

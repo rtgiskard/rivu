@@ -45,31 +45,7 @@ impl Worker {
                 scripted("retained-success", serde_json::json!({"id": model_id}))
             }
             Self::NativeManifest => scripted("native", serde_json::json!({"backend": "onnx"})),
-            Self::RealDry => {
-                // Provision the same bundle as the Python tests, then drive its
-                // real worker from Rust (no model inference in dry mode).
-                let setup_script = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../tools/audio_processing/bundle_fixture.py");
-                let setup = Command::new("python3")
-                    .arg("-B")
-                    .arg(setup_script)
-                    .arg(directory)
-                    .output()
-                    .expect("dry worker fixture requires python3 on PATH");
-                assert!(
-                    setup.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&setup.stderr)
-                );
-                let stdout = String::from_utf8(setup.stdout).unwrap();
-                let (hash, interpreter) = stdout.trim_end().split_once('\n').unwrap();
-                (
-                    directory.join("runtime/worker.py"),
-                    PathBuf::from(interpreter),
-                    directory.join("manifest.json"),
-                    hash.to_owned(),
-                )
-            }
+            Self::RealDry => return crate::tests::real_dry_speech_bundle(directory),
         };
         let config = NeuralConfig {
             speech_interpreter: interpreter.clone(),

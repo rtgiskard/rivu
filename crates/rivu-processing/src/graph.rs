@@ -1,4 +1,4 @@
-//! Block-streamed DAG evaluation. Only model boundaries and the selected output retain PCM.
+//! Block-streamed DAG evaluation. File-only native stages need no retained output PCM.
 use super::render::{ProgressReporter, check_cancel, validate_output};
 use super::*;
 use anyhow::bail;
@@ -503,8 +503,8 @@ impl Engine {
         renderer.finish(cancel)?;
         Ok(frames)
     }
-    fn alias(&self, target: usize) -> Option<audio::PcmAudio> {
-        self.nodes[self.nodes[target].output_node].source.clone()
+    fn alias(&self, target: usize) -> Option<&audio::PcmAudio> {
+        self.nodes[self.nodes[target].output_node].source.as_ref()
     }
     fn render(
         mut self,
@@ -513,7 +513,7 @@ impl Engine {
         cancel: &AtomicBool,
     ) -> Result<GraphPcm> {
         let start_frame = -i64::try_from(self.nodes[target].latency)?;
-        if let Some(pcm) = self.alias(target) {
+        if let Some(pcm) = self.alias(target).cloned() {
             return Ok(GraphPcm { pcm, start_frame });
         }
         let mut builder = audio::PcmBuilder::new(self.rate, Arc::clone(&self.layout), budget)?;
@@ -663,7 +663,7 @@ pub(super) fn execute(
     cancellation: &Cancellation,
     progress: &mut ProgressReporter<'_>,
     mut models: BTreeMap<u64, neural::PreparedModel>,
-) -> Result<BTreeMap<GraphPort, GraphAudioOutput>> {
+) -> Result<GraphRender> {
     let cancel = cancellation.flag();
     let tx = progress.sender;
     let graph = execution.graph;
@@ -834,19 +834,73 @@ pub(super) fn execute(
             release_unreachable_pcm(graph, target, &mut boundaries, None, &mut input)?;
         }
     }
+    enum FinalStage {
+        Graph,
+        Export,
+        Rendered,
+    }
+    let mut stage = FinalStage::Graph;
     let outcome = (|| {
         let mut engine = Engine::for_retained(input.as_ref(), rate, Arc::clone(&layout));
         let index = engine.compile(graph, target, &boundaries, &profiles, cancel)?;
-        // The engine owns only boundaries reachable from this target; obsolete model
-        // ancestors are released before allocating the final retained output.
+        // The final engine owns all PCM still needed to produce the target.
         drop(boundaries);
         drop(profiles);
         drop(input);
+        if let Some(destination) = offline_export_path(&status.settings)
+            && engine.alias(index).is_none()
+        {
+            let mut timeline = ExportTimeline::new(engine.channels, engine.nodes[index].latency);
+            let causal_frames = engine.nodes[index].frames;
+            let channels = engine.channels;
+            stage = FinalStage::Export;
+            let pending = super::export::prepare_streaming_encoded_export(
+                rate,
+                &layout,
+                destination,
+                status.settings.audio_export.as_ref(),
+                cancel,
+                |writer| {
+                    stage = FinalStage::Graph;
+                    progress.report(ProcessingPhase::Processing, 0, Some(frames));
+                    engine.stream(index, None, cancel, |position, samples| {
+                        timeline
+                            .write(writer, position, samples, Some(frames), progress)
+                            .inspect_err(|_| {
+                                // The consumer sees a block only after its DSP round succeeds.
+                                // Count causal frames, not encoded frames: tails still need DSP.
+                                stage = if causal_frames - position
+                                    == (samples.len() / channels) as u64
+                                {
+                                    FinalStage::Rendered
+                                } else {
+                                    FinalStage::Export
+                                };
+                            })
+                    })?;
+                    drop(engine); // Release model boundaries before encoder finalization.
+                    timeline.finish(frames)?;
+                    stage = FinalStage::Rendered;
+                    Ok(())
+                },
+            )?;
+            return Ok(GraphRender {
+                pending_export: Some(pending),
+                ..Default::default()
+            });
+        }
         let output = engine.render(index, budget, cancel)?;
-        publish(output, frames, target, order, status, tx)
+        Ok(GraphRender {
+            outputs: publish(output, frames, target, order, status, tx)?,
+            ..Default::default()
+        })
     })();
-    if let Err(error) = &outcome {
-        node_failure(status, target.node, error, cancel, tx);
+    match stage {
+        FinalStage::Rendered => complete_streamed_export(order, status, tx),
+        FinalStage::Graph if let Err(error) = &outcome => {
+            node_failure(status, target.node, error, cancel, tx);
+        }
+        _ => {}
     }
     outcome
 }
@@ -898,10 +952,73 @@ fn publish(
     )]))
 }
 
-pub(super) struct NativeGraphOutput {
+#[derive(Default)]
+pub(super) struct GraphRender {
     pub(super) outputs: BTreeMap<GraphPort, GraphAudioOutput>,
     pub(super) denoised: Option<audio::PcmAudio>,
     pub(super) pending_export: Option<(tempfile::NamedTempFile, PathBuf)>,
+}
+
+fn offline_export_path(settings: &ProcessingSettings) -> Option<&Path> {
+    settings
+        .graph_export_path
+        .as_deref()
+        .filter(|_| settings.graph_mode == Some(GraphExecutionMode::Offline))
+}
+
+fn complete_streamed_export(order: &[u64], status: &mut ProcessingTaskStatus, tx: &Sender<Event>) {
+    status.graph_outputs.clear();
+    for &id in order {
+        node_event(status, id, ProcessingPhase::Complete, None, tx);
+    }
+}
+
+struct ExportTimeline {
+    channels: usize,
+    latency: u64,
+    written: u64,
+}
+
+impl ExportTimeline {
+    fn new(channels: usize, latency: u64) -> Self {
+        Self {
+            channels,
+            latency,
+            written: 0,
+        }
+    }
+
+    fn write(
+        &mut self,
+        writer: &mut super::export::ExportWriter<'_>,
+        position: u64,
+        samples: &[f32],
+        source_frames: Option<u64>,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<()> {
+        let block = causal_export_block(
+            position,
+            samples,
+            self.channels,
+            self.latency,
+            source_frames,
+        )?;
+        writer.write_frames(block)?;
+        self.written = self
+            .written
+            .checked_add((block.len() / self.channels) as u64)
+            .context("Graph export length overflow")?;
+        progress.report(ProcessingPhase::Processing, self.written, source_frames);
+        Ok(())
+    }
+
+    fn finish(self, source_frames: u64) -> Result<()> {
+        ensure!(
+            self.written == source_frames,
+            "Graph export does not cover source timeline"
+        );
+        Ok(())
+    }
 }
 
 fn causal_export_block(
@@ -937,7 +1054,7 @@ pub(super) fn execute_native(
     status: &mut ProcessingTaskStatus,
     cancel: &AtomicBool,
     progress: &mut ProgressReporter<'_>,
-) -> Result<NativeGraphOutput> {
+) -> Result<GraphRender> {
     let tx = progress.sender;
     let standalone = status.operation == ProcessingOperation::Denoise;
     let standalone_graph;
@@ -1070,14 +1187,10 @@ pub(super) fn execute_native(
             Some(renderer) => renderer,
             None => reopen()?,
         };
-        let destination = status
-            .settings
-            .graph_export_path
-            .as_ref()
-            .filter(|_| status.settings.graph_mode == Some(GraphExecutionMode::Offline));
+        let destination = offline_export_path(&status.settings);
         let (frames, output, pending_export) = if let Some(destination) = destination {
             let mut frames = None;
-            let mut written = 0_u64;
+            let mut timeline = ExportTimeline::new(engine.channels, latency);
             let pending = super::export::prepare_streaming_encoded_export(
                 rate,
                 &layout,
@@ -1085,32 +1198,17 @@ pub(super) fn execute_native(
                 status.settings.audio_export.as_ref(),
                 cancel,
                 |writer| {
-                    frames = Some(engine.decode(
+                    let decoded = engine.decode(
                         index,
                         renderer,
                         None,
                         cancel,
                         |position, samples, source_frames| {
-                            let block = causal_export_block(
-                                position,
-                                samples,
-                                usize::from(channels),
-                                latency,
-                                source_frames,
-                            )?;
-                            writer.write_frames(block)?;
-                            written = written
-                                .checked_add((block.len() / usize::from(channels)) as u64)
-                                .context("Graph export length overflow")?;
-                            progress.report(ProcessingPhase::Processing, written, source_frames);
-                            Ok(())
+                            timeline.write(writer, position, samples, source_frames, progress)
                         },
-                    )?);
-                    ensure!(
-                        frames == Some(written),
-                        "Graph export does not cover source timeline"
-                    );
-                    Ok(())
+                    )?;
+                    frames = Some(decoded);
+                    timeline.finish(decoded)
                 },
             )?;
             (
@@ -1184,13 +1282,10 @@ pub(super) fn execute_native(
         } else if let Some(output) = output {
             publish(output, frames, target, order, status, tx)?
         } else {
-            status.graph_outputs.clear();
-            for &id in order {
-                node_event(status, id, ProcessingPhase::Complete, None, tx);
-            }
+            complete_streamed_export(order, status, tx);
             BTreeMap::new()
         };
-        Ok(NativeGraphOutput {
+        Ok(GraphRender {
             outputs,
             denoised,
             pending_export,
