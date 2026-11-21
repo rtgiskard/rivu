@@ -417,9 +417,11 @@ class CaseSelectionTests(unittest.TestCase):
             if kind == "synthetic":
                 folder = root / ("speech-" + str(index))
                 folder.mkdir()
-                (folder / "manifest.json").write_text("{}\n")
                 for condition in ("clean", "white_+0dB", "not-canonical"):
                     sf.write(folder / (condition + ".wav"), samples, 8000, subtype="FLOAT")
+                case = lambda name: {"path": name, "sha256": hashlib.sha256((folder / name).read_bytes()).hexdigest()}
+                (folder / "manifest.json").write_text(json.dumps({"schema":2,
+                    "reference":case("clean.wav"), "cases":[case("white_+0dB.wav")]}))
             elif kind == "paired":
                 name = "p232_00" + str(index) + ".wav"
                 record = {"utterance":name}
@@ -815,9 +817,12 @@ class PreparedQualityTests(unittest.TestCase):
             ref_path, noisy_path = corpus / "clean.wav", corpus / "white_+0dB.wav"
             sf.write(ref_path, reference, 8000, subtype="FLOAT")
             sf.write(noisy_path, noisy, 8000, subtype="FLOAT")
-            (corpus / "manifest.json").write_text(json.dumps({"reference":str(ref_path),
+            (corpus / "manifest.json").write_text(json.dumps({"schema":2,
+                "reference":{"path":ref_path.name, "name":"clean", "snr_db":None,
+                             "sha256":quality.identity(ref_path)["sha256"]},
                 "provenance":"test corpus", "shared_reference_rms":0.08,
-                "cases":[{"path":str(noisy_path), "name":"white_+0dB", "snr_db":0}]}))
+                "cases":[{"path":noisy_path.name, "name":"white_+0dB", "snr_db":0,
+                          "sha256":quality.identity(noisy_path)["sha256"]}]}))
             def render(command, **kwargs):
                 _, source, estimate, config_path, *profile = command
                 config = json.loads(Path(config_path).read_text())
@@ -871,9 +876,12 @@ class PreparedQualityTests(unittest.TestCase):
                     noisy = reference + (case_index + 1) * np.array([0.03125, 0.03125, -0.03125, -0.03125])
                     sf.write(source, noisy, 8000, subtype="FLOAT")
                     cases.append({"path":str(source), "name":f"noise-{case_index}", "snr_db":0})
-                (corpus / "manifest.json").write_text(json.dumps({
-                    "reference":str(reference_path), "provenance":"test corpus",
-                    "shared_reference_rms":0.08, "cases":cases}))
+                (corpus / "manifest.json").write_text(json.dumps({"schema":2,
+                    "reference":{"path":reference_path.name, "name":"clean", "snr_db":None,
+                                 "sha256":quality.identity(reference_path)["sha256"]},
+                    "provenance":"test corpus", "shared_reference_rms":0.08,
+                    "cases":[{**case, "path":str(Path(case["path"]).relative_to(corpus)),
+                              "sha256":quality.identity(case["path"])["sha256"]} for case in cases]}))
                 for case in [{"path":str(reference_path), "name":"clean"}, *cases]:
                     source = Path(case["path"])
                     reference_by_source[str(source)] = reference

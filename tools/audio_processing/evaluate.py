@@ -11,6 +11,10 @@ model job at a time. Use the corresponding prepared interpreter, for example:
   python tools/audio_processing/evaluate.py --kind music --corpus-root /abs/music-float \
     --model-manifest /abs/kim/manifest.json --output-dir /abs/new-evaluation
 
+Synthetic groups require schema 2 manifests from prepare_speech.py. Re-prepare
+older groups; each manifest identifies its generated WAVs by relative path and
+SHA256 so the whole group can be moved without changing the selected inputs.
+
 Omit --case to evaluate every case. Repeat --case to select synthetic condition
 stems (for example clean or white_+0dB, across speech-* folders), paired utterance
 stems (for example p232_001), or music directories (for example track-00).
@@ -38,6 +42,7 @@ if __package__:
     from ..audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
     from ..audio_quality.evaluate import load_audio, load_identified, require_alignment
+    from ..audio_quality.synthetic_manifest import synthetic_cases
 else:
     from benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
     from common import digest, read_json_with_digest
@@ -45,6 +50,7 @@ else:
     from audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
     from audio_quality.evaluate import load_audio, load_identified, require_alignment
+    from audio_quality.synthetic_manifest import synthetic_cases
 
 def _paired_records(manifest, root):
     if not isinstance(manifest, dict) or manifest.get("schema") != 1:
@@ -85,16 +91,15 @@ def cases(kind, root, selected):
         for folder in sorted(root.glob("speech-*")):
             if not folder.is_dir():
                 continue
-            checksum = None
-            for source in sorted(folder.glob("*.wav")):
-                if not re.fullmatch(r"clean|(?:white|fan|varying|impulsive)_[+-]\d+dB",source.stem):
-                    continue
+            manifest, checksum = read_json_with_digest(folder / "manifest.json")
+            reference, *conditions = synthetic_cases(folder, manifest)
+            for case in (reference, *conditions):
+                source = case["path"]
                 if selected and source.stem not in selected:
                     continue
                 matched.add(source.stem)
-                if checksum is None:
-                    checksum = digest(folder / "manifest.json")
-                yield folder.name+"-"+source.stem,source,folder/"clean.wav",checksum,None,False,None
+                yield (folder.name+"-"+source.stem, source, reference["path"], checksum,
+                       None, False, (case["sha256"], reference["sha256"]))
     elif kind == "paired":
         manifest, checksum = read_json_with_digest(root / "manifest.json")
         for name, record in _paired_records(manifest, root):
@@ -165,6 +170,8 @@ def main():
         elif args.kind == "paired":
             for kind, audio in (("clean", reference_pcm), ("noisy", input_pcm)):
                 _require_prepared_identity(audio, source_identity[kind]["float"], name + "/" + kind)
+        elif (input_pcm.identity["sha256"], reference_pcm.identity["sha256"]) != source_identity:
+            raise ValueError(f"synthetic corpus input differs from manifest: {name}")
         prepared = PreparedReference(reference_audio, rate)
         request={"version":1,"task_id":name,"operation":operation,"input_path":str(source.resolve()),
                  "output_dir":str(output/name),"model_manifest":str(model),"device":"cpu","threads":args.threads,

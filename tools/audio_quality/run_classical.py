@@ -15,9 +15,11 @@ import soundfile as sf
 if __package__:
     from .evaluate import ReferenceEvaluation, identity
     from .metric_core import score_difference, score_summary
+    from .synthetic_manifest import synthetic_cases
 else:
     from evaluate import ReferenceEvaluation, identity
     from metric_core import score_difference, score_summary
+    from synthetic_manifest import synthetic_cases
 
 
 def summarize_reports(reports):
@@ -56,14 +58,18 @@ def main():
         corpus_output = output / f"corpus-{corpus_index}"
         corpus_output.mkdir(exist_ok=False)
         manifest = json.loads((corpus / "manifest.json").read_text())
-        reference = ReferenceEvaluation(manifest["reference"])
+        reference_case, *cases = synthetic_cases(corpus, manifest)
+        reference = ReferenceEvaluation(reference_case["path"])
+        if reference.audio.identity["sha256"] != reference_case["sha256"]:
+            raise ValueError("synthetic reference differs from manifest")
         clean, rate = reference.audio.data, reference.audio.rate
-        cases = [{"path": reference.audio.identity["path"], "name": "clean", "snr_db": None}, *manifest["cases"]]
-        for case_index, case in enumerate(cases):
+        for case_index, case in enumerate((reference_case, *cases)):
             source = Path(case["path"])
             case_output = corpus_output / f"case-{case_index}"
             case_output.mkdir(exist_ok=False)
             baseline = reference.baseline(source)
+            if baseline.audio.identity["sha256"] != case["sha256"]:
+                raise ValueError(f"synthetic input differs from manifest: {source}")
             snr = case["snr_db"]
             for mode in ("stationary", "profile", "adaptive"):
                 config = {"mode": mode}

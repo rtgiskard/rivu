@@ -54,11 +54,15 @@ def main():
             scaled = noise * np.sqrt(clean_power / (10 ** (snr / 10) * noise_power))
             path = output / f"{name}_{snr:+d}dB.wav"
             sf.write(path, clean + scaled, rate, subtype="FLOAT")
-            cases.append({"name": name, "snr_db": snr, "path": str(path), "peak": float(np.max(np.abs(clean + scaled)))})
+            cases.append({"name": name, "snr_db": snr, "path": path.name,
+                          "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                          "peak": float(np.max(np.abs(clean + scaled)))})
     manifest = {
-        "schema": 1, "source": str(source), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "schema": 2, "source": str(source), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "provenance": args.provenance, "seed": args.seed, "rate": rate, "frames": clean.size,
-        "reference": str(output / "clean.wav"), "shared_reference_rms": 0.08,
+        "reference": {"name": "clean", "snr_db": None, "path": "clean.wav",
+                      "sha256": hashlib.sha256((output / "clean.wav").read_bytes()).hexdigest()},
+        "shared_reference_rms": 0.08,
         "noise_kind": "deterministic synthetic; no claim of real-world noise coverage", "cases": cases,
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
