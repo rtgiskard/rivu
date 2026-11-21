@@ -1211,7 +1211,9 @@ impl Store {
         let (changed, representative): (bool, bool) = tx
             .query_row(
                 &format!(
-                    "SELECT replaygain_track_gain IS NOT ?2, {} FROM tracks AS t WHERE id=?1",
+                    "SELECT replaygain_track_gain IS NOT ?2,
+                        CASE WHEN replaygain_track_gain IS NOT ?2 THEN {} ELSE 0 END
+                     FROM tracks AS t WHERE id=?1",
                     super::albums::representative("t")
                 ),
                 params![id, value],
@@ -1379,6 +1381,9 @@ impl Store {
             )
             .optional()?
             .with_context(|| format!("track {id} does not exist"))?;
+        if !impact.library {
+            return Ok(impact);
+        }
         impact.queue = playlist_values_changed
             && tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=?1)",
@@ -1393,25 +1398,18 @@ impl Store {
                 rivu_format::database::eligible_title("COALESCE(?4,t.album)"),
                 super::albums::representative("t")
             ),
-            params![
-                album_values_changed,
-                impact.library && !album_values_changed,
-                id,
-                album
-            ],
+            params![album_values_changed, !album_values_changed, id, album],
             |row| row.get(0),
         )?;
-        if impact.library {
-            impact.playlists = if playlist_values_changed {
-                bounded_metadata_ids(
-                    &tx,
-                    "SELECT DISTINCT playlist_id FROM playlist_entries WHERE playlist_id>0 AND track_id=?1",
-                    [id],
-                )?
-            } else {
-                Some(Vec::new())
-            };
-        }
+        impact.playlists = if playlist_values_changed {
+            bounded_metadata_ids(
+                &tx,
+                "SELECT DISTINCT playlist_id FROM playlist_entries WHERE playlist_id>0 AND track_id=?1",
+                [id],
+            )?
+        } else {
+            Some(Vec::new())
+        };
         let updated = tx.execute(
             "UPDATE tracks SET title=COALESCE(?1,title),artist=COALESCE(?2,artist),
              album=COALESCE(?3,album),decoder_hint=COALESCE(?4,decoder_hint),
@@ -1420,21 +1418,12 @@ impl Store {
              disc_number=CASE WHEN ?9 THEN ?10 ELSE disc_number END,
              probe_version=CASE WHEN ?11 AND ?12 IS NOT replaygain_track_gain THEN 0 ELSE probe_version END,
              replaygain_track_gain=CASE WHEN ?11 THEN ?12 ELSE replaygain_track_gain END
-             WHERE id=?5 AND
-             ((?1 IS NOT NULL AND title IS NOT ?1) OR
-              (?2 IS NOT NULL AND artist IS NOT ?2) OR
-              (?3 IS NOT NULL AND album IS NOT ?3) OR
-              (?4 IS NOT NULL AND decoder_hint IS NOT ?4) OR
-              (?6 IS NOT NULL AND release_date IS NOT NULLIF(?6,'')) OR
-              (?7 AND track_number IS NOT ?8) OR (?9 AND disc_number IS NOT ?10)
-              OR (?11 AND ?12 IS NOT replaygain_track_gain))",
+             WHERE id=?5",
             values,
         )?;
         tx.commit()?;
         impact.changed = updated != 0;
-        if impact.library {
-            self.track_cache.borrow_mut().entries.remove(&id);
-        }
+        self.track_cache.borrow_mut().entries.remove(&id);
         Ok(impact)
     }
     #[cfg(test)]
