@@ -138,17 +138,14 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
 #[test]
 fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_dropping_tracks() {
     use rivu_protocol::model::AlbumKey;
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("album-eligibility.db");
-    let store = Store::open(&path).unwrap();
-    // No application scalar functions are registered on this connection.
-    let external = Connection::open(&path).unwrap();
+    let store = Store::open(Path::new(":memory:")).unwrap();
     let whitespace = "\t\n\u{000b}\u{000c}\r \u{0085}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}";
     let mut invalid = vec![String::new(), whitespace.to_owned()];
     invalid.extend(whitespace.chars().map(|ch| ch.to_string()));
     for (index, title) in invalid.iter().enumerate() {
         assert!(title.trim().is_empty());
-        external
+        store
+            .conn
             .execute(
                 "INSERT INTO tracks(path,album,artist) VALUES(?1,?2,'Excluded artist')",
                 params![format!("/music/{index}.flac"), title],
@@ -156,7 +153,8 @@ fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_droppi
             .unwrap();
     }
     for (index, title) in ["", whitespace].iter().enumerate() {
-        external
+        store
+            .conn
             .execute(
                 "INSERT INTO tracks(path,album,artist) VALUES(?1,?2,'Excluded artist')",
                 params![format!("/override/{index}.flac"), title],
@@ -176,7 +174,8 @@ fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_droppi
     ];
     for (index, title) in valid.iter().enumerate() {
         assert!(!title.trim().is_empty());
-        external
+        store
+            .conn
             .execute(
                 "INSERT INTO tracks(path,album) VALUES(?1,?2)",
                 params![format!("/valid/{index}.flac"), title],
@@ -256,16 +255,15 @@ fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_droppi
 }
 
 #[test]
-fn album_eligibility_transitions_follow_tag_changes_external_commits_and_rollback() {
+fn album_eligibility_transitions_follow_tag_changes_commit_and_rollback() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("album-transitions.db");
     let store = Store::open(&path).unwrap();
-    let external = Connection::open(&path).unwrap();
-    external
-        .execute_batch(
-            "INSERT INTO tracks(id,path,album,artist) VALUES(1,'/music/one.flac','','Artist');",
-        )
-        .unwrap();
+    let conn = &store.conn;
+    conn.execute_batch(
+        "INSERT INTO tracks(id,path,album,artist) VALUES(1,'/music/one.flac','','Artist');",
+    )
+    .unwrap();
     let check = |title: Option<&str>, artist: &str| {
         for sort in [AlbumSort::Title, AlbumSort::Artist] {
             let page = store.albums_page(None, sort, 0, 24).unwrap();
@@ -287,8 +285,7 @@ fn album_eligibility_transitions_follow_tag_changes_external_commits_and_rollbac
         assert_eq!(all_tracks(&store).len(), 1);
     };
     check(None, "");
-    external
-        .execute("UPDATE tracks SET album=' Tagged ' WHERE id=1", [])
+    conn.execute("UPDATE tracks SET album=' Tagged ' WHERE id=1", [])
         .unwrap();
     check(Some(" Tagged "), "Artist");
     let stale = store
@@ -297,8 +294,7 @@ fn album_eligibility_transitions_follow_tag_changes_external_commits_and_rollbac
         .rows
         .remove(0)
         .key;
-    external
-        .execute("UPDATE tracks SET album='' WHERE id=1", [])
+    conn.execute("UPDATE tracks SET album='' WHERE id=1", [])
         .unwrap();
     check(None, "");
     assert_eq!(
@@ -306,25 +302,30 @@ fn album_eligibility_transitions_follow_tag_changes_external_commits_and_rollbac
         0
     );
     assert!(store.queue_album(&stale, true).is_err());
-    external
-        .execute("UPDATE tracks SET album='Changed' WHERE id=1", [])
+    conn.execute("UPDATE tracks SET album='Changed' WHERE id=1", [])
         .unwrap();
     check(Some("Changed"), "Artist");
-    external
-        .execute(
-            "UPDATE tracks SET album=?1 WHERE id=1",
-            ["\u{a0}\u{2003}\u{202f}\u{3000}"],
-        )
-        .unwrap();
+    conn.execute(
+        "UPDATE tracks SET album=?1 WHERE id=1",
+        ["\u{a0}\u{2003}\u{202f}\u{3000}"],
+    )
+    .unwrap();
     check(None, "");
-    external
-        .execute_batch("BEGIN; UPDATE tracks SET album='Rollback',artist='Rolled back' WHERE id=1;")
-        .unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    tx.execute(
+        "UPDATE tracks SET album='Rollback',artist='Rolled back' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    check(Some("Rollback"), "Rolled back");
+    let reader = Store::open_read_snapshot(&path).unwrap();
+    let isolated = reader.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
+    assert_eq!(isolated.total, 0);
+    assert!(isolated.rows.is_empty());
+    drop(reader);
+    tx.rollback().unwrap();
     check(None, "");
-    external.execute_batch("ROLLBACK;").unwrap();
-    check(None, "");
-    external
-        .execute_batch("BEGIN; UPDATE tracks SET album=' Override ',artist='' WHERE id=1; COMMIT;")
+    conn.execute_batch("BEGIN; UPDATE tracks SET album=' Override ',artist='' WHERE id=1; COMMIT;")
         .unwrap();
     check(Some(" Override "), "");
     let tx = store.conn.unchecked_transaction().unwrap();
@@ -333,13 +334,10 @@ fn album_eligibility_transitions_follow_tag_changes_external_commits_and_rollbac
     check(None, "");
     tx.rollback().unwrap();
     check(Some(" Override "), "");
-    external
-        .execute("UPDATE tracks SET album='' WHERE id=1", [])
+    conn.execute("UPDATE tracks SET album='' WHERE id=1", [])
         .unwrap();
     check(None, "");
-    external
-        .execute("DELETE FROM tracks WHERE id=1", [])
-        .unwrap();
+    conn.execute("DELETE FROM tracks WHERE id=1", []).unwrap();
     assert_eq!(
         store
             .albums_page(None, AlbumSort::Title, 0, 24)
@@ -585,7 +583,7 @@ fn album_representatives_keep_disc_track_title_and_id_priority_after_updates() {
 }
 
 #[test]
-fn album_summaries_follow_artist_counts_transactions_external_commits_and_restart() {
+fn album_summaries_follow_artist_counts_transactions_and_restart() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("album-transactions.db");
     let store = Store::open(&path).unwrap();
@@ -657,32 +655,26 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
     tx.rollback().unwrap();
     assert_eq!(snapshot(&store), before);
 
-    // This connection has no Rust scalar functions or application invalidation.
-    let external = Connection::open(&path).unwrap();
-    external
-        .execute_batch(
-            "BEGIN;
+    let conn = &store.conn;
+    conn.execute_batch(
+        "BEGIN;
          UPDATE tracks SET artist='ÉTÉ_100%' WHERE id=3;
-         UPDATE tracks SET artist='Hidden',artist='ÉTÉ_100%' WHERE id=1;
+         UPDATE tracks SET artist='Hidden' WHERE id=1;
+         UPDATE tracks SET artist='ÉTÉ_100%' WHERE id=1;
          COMMIT;",
-        )
-        .unwrap();
+    )
+    .unwrap();
     let page = store
         .albums_page(Some("été_100%"), AlbumSort::Artist, 0, 24)
         .unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.rows[0].artist, "ÉTÉ_100%");
-    external
-        .execute("DELETE FROM tracks WHERE id=2", [])
+    conn.execute("DELETE FROM tracks WHERE id=2", []).unwrap();
+    assert_eq!(snapshot(&store).1[0].2, "ÉTÉ_100%");
+    conn.execute("UPDATE tracks SET artist='' WHERE id=1", [])
         .unwrap();
     assert_eq!(snapshot(&store).1[0].2, "ÉTÉ_100%");
-    external
-        .execute("UPDATE tracks SET artist='' WHERE id=1", [])
-        .unwrap();
-    assert_eq!(snapshot(&store).1[0].2, "ÉTÉ_100%");
-    external
-        .execute("DELETE FROM tracks WHERE id=3", [])
-        .unwrap();
+    conn.execute("DELETE FROM tracks WHERE id=3", []).unwrap();
     let page = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
     assert_eq!(page.rows[0].track_count, 2);
     assert_eq!(page.rows[0].artist, "");
@@ -693,12 +685,11 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
             .total,
         0
     );
-    external
-        .execute(
-            "UPDATE tracks SET path='/moved.flac',album='',title='Moved' WHERE id=1",
-            [],
-        )
-        .unwrap();
+    conn.execute(
+        "UPDATE tracks SET path='/moved.flac',album='',title='Moved' WHERE id=1",
+        [],
+    )
+    .unwrap();
     let page = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.rows[0].key.directory, Path::new("/music/a"));
@@ -710,7 +701,7 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
     drop(store);
     let store = Store::open(&path).unwrap();
     assert_eq!(snapshot(&store), before_restart);
-    external.execute("DELETE FROM tracks", []).unwrap();
+    store.conn.execute("DELETE FROM tracks", []).unwrap();
     assert_eq!(snapshot(&store).0, 0);
 }
 

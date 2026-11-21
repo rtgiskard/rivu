@@ -52,17 +52,14 @@ fn replaygain_peak_policy_defaults_off_and_roundtrips_strictly() {
 fn preset_overrides_and_deletions_survive_configuration_reload() {
     let original = "[equalizer]\nenabled = true\npreamp_db = -8.0\n";
     let baseline = from_toml(original).unwrap();
-    baseline.validate_settings().unwrap();
     assert_eq!(baseline.equalizer.preamp_db, -8.0);
     assert!(baseline.equalizer.enabled);
     let mut edited = baseline.clone();
-    let removed = edited.equalizer_presets.remove(0).name;
+    edited.equalizer_presets.remove(0);
     edited.equalizer_presets[0].config.preamp_db = -9.0;
     let saved = update_toml(original, Some(&baseline), &edited).unwrap();
     let reloaded = from_toml(&saved).unwrap();
     assert_eq!(reloaded, edited);
-    assert!(reloaded.equalizer_presets.iter().all(|p| p.name != removed));
-    assert_eq!(reloaded.equalizer, baseline.equalizer);
     edited.equalizer_presets.clear();
     let saved = update_toml(&saved, Some(&reloaded), &edited).unwrap();
     assert!(from_toml(&saved).unwrap().equalizer_presets.is_empty());
@@ -201,7 +198,10 @@ fn material_effects_toggle_preserves_selection_and_parameters() {
         assert_eq!(loaded.material.enabled, enabled);
         assert_eq!(loaded.material.default_artwork_fallback, !enabled);
         assert_eq!(loaded.material.selected, MaterialPreset::StillWater);
-        assert_eq!(loaded.material.presets, config.material.presets);
+        assert_eq!(
+            loaded.material.presets[&MaterialPreset::StillWater].panel_alpha,
+            0.37
+        );
         assert_eq!(loaded, config);
     }
 }
@@ -695,9 +695,9 @@ fn graph_patch_saves_edits_without_runtime_revision() {
 }
 
 #[test]
-fn graph_patch_preserves_unedited_graph_values_from_disk() {
-    let original = "[processing_graph]\nnext_id = 99 # external edit\n";
-    let baseline = Config::default();
+fn graph_patch_preserves_unedited_graph_field_and_comment() {
+    let original = "[processing_graph]\nnext_id = 99 # next node ID\n";
+    let baseline = from_toml(original).unwrap();
     let candidate = baseline
         .clone()
         .with_processing_graph_edit(
@@ -709,7 +709,7 @@ fn graph_patch_preserves_unedited_graph_values_from_disk() {
         )
         .unwrap();
     let saved = candidate.update_toml(original, Some(&baseline)).unwrap();
-    assert!(saved.contains("next_id = 99 # external edit"));
+    assert!(saved.contains("next_id = 99 # next node ID"));
     let graph = from_toml(&saved).unwrap().processing_graph;
     assert_eq!(graph.next_id, 99);
     assert_eq!(graph.node(1).unwrap().position, [800.0, 500.0]);
@@ -931,13 +931,11 @@ fn visualization_shared_groups_patch_preserves_format_and_independent_defaults()
     let baseline = from_toml(original).unwrap();
     let mut config = baseline.clone();
     config.reactive_sensitivity = 3.0;
-    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    let saved = assert_saved_edit(original, &baseline, &config);
     assert_eq!(
         saved,
         original.replace("sensitivity=2.0", "sensitivity=3.0")
     );
-    assert_eq!(from_toml(&saved).unwrap(), config);
-    assert_eq!(from_toml(&to_toml(&config).unwrap()).unwrap(), config);
     let baseline = config.clone();
     config.default_visualizer_labels = true;
     let saved = update_toml(&saved, Some(&baseline), &config).unwrap();

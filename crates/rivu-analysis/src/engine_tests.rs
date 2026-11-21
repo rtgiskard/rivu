@@ -707,8 +707,6 @@ fn lazy_fft_matches_warm_analysis_across_demand_and_signal_changes() {
         assert_eq!((analyzer.rolling.len(), analyzer.filled), (n, n - 1));
         assert!(analyzer.fft.is_none(), "case {case}");
 
-        cold.configure(settings, frequency, state, token + 1, &mut actual);
-        warm.configure(settings, frequency, state, token + 1, &mut expected);
         for (offset, demand, samples) in [
             (1, frequency, vec![[0.75, -0.5]]),
             (2, time_only, vec![[0.375, -0.625]; n]),
@@ -716,7 +714,8 @@ fn lazy_fft_matches_warm_analysis_across_demand_and_signal_changes() {
         ] {
             cold.configure(settings, demand, state, token + offset, &mut actual);
             warm.configure(settings, frequency, state, token + offset, &mut expected);
-            let previous_fft = cold.analyzer.as_ref().unwrap().frequency.clone();
+            let previous_fft =
+                (!demand.spectrum).then(|| cold.analyzer.as_ref().unwrap().frequency.clone());
             let count = samples.len() as u64;
             assert!(cold.ingest(
                 header(state, sequence, start),
@@ -743,16 +742,16 @@ fn lazy_fft_matches_warm_analysis_across_demand_and_signal_changes() {
             assert_eq!(actual.sample_time, expected.sample_time);
             let analyzer = cold.analyzer.as_ref().unwrap();
             assert_eq!(analyzer.rolling, warm.analyzer.as_ref().unwrap().rolling);
-            if demand.spectrum {
+            if let Some(previous_fft) = previous_fft {
+                assert!(actual.spectrum_db.is_empty());
+                assert_eq!(analyzer.frequency, previous_fft);
+            } else {
                 assert_eq!(actual.frequencies_hz, expected.frequencies_hz);
                 assert_eq!(actual.spectrum_db, expected.spectrum_db);
                 assert_eq!(
                     analyzer.frequency,
                     warm.analyzer.as_ref().unwrap().frequency
                 );
-            } else {
-                assert!(actual.spectrum_db.is_empty());
-                assert_eq!(analyzer.frequency, previous_fft);
             }
         }
     }

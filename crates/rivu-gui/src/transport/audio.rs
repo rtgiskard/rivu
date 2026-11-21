@@ -334,55 +334,27 @@ mod tests {
     }
 
     #[test]
-    fn source_echo_is_checked_before_start_callback() {
+    fn rejected_start_checks_source_echo_and_native_layout_before_callback() {
         if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
             return;
         }
-        let (directory, listener) = endpoint();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            hello(&mut stream);
-            send(&mut stream, start(Some(2), vec![0, 1]));
-        });
-        let expected = ExpectedSource::from(&rivu_protocol::test_support::artwork_track(
-            "source.wav".into(),
-        ));
-        let (_cancel, cancelled) = oneshot::channel();
-        let mut callbacks = 0;
-        let result = async_io::block_on(read_stream(
-            directory.path().to_owned(),
-            7,
-            expected,
-            Some(1),
-            VisualizationSignal::Before,
-            None,
-            cancelled,
-            |_| {
-                callbacks += 1;
-                Ok(())
-            },
-        ));
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("PCM source changed before capture")
-        );
-        assert_eq!(callbacks, 0);
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn invalid_native_layout_is_rejected_before_start_callback() {
-        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
-            return;
-        }
-        for layout in [vec![], vec![0, 0], vec![18], vec![0; 19]] {
+        let invalid_format = "Invalid PCM stream format";
+        for (requested, response, error) in [
+            (
+                Some(1),
+                start(Some(2), vec![0, 1]),
+                "PCM source changed before capture",
+            ),
+            (None, start(None, vec![]), invalid_format),
+            (None, start(None, vec![0, 0]), invalid_format),
+            (None, start(None, vec![18]), invalid_format),
+            (None, start(None, vec![0; 19]), invalid_format),
+        ] {
             let (directory, listener) = endpoint();
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 hello(&mut stream);
-                send(&mut stream, start(None, layout));
+                send(&mut stream, response);
             });
             let expected = ExpectedSource::from(&rivu_protocol::test_support::artwork_track(
                 "source.wav".into(),
@@ -393,7 +365,7 @@ mod tests {
                 directory.path().to_owned(),
                 7,
                 expected,
-                None,
+                requested,
                 VisualizationSignal::Before,
                 None,
                 cancelled,
@@ -402,12 +374,8 @@ mod tests {
                     Ok(())
                 },
             ));
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Invalid PCM stream format")
-            );
+            let reason = result.unwrap_err().to_string();
+            assert!(reason.contains(error), "expected {error}, got {reason}");
             assert_eq!(callbacks, 0);
             server.join().unwrap();
         }

@@ -459,11 +459,12 @@ mod tests {
     #[test]
     fn closing_releases_candidates_and_removes_selection() {
         let value = std::rc::Rc::new(());
+        let candidate = std::rc::Rc::downgrade(&value);
         let mut state = ChoiceState::default();
-        state.open([ChoiceItem::new(value.clone(), "candidate")], 0);
-        assert_eq!(std::rc::Rc::strong_count(&value), 2);
+        state.open([ChoiceItem::new(value, "candidate")], 0);
+        assert!(candidate.upgrade().is_some());
         state.close();
-        assert_eq!(std::rc::Rc::strong_count(&value), 1);
+        assert!(candidate.upgrade().is_none());
         assert!(!state.is_open());
         assert_eq!(state.selected_index(), None);
         assert!(state.item(0).is_none());

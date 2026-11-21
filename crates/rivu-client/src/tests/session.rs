@@ -1,16 +1,7 @@
 use super::*;
+use rivu_protocol::test_support::{read_test_query, reply_test_query};
 use rivu_protocol::wire::PROTOCOL_VERSION;
 
-fn read_test_query(stream: &mut std::os::unix::net::UnixStream) -> Query {
-    let WireRequest::Query(WireReadQuery { query, .. }) = read_test_request(stream) else {
-        panic!("expected query")
-    };
-    Query::try_from(query).unwrap()
-}
-
-fn reply_test_query(stream: &mut std::os::unix::net::UnixStream, response: QueryResponse) {
-    write_test_response(stream, WireResponse::Query(response));
-}
 fn playlist_test_response(total: usize) -> QueryResponse {
     QueryResponse {
         revisions: rivu_protocol::response::QueryRevisions::default(),
@@ -48,19 +39,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
         ));
         reply_test_command(
             &mut stream,
-            Ack {
-                status: rivu_protocol::response::AckStatus::Failed,
-                error: Some("rejected".into()),
-                revision: 3,
-                scan_id: None,
-                relocation_id: None,
-                processing_id: None,
-                database_optimization: None,
-                source_tags: None,
-                source_file_saved: false,
-                source_refresh_error: None,
-            }
-            .into(),
+            Ack::from_result(Err(anyhow::anyhow!("rejected")), 3).into(),
         );
         assert!(matches!(
             read_test_query(&mut stream),
@@ -130,21 +109,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         );
         let mut frame = Vec::new();
         encode_response_frame_into(
-            &WireResponse::Command(
-                Ack {
-                    status: rivu_protocol::response::AckStatus::Succeeded,
-                    error: None,
-                    revision: 1,
-                    scan_id: None,
-                    relocation_id: None,
-                    processing_id: None,
-                    database_optimization: None,
-                    source_tags: None,
-                    source_file_saved: false,
-                    source_refresh_error: None,
-                }
-                .into(),
-            ),
+            &WireResponse::Command(Ack::from_result(Ok(()), 1).into()),
             &mut frame,
         )
         .unwrap();
@@ -157,22 +122,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         assert!(
             matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
         );
-        reply_test_command(
-            &mut stream,
-            Ack {
-                status: rivu_protocol::response::AckStatus::Succeeded,
-                error: None,
-                revision: 2,
-                scan_id: None,
-                relocation_id: None,
-                processing_id: None,
-                database_optimization: None,
-                source_tags: None,
-                source_file_saved: false,
-                source_refresh_error: None,
-            }
-            .into(),
-        );
+        reply_test_command(&mut stream, Ack::from_result(Ok(()), 2).into());
     });
     let mut session = client_session(directory.path());
     session.bind_instance(1).unwrap();
@@ -352,22 +302,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
         assert!(
             matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
         );
-        reply_test_command(
-            &mut stream,
-            Ack {
-                status: rivu_protocol::response::AckStatus::Succeeded,
-                error: None,
-                revision: 2,
-                scan_id: None,
-                relocation_id: None,
-                processing_id: None,
-                database_optimization: None,
-                source_tags: None,
-                source_file_saved: false,
-                source_refresh_error: None,
-            }
-            .into(),
-        );
+        reply_test_command(&mut stream, Ack::from_result(Ok(()), 2).into());
     });
     let mut session = client_session(directory.path());
     assert!(

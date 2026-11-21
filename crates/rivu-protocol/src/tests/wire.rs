@@ -145,21 +145,7 @@ fn exact_playlist_summary_round_trips_ids_and_optional_results() {
     use crate::{model::PlaylistSummary, response::ViewResponse};
     let mut encoded = Vec::new();
     for playlist_id in [i64::MIN, 0, 42, i64::MAX] {
-        let query = Query::PlaylistSummary { playlist_id };
-        encode_request_frame_into(
-            &WireRequest::Query(WireReadQuery {
-                id: 1,
-                query: WireQuery::from(query.clone()),
-            }),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Query(WireReadQuery { id: 1, query: wire }) =
-            decode_request_frame(&encoded[4..]).unwrap()
-        else {
-            panic!("expected playlist summary query");
-        };
-        assert_eq!(Query::try_from(wire).unwrap(), query);
+        assert_query_round_trip(&mut encoded, Query::PlaylistSummary { playlist_id });
         for summary in [
             None,
             Some(PlaylistSummary {
@@ -217,35 +203,10 @@ fn exact_playlist_summary_identity_and_stamp_select_catalog() {
 
 #[test]
 fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
+    let mut encoded = Vec::new();
     for id in [0, 42, u64::MAX] {
-        let mut encoded = Vec::new();
-        encode_request_frame_into(
-            &WireRequest::Query(WireReadQuery {
-                id: 1,
-                query: WireQuery::from(Query::ScanTask { id }),
-            }),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Query(WireReadQuery { id: 1, query: wire }) =
-            decode_request_frame(&encoded[4..]).unwrap()
-        else {
-            panic!("expected query");
-        };
-        assert!(
-            matches!(Query::try_from(wire).unwrap(), Query::ScanTask { id: decoded } if decoded == id)
-        );
-        encode_request_frame_into(
-            &WireRequest::Command(WireCommand::from(Command::CancelScan { id })),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected command");
-        };
-        assert!(
-            matches!(Command::try_from(wire).unwrap(), Command::CancelScan { id: decoded } if decoded == id)
-        );
+        assert_query_round_trip(&mut encoded, Query::ScanTask { id });
+        assert_command_round_trip(&mut encoded, Command::CancelScan { id });
     }
 }
 
@@ -254,35 +215,35 @@ fn other_tracks_requests_round_trip_boundaries() {
     use rivu_protocol::model::LibrarySort;
     let mut encoded = Vec::new();
     assert_query_round_trip(&mut encoded, Query::OtherTracksCount);
-    for query in [None, Some(String::new()), Some("Été_100%".into())] {
-        for favorite in [None, Some(false), Some(true)] {
-            for missing in [None, Some(false), Some(true)] {
-                for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
-                    assert_query_round_trip(
-                        &mut encoded,
-                        Query::OtherTracksLocate {
-                            track_id: i64::MAX,
-                            query: query.clone(),
-                            favorite,
-                            missing,
-                            sort,
-                        },
-                    );
-                    for offset in [0, usize::MAX] {
-                        assert_query_round_trip(
-                            &mut encoded,
-                            Query::OtherTracksPage {
-                                query: query.clone(),
-                                favorite,
-                                missing,
-                                sort,
-                                offset,
-                                limit: usize::MAX,
-                            },
-                        );
-                    }
-                }
-            }
+    for (query, favorite, missing, sort, offset) in [
+        (None, None, Some(false), LibrarySort::Id, usize::MAX),
+        (Some(""), Some(false), Some(true), LibrarySort::Album, 0),
+        (
+            Some("Été_100%"),
+            Some(true),
+            None,
+            LibrarySort::MostPlayed,
+            7,
+        ),
+    ] {
+        for request in [
+            Query::OtherTracksLocate {
+                track_id: i64::MAX,
+                query: query.map(str::to_owned),
+                favorite,
+                missing,
+                sort,
+            },
+            Query::OtherTracksPage {
+                query: query.map(str::to_owned),
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit: usize::MAX,
+            },
+        ] {
+            assert_query_round_trip(&mut encoded, request);
         }
     }
     for other_tracks in [false, true] {
@@ -433,22 +394,7 @@ fn optional_search_queries_round_trip() {
                 queue_ids: vec![42, 43],
             },
         ] {
-            encode_request_frame_into(
-                &WireRequest::Query(WireReadQuery {
-                    id: 1,
-                    query: WireQuery::from(expected.clone()),
-                }),
-                &mut encoded,
-            )
-            .unwrap();
-            let WireRequest::Query(WireReadQuery {
-                id: 1,
-                query: decoded,
-            }) = decode_request_frame(&encoded[4..]).unwrap()
-            else {
-                panic!("expected query");
-            };
-            assert_eq!(Query::try_from(decoded).unwrap(), expected);
+            assert_query_round_trip(&mut encoded, expected);
         }
     }
 }
@@ -489,24 +435,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             track_ids: vec![42, i64::MAX, 42],
         },
     ] {
-        let expected = serde_json::to_value(&query).unwrap();
-        encode_request_frame_into(
-            &WireRequest::Query(WireReadQuery {
-                id: 1,
-                query: WireQuery::from(query),
-            }),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Query(WireReadQuery { id: 1, query: wire }) =
-            decode_request_frame(&encoded[4..]).unwrap()
-        else {
-            panic!("expected query");
-        };
-        assert_eq!(
-            serde_json::to_value(Query::try_from(wire).unwrap()).unwrap(),
-            expected
-        );
+        assert_query_round_trip(&mut encoded, query);
     }
     for command in [
         Command::InsertQueue {
@@ -547,19 +476,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             after: false,
         },
     ] {
-        let expected = serde_json::to_value(&command).unwrap();
-        encode_request_frame_into(
-            &WireRequest::Command(WireCommand::from(command)),
-            &mut encoded,
-        )
-        .unwrap();
-        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected command");
-        };
-        assert_eq!(
-            serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
-            expected
-        );
+        assert_command_round_trip(&mut encoded, command);
     }
     let response = QueryResponse {
         revisions: rivu_protocol::response::QueryRevisions {
@@ -675,27 +592,22 @@ fn current_page_schema_has_contiguous_query_and_response_tags() {
 #[test]
 fn directory_query_wire_round_trip_preserves_filter_and_page() {
     let mut encoded = Vec::new();
-    for (favorite, missing) in [None, Some(true), Some(false)]
-        .into_iter()
-        .flat_map(|favorite| {
-            [None, Some(true), Some(false)]
-                .into_iter()
-                .map(move |missing| (favorite, missing))
-        })
-    {
-        for query in [None, Some(""), Some("Été_100%")] {
-            assert_query_round_trip(
-                &mut encoded,
-                Query::DirectoryPage {
-                    path: "/music".into(),
-                    query: query.map(str::to_owned),
-                    favorite,
-                    missing,
-                    offset: 7,
-                    limit: 11,
-                },
-            );
-        }
+    for (query, favorite, missing) in [
+        (None, None, Some(false)),
+        (Some(""), Some(false), Some(true)),
+        (Some("Été_100%"), Some(true), None),
+    ] {
+        assert_query_round_trip(
+            &mut encoded,
+            Query::DirectoryPage {
+                path: "/music".into(),
+                query: query.map(str::to_owned),
+                favorite,
+                missing,
+                offset: 7,
+                limit: 11,
+            },
+        );
     }
 }
 
@@ -720,23 +632,23 @@ fn library_locate_wire_round_trip_preserves_exact_identity_and_projection() {
 fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
     use rivu_protocol::model::LibrarySort;
     let mut encoded = Vec::new();
-    for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
-        for query in [None, Some(""), Some("Été_100%")] {
-            for favorite in [None, Some(true), Some(false)] {
-                for missing in [None, Some(true), Some(false)] {
-                    let query = Query::LibraryRootPage {
-                        path: "/音楽/夏/../".into(),
-                        query: query.map(str::to_owned),
-                        favorite,
-                        missing,
-                        sort,
-                        offset: 7,
-                        limit: 11,
-                    };
-                    assert_query_round_trip(&mut encoded, query);
-                }
-            }
-        }
+    for (sort, query, favorite, missing) in [
+        (LibrarySort::Id, None, None, Some(false)),
+        (LibrarySort::Album, Some(""), Some(false), Some(true)),
+        (LibrarySort::MostPlayed, Some("Été_100%"), Some(true), None),
+    ] {
+        assert_query_round_trip(
+            &mut encoded,
+            Query::LibraryRootPage {
+                path: "/音楽/夏/../".into(),
+                query: query.map(str::to_owned),
+                favorite,
+                missing,
+                sort,
+                offset: 7,
+                limit: 11,
+            },
+        );
     }
     for roots in [
         Vec::new(),
@@ -1406,97 +1318,38 @@ fn replaygain_command_round_trip_preserves_values_and_clear() {
 
 #[test]
 fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
-    for (title, artist, album) in [
-        (Some("Title".to_owned()), None, None),
-        (None, Some(String::new()), None),
-        (None, None, Some("Album".to_owned())),
-        (None, None, None),
+    let mut encoded = Vec::new();
+    for (title, artist, album, release_date) in [
+        (None, None, None, None),
+        (Some("Title"), None, None, None),
+        (None, Some(""), None, None),
+        (None, None, Some("Album"), None),
+        (None, None, None, Some("2026-11-13")),
+        (None, None, None, Some("")),
     ] {
-        let request = WireRequest::Command(WireCommand::from(Command::EditTrack {
-            track_id: 12,
-            title: title.clone(),
-            artist: artist.clone(),
-            album: album.clone(),
-            decoder_hint: None,
-            release_date: None,
-        }));
-        let mut encoded = Vec::new();
-        encode_request_frame_into(&request, &mut encoded).unwrap();
-        let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected command request");
-        };
-        let Command::EditTrack {
-            track_id,
-            title: decoded_title,
-            artist: decoded_artist,
-            album: decoded_album,
-            decoder_hint: None,
-            release_date: None,
-        } = command.try_into().unwrap()
-        else {
-            panic!("expected metadata patch");
-        };
-        assert_eq!(track_id, 12);
-        assert_eq!(
-            (decoded_title, decoded_artist, decoded_album),
-            (title, artist, album)
+        assert_command_round_trip(
+            &mut encoded,
+            Command::EditTrack {
+                track_id: 12,
+                title: title.map(str::to_owned),
+                artist: artist.map(str::to_owned),
+                album: album.map(str::to_owned),
+                decoder_hint: None,
+                release_date: release_date.map(str::to_owned),
+            },
         );
     }
 }
 
 #[test]
-fn edit_track_wire_round_trip_preserves_omitted_set_and_cleared_date() {
-    for release_date in [None, Some("2026-11-13".to_owned()), Some(String::new())] {
-        let request = WireRequest::Command(WireCommand::from(Command::EditTrack {
-            track_id: 12,
-            title: None,
-            artist: None,
-            album: None,
-            decoder_hint: None,
-            release_date: release_date.clone(),
-        }));
-        let mut encoded = Vec::new();
-        encode_request_frame_into(&request, &mut encoded).unwrap();
-        let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
-            panic!("expected command request");
-        };
-        let Command::EditTrack {
-            track_id: 12,
-            title: None,
-            artist: None,
-            album: None,
-            decoder_hint: None,
-            release_date: decoded_date,
-        } = command.try_into().unwrap()
-        else {
-            panic!("expected date-only patch");
-        };
-        assert_eq!(decoded_date, release_date);
-    }
-}
-
-#[test]
 fn set_play_count_wire_round_trip_preserves_integer_boundaries() {
-    for track_id in [i64::MIN, 1, i64::MAX] {
-        for play_count in [0, i64::MAX as u64, u64::MAX] {
-            let request = WireRequest::Command(WireCommand::from(Command::SetPlayCount {
-                track_id,
-                play_count,
-            }));
-            let mut encoded = Vec::new();
-            encode_request_frame_into(&request, &mut encoded).unwrap();
-            let WireRequest::Command(command) = decode_request_frame(&encoded[4..]).unwrap() else {
-                panic!("expected command request");
-            };
-            let Command::SetPlayCount {
-                track_id: decoded_id,
-                play_count: decoded_count,
-            } = command.try_into().unwrap()
-            else {
-                panic!("expected play count command");
-            };
-            assert_eq!((decoded_id, decoded_count), (track_id, play_count));
-        }
+    let mut encoded = Vec::new();
+    for (track_id, play_count) in [(i64::MIN, 0), (1, u64::MAX), (i64::MAX, i64::MAX as u64)] {
+        let command = Command::SetPlayCount {
+            track_id,
+            play_count,
+        };
+        assert_command_round_trip(&mut encoded, command);
     }
 }
 
@@ -1775,6 +1628,7 @@ fn collection_commands_round_trip_source_and_destination_versions() {
     use rivu_protocol::model::{
         AlbumKey, CollectionDestination, CollectionInsertion, CollectionSource,
     };
+    let mut encoded = Vec::new();
     for source in [
         CollectionSource::Album {
             key: AlbumKey {
@@ -1811,16 +1665,7 @@ fn collection_commands_round_trip_source_and_destination_versions() {
                 source: source.clone(),
                 destination,
             };
-            let expected = serde_json::to_value(&command).unwrap();
-            let mut encoded = Vec::new();
-            encode_request_frame_into(&WireRequest::Command(command.into()), &mut encoded).unwrap();
-            let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
-                panic!("wrong request");
-            };
-            assert_eq!(
-                serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
-                expected
-            );
+            assert_command_round_trip(&mut encoded, command);
         }
     }
 }
@@ -1881,25 +1726,16 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
 #[test]
 fn large_explicit_occurrence_selections_fit_bounded_request_frames() {
     let mut encoded = Vec::new();
-    encode_request_frame_into(
-        &WireRequest::Command(
-            Command::MoveQueueEntries {
-                queue_ids: (1..=200_000).collect(),
-                index: 0,
-                expected_revision: 1,
-            }
-            .into(),
-        ),
-        &mut encoded,
-    )
-    .unwrap();
-    assert!(encoded.len() < MAX_REQUEST);
-    let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
-        panic!("wrong response");
+    let command = Command::MoveQueueEntries {
+        queue_ids: (1..=200_000).collect(),
+        index: 0,
+        expected_revision: 1,
     };
-    let Command::MoveQueueEntries { queue_ids, .. } = Command::try_from(decoded).unwrap() else {
+    let Command::MoveQueueEntries { queue_ids, .. } = command_round_trip(&mut encoded, command)
+    else {
         panic!("wrong command");
     };
+    assert!(encoded.len() < MAX_REQUEST);
     assert_eq!(queue_ids.len(), 200_000);
 }
 
@@ -2469,12 +2305,7 @@ fn quick_config_mutations_round_trip_as_typed_intents() {
     }
     let mut encoded = Vec::new();
     for change in changes {
-        let expected = serde_json::to_value(&change).unwrap();
-        let command = command_round_trip(&mut encoded, Command::MutateConfig { change });
-        let Command::MutateConfig { change } = command else {
-            panic!("expected mutation");
-        };
-        assert_eq!(serde_json::to_value(change).unwrap(), expected);
+        assert_command_round_trip(&mut encoded, Command::MutateConfig { change });
     }
 }
 

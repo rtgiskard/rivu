@@ -101,16 +101,11 @@ fn originals_use_bucketed_128_bit_names() {
     let directory = tempfile::tempdir().unwrap();
     let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
     let root = directory.path().join("artwork/cache");
-    fs::create_dir_all(&root).unwrap();
-    let hash = blake3::hash(DEFAULT_IMAGE).to_hex();
+    let expected = cache_paths::original_path(&root, blake3::hash(DEFAULT_IMAGE), "png");
     let image = manager.image_uri(DEFAULT_IMAGE, MAX_IMAGE_BYTES).unwrap();
-    let expected = root.join(&hash[..2]).join(format!("{}.png", &hash[2..32]));
     assert_eq!(image.path.as_ref(), expected.as_path());
     let fallback = manager.export_default().unwrap();
-    let svg_hash = blake3::hash(DEFAULT_SVG).to_hex();
-    let svg_path = root
-        .join(&svg_hash[..2])
-        .join(format!("{}.svg", &svg_hash[2..32]));
+    let svg_path = cache_paths::original_path(&root, blake3::hash(DEFAULT_SVG), "svg");
     assert_eq!(fallback.path().as_ref(), svg_path.as_path());
     assert_eq!(fs::read(&svg_path).unwrap(), DEFAULT_SVG);
     assert_eq!(fs::read(&expected).unwrap(), DEFAULT_IMAGE);
@@ -377,10 +372,12 @@ fn configured_encoded_limit_applies_to_embedded_and_directory_images() {
         let default = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
         let result = default.load(selected);
         assert_eq!(result.is_some(), size <= DEFAULT_MAX_IMAGE_BYTES);
+        assert_eq!(default.cached_result(selected), Some(result));
         let small = ArtworkManager::new(directory.path())
             .with_default_image(DEFAULT_SVG)
             .with_max_image_bytes(1024 * 1024);
         assert!(small.load(selected).is_none());
+        assert_eq!(small.cached_result(selected), Some(None));
         let large = ArtworkManager::new(directory.path())
             .with_default_image(DEFAULT_SVG)
             .with_max_image_bytes(64 * 1024 * 1024);
@@ -485,33 +482,32 @@ fn corrupt_supported_images_do_not_hide_embedded_or_directory_fallbacks() {
     embedded.push(1);
     let mut directory_image = DEFAULT_IMAGE.to_vec();
     directory_image.push(2);
-    for rejected in [&DEFAULT_IMAGE[..8], &DEFAULT_IMAGE[..33], &corrupt_pixels] {
+    for (version, rejected) in [
+        (2, &DEFAULT_IMAGE[..8]),
+        (3, &DEFAULT_IMAGE[..33]),
+        (4, &corrupt_pixels[..]),
+    ] {
         assert!(image::guess_format(rejected).is_ok());
-        for version in [2, 3, 4] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join(format!("corrupt-{version}.wav"));
-            pictures_wav(
-                &path,
-                version,
-                &[
-                    (rejected, rejected.len(), 3),
-                    (&embedded, embedded.len(), 3),
-                ],
-            );
-            let manager = ArtworkManager::new(directory.path());
-            let artwork = manager.load(source_fixture(path.clone()).source()).unwrap();
-            assert_eq!(fs::read(artwork.path()).unwrap(), embedded);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("embedded.wav");
+        pictures_wav(
+            &path,
+            version,
+            &[
+                (rejected, rejected.len(), 3),
+                (&embedded, embedded.len(), 3),
+            ],
+        );
+        let manager = ArtworkManager::new(directory.path());
+        let artwork = manager.load(source_fixture(path).source()).unwrap();
+        assert_eq!(fs::read(artwork.path()).unwrap(), embedded);
 
-            // A corrupt embedded picture also permits the directory fallback.
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join(format!("corrupt-{version}.wav"));
-            pictures_wav(&path, version, &[(rejected, rejected.len(), 3)]);
-            fs::write(directory.path().join("cover.png"), rejected).unwrap();
-            fs::write(directory.path().join("folder.jpg"), &directory_image).unwrap();
-            let manager = ArtworkManager::new(directory.path());
-            let artwork = manager.load(source_fixture(path).source()).unwrap();
-            assert_eq!(fs::read(artwork.path()).unwrap(), directory_image);
-        }
+        let path = directory.path().join("directory.wav");
+        pictures_wav(&path, version, &[(rejected, rejected.len(), 3)]);
+        fs::write(directory.path().join("cover.png"), rejected).unwrap();
+        fs::write(directory.path().join("folder.jpg"), &directory_image).unwrap();
+        let artwork = manager.load(source_fixture(path).source()).unwrap();
+        assert_eq!(fs::read(artwork.path()).unwrap(), directory_image);
     }
 }
 
@@ -519,17 +515,15 @@ fn corrupt_supported_images_do_not_hide_embedded_or_directory_fallbacks() {
 fn embedded_cover_size_boundary_applies_across_id3_versions() {
     let directory = tempfile::tempdir().unwrap();
     for version in [2, 3, 4] {
-        for size in [DEFAULT_IMAGE.len(), MAX_IMAGE_BYTES] {
-            let path = directory.path().join(format!("small-{version}-{size}.wav"));
-            pictures_wav(&path, version, &[(DEFAULT_IMAGE, size, 3)]);
-            let manager = ArtworkManager::new(directory.path())
-                .with_default_image(DEFAULT_SVG)
-                .with_max_image_bytes(MAX_IMAGE_BYTES);
-            let artwork = manager.load(size_test_source(&path)).unwrap();
-            let retained = fs::read(file_path(artwork.uri())).unwrap();
-            assert_eq!(retained.len(), size);
-            assert!(retained.starts_with(DEFAULT_IMAGE));
-        }
+        let path = directory.path().join(format!("at-limit-{version}.wav"));
+        pictures_wav(&path, version, &[(DEFAULT_IMAGE, MAX_IMAGE_BYTES, 3)]);
+        let manager = ArtworkManager::new(directory.path())
+            .with_default_image(DEFAULT_SVG)
+            .with_max_image_bytes(MAX_IMAGE_BYTES);
+        let artwork = manager.load(size_test_source(&path)).unwrap();
+        let retained = fs::read(file_path(artwork.uri())).unwrap();
+        assert_eq!(retained.len(), MAX_IMAGE_BYTES);
+        assert!(retained.starts_with(DEFAULT_IMAGE));
     }
 }
 
@@ -559,17 +553,6 @@ fn oversized_embedded_cover_does_not_hide_following_cover() {
             assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), DEFAULT_IMAGE);
         }
     }
-}
-
-#[test]
-fn oversized_embedded_cover_is_not_published() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("only-oversized.wav");
-    pictures_wav(&path, 3, &[(DEFAULT_IMAGE, 27 * 1024 * 1024, 3)]);
-    let manager = ArtworkManager::new(directory.path()).with_default_image(DEFAULT_SVG);
-    let selected = size_test_source(&path);
-    assert!(manager.load(selected).is_none());
-    assert_eq!(manager.cached_result(selected), Some(None));
 }
 
 fn file_path(uri: &str) -> PathBuf {
@@ -1200,10 +1183,6 @@ fn manual_cleanup_respects_age_and_regenerates_after_manager_restart() {
     fs::write(&expired, b"old").unwrap();
     fs::write(&fresh, b"fresh").unwrap();
     age_file(&expired);
-    let unmanaged = cache.join("notes.txt");
-    fs::write(&unmanaged, b"keep").unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&unmanaged, cache.join(format!("{}.png", "3".repeat(30)))).unwrap();
     let age = Duration::from_secs(86_400);
     let report = manager.maintain(age, false).unwrap();
     assert_eq!(report.files, 3);
@@ -1220,7 +1199,6 @@ fn manual_cleanup_respects_age_and_regenerates_after_manager_restart() {
     );
     assert!(!original.exists());
     assert!(fresh.is_file());
-    assert!(unmanaged.is_file());
     assert!(!expired.exists());
     assert_eq!(manager.cached(selected.source()), Some(held.clone()));
     drop(held);

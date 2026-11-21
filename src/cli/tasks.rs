@@ -473,23 +473,20 @@ mod tests {
 
     #[test]
     fn task_commands_require_complete_bounded_identity() {
+        for invalid in [
+            "9",
+            "0:9",
+            "1:0",
+            "4294967296:9",
+            "1:18446744073709551616",
+            "1:2:3",
+            "+1:2",
+            "1:-2",
+        ] {
+            assert!(invalid.parse::<TaskReference>().is_err(), "{invalid}");
+        }
         for verb in ["status", "cancel"] {
             for kind in ["scan", "relocation", "processing"] {
-                for invalid in [
-                    "9",
-                    "0:9",
-                    "1:0",
-                    "4294967296:9",
-                    "1:18446744073709551616",
-                    "1:2:3",
-                    "+1:2",
-                    "1:-2",
-                ] {
-                    assert!(
-                        Args::try_parse_from(["rivu", "task", verb, kind, invalid]).is_err(),
-                        "{verb} {kind} {invalid}"
-                    );
-                }
                 let args = Args::try_parse_from([
                     "rivu",
                     "task",

@@ -284,7 +284,7 @@ fn audio_progress_preserves_album_token_when_statistics_change() {
     core.publish();
     let before = core.shared.read().clone();
     let generation = core.transport.generation;
-    for (heard, count) in [(1.0, 0), (3.0, 1), (4.0, 1)] {
+    for (heard, count) in [(2.0, 0), (3.0, 1), (4.0, 1)] {
         let previous = core.shared.read().clone();
         assert!(
             core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
@@ -295,8 +295,14 @@ fn audio_progress_preserves_album_token_when_statistics_change() {
             }))
         );
         let state = core.shared.read();
+        assert_eq!(state.playback.status, PlaybackStatus::Playing);
         assert_eq!(state.playback.position, heard);
         assert_eq!(state.current_track().unwrap().play_count, count);
+        assert_eq!(state.library.history[0].track_id, 1);
+        assert_eq!(
+            state.library.history[0].played_at,
+            before.library.history[0].played_at
+        );
         assert_eq!(state.library.history[0].play_count, count);
         assert_eq!(
             state.system.revision,
@@ -304,6 +310,7 @@ fn audio_progress_preserves_album_token_when_statistics_change() {
         );
         assert_eq!(state.library.album_revision, before.library.album_revision);
     }
+    assert_eq!(before.library.history[0].play_count, 0);
     assert!(
         core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
             generation: generation.wrapping_sub(1),
@@ -1478,143 +1485,141 @@ fn switching_selection_counts_final_snapshot_without_invalidating_its_position()
 
 #[test]
 fn retiring_settings_failures_publish_only_current_targets_across_stop_and_replacement() {
-    for path in ["stop-wait", "stop-drain", "replacement"] {
-        for case in [
-            "output",
-            "eq",
-            "idle-eq",
-            "old-request",
-            "old-device",
-            "old-mix",
-            "old-generation",
-            "old-config",
-        ] {
-            let (_directory, mut core) = fixture();
-            playing(&mut core, 1);
-            edit_preferences(&mut core, |config| {
-                config.output_device = Some("desired-output".into());
-            });
-            let generation = core.transport.generation;
-            let request = core.output_settings_request;
-            let auto_mix = core.preferences.settings().pipewire_auto_mix;
-            let mut config = core.preferences.settings().equalizer.clone();
-            if case == "old-config" {
-                config.enabled = !config.enabled;
-            }
-            let event = if matches!(case, "eq" | "idle-eq" | "old-generation" | "old-config") {
-                AudioEvent::EqualizerSettingsFailed {
-                    generation: if case == "idle-eq" {
-                        None
-                    } else if case == "old-generation" {
-                        Some(generation.wrapping_sub(1))
-                    } else {
-                        Some(generation)
-                    },
-                    config: Arc::new(config),
-                    message: "current settings failed".into(),
-                }
-            } else {
-                AudioEvent::OutputSettingsFailed {
-                    request: if case == "old-request" {
-                        request.wrapping_sub(1)
-                    } else {
-                        request
-                    },
-                    device: Some(
-                        if case == "old-device" {
-                            "obsolete-output"
-                        } else {
-                            "desired-output"
-                        }
-                        .into(),
-                    ),
-                    auto_mix: if case == "old-mix" {
-                        !auto_mix
-                    } else {
-                        auto_mix
-                    },
-                    message: "current settings failed".into(),
-                }
-            };
-            core.state.system.last_error = Some("previous error".into());
-            let (sender, events) = async_channel::bounded(4);
-            core.engine.events = Some(events);
-            sender.try_send(event).unwrap();
-            // Retirement must never give these terminal events ordinary dispatch:
-            // that would recursively stop or navigate to the next queue entry.
-            sender
-                .try_send(AudioEvent::Ended {
-                    generation,
-                    completed_duration: None,
-                    bitrate_bps: None,
-                })
-                .unwrap();
-            sender
-                .try_send(AudioEvent::Failed {
-                    generation,
-                    kind: audio::AudioFailureKind::Source,
-                    message: "retired playback failure".into(),
-                })
-                .unwrap();
-            let snapshot = audio::AudioSnapshot {
-                generation,
-                position_seconds: 0.0,
-                listened_seconds: 0.0,
-            };
-            if path == "stop-drain" {
-                // The acknowledgement is already received; queued events belong
-                // to finish_playback's post-reply drain, before generation fencing.
-                core.finish_playback(Ok(Some(snapshot)), Ok(())).unwrap();
-            } else {
-                let (commands, receive) = async_channel::bounded(1);
-                let idle_commands = core.engine.replace_commands(commands);
-                let worker = thread::spawn(move || {
-                    let command = receive.recv_blocking().unwrap().command;
-                    match command {
-                        AudioCommand::StopAndSnapshot(reply) => {
-                            let _ = reply.send(snapshot);
-                        }
-                        _ => panic!("expected one stop request"),
-                    }
-                    idle_commands
-                });
-                if path == "stop-wait" {
-                    core.command(Command::Stop).unwrap();
-                } else {
-                    let replacement = core.prepare_source_replacement().unwrap();
-                    assert_eq!(replacement.generation, generation.wrapping_add(1));
-                }
-                core.engine.replace_commands(worker.join().unwrap());
-            }
-            core.publish();
-            let state = core.shared.read();
-            assert_eq!(
-                state.system.last_error.as_deref(),
-                Some(if matches!(case, "output" | "eq" | "idle-eq") {
-                    "current settings failed"
-                } else {
-                    "previous error"
-                }),
-                "{path}: {case}",
-            );
-            assert_eq!(state.queue.current_id, Some(1), "{path}: {case}");
-            assert_eq!(
-                state.playback.status,
-                if path == "replacement" {
-                    PlaybackStatus::Playing
-                } else {
-                    PlaybackStatus::Stopped
-                }
-            );
-            assert_eq!(
-                core.transport.generation,
-                if path == "replacement" {
-                    generation
-                } else {
-                    generation.wrapping_add(1)
-                }
-            );
+    for (path, case) in [
+        ("stop-wait", "output"),
+        ("stop-drain", "eq"),
+        ("replacement", "idle-eq"),
+        ("stop-wait", "old-request"),
+        ("stop-drain", "old-device"),
+        ("replacement", "old-mix"),
+        ("stop-wait", "old-generation"),
+        ("replacement", "old-config"),
+    ] {
+        let (_directory, mut core) = fixture();
+        playing(&mut core, 1);
+        edit_preferences(&mut core, |config| {
+            config.output_device = Some("desired-output".into());
+        });
+        let generation = core.transport.generation;
+        let request = core.output_settings_request;
+        let auto_mix = core.preferences.settings().pipewire_auto_mix;
+        let mut config = core.preferences.settings().equalizer.clone();
+        if case == "old-config" {
+            config.enabled = !config.enabled;
         }
+        let event = if matches!(case, "eq" | "idle-eq" | "old-generation" | "old-config") {
+            AudioEvent::EqualizerSettingsFailed {
+                generation: if case == "idle-eq" {
+                    None
+                } else if case == "old-generation" {
+                    Some(generation.wrapping_sub(1))
+                } else {
+                    Some(generation)
+                },
+                config: Arc::new(config),
+                message: "current settings failed".into(),
+            }
+        } else {
+            AudioEvent::OutputSettingsFailed {
+                request: if case == "old-request" {
+                    request.wrapping_sub(1)
+                } else {
+                    request
+                },
+                device: Some(
+                    if case == "old-device" {
+                        "obsolete-output"
+                    } else {
+                        "desired-output"
+                    }
+                    .into(),
+                ),
+                auto_mix: if case == "old-mix" {
+                    !auto_mix
+                } else {
+                    auto_mix
+                },
+                message: "current settings failed".into(),
+            }
+        };
+        core.state.system.last_error = Some("previous error".into());
+        let (sender, events) = async_channel::bounded(4);
+        core.engine.events = Some(events);
+        sender.try_send(event).unwrap();
+        // Retirement must never give these terminal events ordinary dispatch:
+        // that would recursively stop or navigate to the next queue entry.
+        sender
+            .try_send(AudioEvent::Ended {
+                generation,
+                completed_duration: None,
+                bitrate_bps: None,
+            })
+            .unwrap();
+        sender
+            .try_send(AudioEvent::Failed {
+                generation,
+                kind: audio::AudioFailureKind::Source,
+                message: "retired playback failure".into(),
+            })
+            .unwrap();
+        let snapshot = audio::AudioSnapshot {
+            generation,
+            position_seconds: 0.0,
+            listened_seconds: 0.0,
+        };
+        if path == "stop-drain" {
+            // The acknowledgement is already received; queued events belong
+            // to finish_playback's post-reply drain, before generation fencing.
+            core.finish_playback(Ok(Some(snapshot)), Ok(())).unwrap();
+        } else {
+            let (commands, receive) = async_channel::bounded(1);
+            let idle_commands = core.engine.replace_commands(commands);
+            let worker = thread::spawn(move || {
+                let command = receive.recv_blocking().unwrap().command;
+                match command {
+                    AudioCommand::StopAndSnapshot(reply) => {
+                        let _ = reply.send(snapshot);
+                    }
+                    _ => panic!("expected one stop request"),
+                }
+                idle_commands
+            });
+            if path == "stop-wait" {
+                core.command(Command::Stop).unwrap();
+            } else {
+                let replacement = core.prepare_source_replacement().unwrap();
+                assert_eq!(replacement.generation, generation.wrapping_add(1));
+            }
+            core.engine.replace_commands(worker.join().unwrap());
+        }
+        core.publish();
+        let state = core.shared.read();
+        assert_eq!(
+            state.system.last_error.as_deref(),
+            Some(if matches!(case, "output" | "eq" | "idle-eq") {
+                "current settings failed"
+            } else {
+                "previous error"
+            }),
+            "{path}: {case}",
+        );
+        assert_eq!(state.queue.current_id, Some(1), "{path}: {case}");
+        assert_eq!(
+            state.playback.status,
+            if path == "replacement" {
+                PlaybackStatus::Playing
+            } else {
+                PlaybackStatus::Stopped
+            }
+        );
+        assert_eq!(
+            core.transport.generation,
+            if path == "replacement" {
+                generation
+            } else {
+                generation.wrapping_add(1)
+            }
+        );
     }
 }
 
@@ -2160,25 +2165,6 @@ fn unchanged_activity_skips_history_but_failed_real_refresh_retries() {
         .unwrap();
     assert_eq!(stored_activity, 19);
     assert_eq!(core.state.library.history[0].played_at, 19);
-}
-
-#[test]
-fn crossing_play_threshold_refreshes_published_history_count_during_playback() {
-    let (_directory, mut core) = fixture();
-    playing(&mut core, 1);
-    core.publish();
-    let before = core.shared.read().library.history.clone();
-    progress(&mut core, 2.0, 2.0);
-    core.publish();
-    assert_eq!(core.shared.read().library.history[0].play_count, 0);
-    progress(&mut core, 3.0, 3.0);
-    core.publish();
-    let published = core.shared.read().library.history.clone();
-    assert_eq!(published[0].play_count, 1);
-    assert_eq!(published[0].track_id, 1);
-    assert_eq!(published[0].played_at, before[0].played_at);
-    assert_eq!(before[0].play_count, 0);
-    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
 }
 
 #[test]

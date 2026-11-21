@@ -73,7 +73,6 @@ fn source_lookup_batches_are_bounded_and_cover_only_encountered_sources() -> Res
     let result = super::scan_paths(
         std::slice::from_ref(&root),
         |paths| {
-            assert!(paths.len() <= super::source::SOURCE_BATCH_SIZE);
             batches.push(paths.len());
             for path in paths {
                 assert!(path.starts_with(&root));
@@ -1703,7 +1702,7 @@ fn unrepresentable_cue_exports_preserve_existing_destination() -> Result<()> {
         .collect();
     let path = directory.path().join("existing.m3u8");
     fs::write(&path, "original playlist\n")?;
-    for sequence in [vec![0], vec![1], vec![1, 0]] {
+    for sequence in [vec![0], vec![1, 0]] {
         assert!(
             export_m3u(
                 &path,

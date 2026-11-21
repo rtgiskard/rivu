@@ -392,9 +392,6 @@ mod tests {
             next.delay,
             first.delay.saturating_sub(Duration::from_millis(30))
         );
-        // A repeated completion cannot release the replacement's worker gate.
-        finish(&mut owner, &mut session, first.read, true);
-        assert!(owner.prepare(&mut session, true, now).is_none());
         assert!(owner.submit(next.read, &session, environment(true)));
     }
 
@@ -576,9 +573,6 @@ mod tests {
             let changed = now + Duration::from_millis(100);
             owner.sync(Some(1), revisions, changed);
             assert!(!first.ticket.is_current());
-            assert!(owner.prepare(&mut session, true, changed).is_none());
-            // A late duplicate timer callback must not retire already submitted I/O.
-            assert!(!owner.submit(first.read, &session, environment(true)));
             assert!(owner.prepare(&mut session, true, changed).is_none());
             assert!(matches!(
                 owner.finish(

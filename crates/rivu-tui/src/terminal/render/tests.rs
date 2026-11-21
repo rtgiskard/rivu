@@ -617,57 +617,23 @@ fn retained_detail_layout_survives_refresh_until_replacement_or_expiry() {
 }
 
 #[test]
-fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
+fn query_tail_preserves_graphemes() {
     let query = "春风e\u{301}夜航";
-    let mut search = SearchState {
-        query: query.into(),
-        editing: true,
-        active: true,
-        ..SearchState::default()
-    };
-    let i18n = Localizer::for_terminal("en-US");
-    for width in [1, 8, 18, 24, 60] {
-        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
-        terminal
-            .draw(|frame| {
-                draw_search_input(
-                    frame,
-                    frame.area(),
-                    &search,
-                    &i18n,
-                    TerminalColors::new(rivu_presentation::theme::Theme::default()),
-                )
-            })
-            .unwrap();
-        let prefix = "󰍉 ";
-        if width as usize > Span::raw(prefix).width() {
-            assert!(terminal.backend().cursor_visible());
-            let cursor = terminal.backend().cursor_position();
-            assert!(cursor.x < width);
-            assert_eq!(cursor.y, 0);
-        }
-    }
-    search.editing = false;
-    let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
-    terminal
-        .draw(|frame| {
-            draw_search_input(
-                frame,
-                frame.area(),
-                &search,
-                &i18n,
-                TerminalColors::new(rivu_presentation::theme::Theme::default()),
-            )
-        })
-        .unwrap();
-    assert!(!terminal.backend().cursor_visible());
     assert_eq!(query_tail(query, 5), ("e\u{301}夜航", 5));
     assert_eq!(query_tail(query, 1), ("", 0));
 }
 
 #[test]
 fn bottom_search_preserves_viewport_and_input_cursor() {
-    for width in [8, 40, 100] {
+    for (width, room_for_cursor) in [
+        (3, false),
+        (8, true),
+        (18, true),
+        (24, true),
+        (40, true),
+        (60, true),
+        (100, true),
+    ] {
         let mut ui = UiState::default();
         let state = TuiSnapshot::default();
         let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
@@ -679,7 +645,7 @@ fn bottom_search_preserves_viewport_and_input_cursor() {
             .unwrap();
         let page_size = ui.page_size;
         ui.search.active = true;
-        ui.search.query = "夜航".into();
+        ui.search.query = "春风e\u{301}夜航".into();
         for editing in [true, false] {
             ui.search.editing = editing;
             terminal
@@ -689,9 +655,16 @@ fn bottom_search_preserves_viewport_and_input_cursor() {
                 })
                 .unwrap();
             assert_eq!(ui.page_size, page_size);
-            assert_eq!(terminal.backend().cursor_visible(), editing);
-            if editing {
-                assert_eq!(terminal.backend().cursor_position().y, 15);
+            let visible = editing && room_for_cursor;
+            assert_eq!(
+                terminal.backend().cursor_visible(),
+                visible,
+                "width={width}"
+            );
+            if visible {
+                let cursor = terminal.backend().cursor_position();
+                assert!(cursor.x < width);
+                assert_eq!(cursor.y, 15);
             }
         }
     }

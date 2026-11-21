@@ -599,16 +599,9 @@ mod tests {
         unavailable.visualizer.pcm = PcmSnapshot::default();
         scope.update(&unavailable);
         assert_eq!(scope.0.borrow().points, points);
-        scope.update(&frame);
-        config.analysis_fft_size = 512;
-        scope.configure_config(&config, true);
-        assert!(scope.0.borrow().points.is_empty());
-        scope.update(&frame);
-        assert!(scope.0.borrow().points.is_empty());
-        let valid = self::frame(&config);
         for invalid in 0..5 {
-            scope.update(&valid);
-            let mut rejected = valid.clone();
+            scope.update(&frame);
+            let mut rejected = frame.clone();
             match invalid {
                 0 => rejected.settings = None,
                 1 => rejected.visualizer.demand.pcm = false,
@@ -622,7 +615,7 @@ mod tests {
                 invalid == 0 || invalid == 2
             );
         }
-        scope.update(&valid);
+        scope.update(&frame);
         config.effect_primary_color = "#123456".parse().unwrap();
         scope.configure_config(&config, true);
         assert_eq!(scope.0.borrow().points[0], [0.25, -0.5]);

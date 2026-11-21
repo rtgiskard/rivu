@@ -608,14 +608,6 @@ fn runtime_validates_config_path_before_reading_or_rewriting_config() {
 }
 
 #[test]
-fn startup_config_accepts_unicode_without_creating_a_file() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("配置.toml");
-    CoreRuntime::load_startup_config(&path).unwrap();
-    assert!(!path.exists());
-}
-
-#[test]
 fn startup_and_unchanged_exit_preserve_config_bytes_and_comments() {
     use std::os::unix::fs::MetadataExt;
 
@@ -808,7 +800,7 @@ fn changed_apply_and_exit_reject_invalid_existing_input_without_overwriting_it()
 #[test]
 fn runtime_start_with_missing_config_waits_until_exit_to_create_it() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
+    let path = directory.path().join("配置.toml");
     let mut runtime = CoreRuntime::start(directory.path(), &path).unwrap();
     assert!(!path.exists());
     runtime.control.request_shutdown().unwrap();

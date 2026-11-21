@@ -2064,14 +2064,8 @@ pub(super) mod tests {
 
     #[test]
     fn real_container_gaps_follow_graph_delay_and_preguard_to_output_admission() {
+        use crate::test_support::matroska_element as element;
         use rivu_format::config::processing_graph::GraphPort;
-
-        fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
-            let mut bytes = id.to_vec();
-            bytes.extend_from_slice(&((1_u64 << 56) | payload.len() as u64).to_be_bytes());
-            bytes.extend_from_slice(payload);
-            bytes
-        }
 
         // Matroska PCM carries the discontinuity itself: 64-ms packets at
         // 0, 64 and 400 ms. Do not manufacture a gap in playback's counters.

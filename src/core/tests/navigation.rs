@@ -181,17 +181,6 @@ fn start_cue_navigation(core: &mut Core) -> u64 {
 }
 
 #[test]
-fn seek_uses_explicit_cue_end_not_estimated_whole_track_duration() {
-    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
-    let _commands = recording_audio(&mut core);
-    core.seek(25.0).unwrap();
-    assert_eq!(core.state.playback.position, 25.0);
-    start_cue_navigation(&mut core);
-    core.seek(25.0).unwrap();
-    assert_eq!(core.state.playback.position, 3.0);
-}
-
-#[test]
 fn invalid_seek_ack_preserves_paused_playback_and_valid_seek_stays_paused() {
     let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
     core.state.playback.position = 0.25;

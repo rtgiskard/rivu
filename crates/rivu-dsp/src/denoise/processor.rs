@@ -1179,7 +1179,6 @@ mod tests {
                 }
                 processor.finish(&mut output, &mut || false).unwrap();
                 assert_eq!(output, expected);
-                assert!(output.iter().all(|sample| sample.is_finite()));
                 if mode != DenoiseMode::Adaptive {
                     assert_eq!(processor.noise, initial_noise);
                 }

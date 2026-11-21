@@ -282,15 +282,16 @@ class ProtocolTests(unittest.TestCase):
                 "channels":1,"frames":8,"model_manifest":"/manifest.json"}
 
     def test_duration_uses_source_rate_for_both_operations(self):
-        for operation, channels in (("speech", 1), ("speech", 2), ("separate", 2)):
-            for rate in (8000, 44100, 48000, 192000):
-                with self.subTest(operation=operation, channels=channels, rate=rate):
-                    request = {**self.request(), "operation":operation, "channels":channels,
-                               "sample_rate":rate, "frames":14400 * rate}
-                    self.assertEqual(validate_request(request)["frames"], 14400 * rate)
-                    with self.assertRaises(WorkerError) as error:
-                        validate_request({**request, "frames":request["frames"] + 1})
-                    self.assertEqual(error.exception.code, "input_duration")
+        for operation, channels, rate in (("speech", 1, 8000), ("speech", 2, 44100),
+                                          ("separate", 2, 48000), ("separate", 2, 192000)):
+            with self.subTest(operation=operation, channels=channels, rate=rate):
+                limit = 14400 * rate
+                request = {**self.request(), "operation":operation, "channels":channels,
+                           "sample_rate":rate, "frames":limit}
+                self.assertEqual(validate_request(request)["frames"], limit)
+                with self.assertRaises(WorkerError) as error:
+                    validate_request({**request, "frames":limit + 1})
+                self.assertEqual(error.exception.code, "input_duration")
 
     @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema required for request protocol validation")
     def test_schema_separation_requires_stereo_and_speech_preserves_both_layouts(self):
@@ -330,27 +331,25 @@ class ProtocolTests(unittest.TestCase):
                            {"unknown_control":0}, {"post_filter":0}):
             with self.subTest(parameters=parameters), self.assertRaises(WorkerError):
                 validate_request({**self.request(),"parameters":parameters})
-        with self.assertRaises(WorkerError):
-            validate_request({**self.request(),"threads":9})
-        with self.assertRaises(WorkerError):
-            validate_request({**self.request(),"model_manifest":"relative.json"})
+        for fields in ({"threads":9}, {"model_manifest":"relative.json"}):
+            with self.subTest(fields=fields), self.assertRaises(WorkerError):
+                validate_request({**self.request(), **fields})
 
     def test_manifest_hash_and_path_binding(self):
-        scratch = ROOT / ".cache/neural/tests"
-        scratch.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            artifact = base / "weight-license.txt"
             manifest = bundle_fixture(base)
             path = base / "manifest.json"
             self.assertEqual(validate_manifest(path,"speech"),manifest)
-            artifact.write_text("changed")
-            with self.assertRaisesRegex(WorkerError,"SHA256 mismatch"):
-                validate_manifest(path,"speech")
-            manifest["files"] = {"../outside":"0"*64}
+            manifest["files"]["../outside"] = "0" * 64
             path.write_text(json.dumps(manifest))
-            with self.assertRaises(WorkerError):
-                validate_manifest(path,"speech")
+            with self.assertRaisesRegex(WorkerError, "bundle-relative"):
+                validate_manifest(path, "speech")
+            del manifest["files"]["../outside"]
+            path.write_text(json.dumps(manifest))
+            (base / "weight-license.txt").write_text("changed")
+            with self.assertRaisesRegex(WorkerError, "SHA256 mismatch"):
+                validate_manifest(path, "speech")
 
     def test_distinct_models_select_per_manifest_without_license_gate(self):
         scratch = ROOT / ".cache/neural/tests"
@@ -482,7 +481,8 @@ class ExplicitExportTests(unittest.TestCase):
             destination = base / "result"
             request = {**export_request(), "input_path":str(source), "output_dir":str(destination),
                        "model_manifest":str(base / "missing-manifest.json")}
-            for fields in ({"parameters":{"wet_mix":2}}, {"threads":9}, {"unexpected":True}):
+            for fields in ({"parameters":{"wet_mix":2}}, {"threads":9}, {"unexpected":True},
+                           {"parameters":{"wet_mix":0, "unknown":False}}):
                 with self.subTest(fields=fields):
                     events = []
                     with self.assertRaises(WorkerError) as error:
@@ -595,26 +595,6 @@ class ExplicitExportTests(unittest.TestCase):
                     self.assertFalse(destination.exists())
                     self.assertEqual(source.read_bytes(), original)
 
-    def test_report_capacity_failure_removes_completed_pcm(self):
-        import numpy as np
-        import soundfile as sf
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory).resolve()
-            bundle_fixture(base)
-            source = base / "input.wav"
-            sf.write(source, np.array([0.25, -0.25], dtype="float32"), 8000, subtype="FLOAT")
-            destination = base / "result"
-            request = {**export_request(), "input_path":str(source),
-                       "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
-                       "parameters":{"wet_mix":0}}
-            events = []
-            with patch("common.MAX_REPORT_BYTES", 1), patch("runtime.worker.deny_network"), patch.dict(os.environ):
-                with self.assertRaises(WorkerError) as error:
-                    process_export(request, lambda kind, **fields: events.append((kind, fields)))
-            self.assertEqual(error.exception.code, "report_capacity")
-            self.assertFalse(destination.exists())
-            self.assertNotIn("complete", [kind for kind, _ in events])
-
     def test_encoded_report_boundary_and_completion_after_files_close(self):
         import export
         import numpy as np
@@ -675,25 +655,22 @@ class ExplicitExportTests(unittest.TestCase):
                                      (json.dumps(report, indent=2, allow_nan=False) + "\n").encode("utf-8"))
                     self.assertEqual(events[-1], "complete")
 
-    def test_dry_speech_still_rejects_invalid_controls_tampered_artifacts_and_bad_samples(self):
+    def test_dry_speech_rejects_model_specific_controls_tampered_artifacts_and_bad_samples(self):
         import numpy as np
         import soundfile as sf
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             bundle_fixture(base)
             source = base / "input.wav"
-            sf.write(source, np.zeros((8, 1), dtype="float32"), 8000, subtype="FLOAT")
             destination = base / "result"
             request = {**export_request(), "input_path":str(source),
                        "output_dir":str(destination), "model_manifest":str(base / "manifest.json"),
                        "parameters":{"wet_mix":0}}
-            for invalid_control in ({"unknown":False}, {"post_filter":False}):
-                request["parameters"] = {"wet_mix":0, **invalid_control}
-                with self.subTest(control=invalid_control), self.assertRaises(WorkerError) as error:
-                    process_export(request, lambda *args, **kwargs: None)
-                self.assertEqual(error.exception.code, "invalid_request")
-                self.assertFalse(destination.exists())
-            request["parameters"] = {"wet_mix":0}
+            sf.write(source, np.zeros((8, 1), dtype="float32"), 8000, subtype="FLOAT")
+            with self.assertRaises(WorkerError) as error:
+                process_export({**request, "parameters":{"wet_mix":0, "post_filter":False}}, lambda *args, **kwargs: None)
+            self.assertEqual(error.exception.code, "invalid_request")
+            self.assertFalse(destination.exists())
             sf.write(source, np.full((8, 1), np.nan, dtype="float32"), 8000, subtype="FLOAT")
             with patch("runtime.worker.deny_network"), patch.dict(os.environ):
                 with self.assertRaisesRegex(WorkerError, "nonfinite"):

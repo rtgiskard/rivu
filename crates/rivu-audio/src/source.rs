@@ -2476,14 +2476,8 @@ pub(super) fn opening_prefix_file(
     prefix_packets: usize,
     selected_samples: bool,
 ) -> tempfile::NamedTempFile {
+    use crate::test_support::matroska_element as element;
     use std::io::Write;
-
-    fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
-        let mut bytes = id.to_vec();
-        bytes.extend_from_slice(&((1_u64 << 56) | payload.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(payload);
-        bytes
-    }
 
     fn track(number: u8) -> Vec<u8> {
         let mut entry = element(&[0xd7], &[number]);
@@ -3590,12 +3584,7 @@ pub(super) mod tests {
 
     #[test]
     fn unsupported_descriptive_tags_do_not_fall_back_to_decoder_metadata() {
-        fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
-            let mut bytes = id.to_vec();
-            bytes.extend_from_slice(&((1_u64 << 56) | payload.len() as u64).to_be_bytes());
-            bytes.extend_from_slice(payload);
-            bytes
-        }
+        use crate::test_support::matroska_element as element;
 
         let mut file = opening_prefix_file(0, true);
         let mut bytes = std::fs::read(file.path()).unwrap();

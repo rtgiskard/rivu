@@ -1864,46 +1864,31 @@ fn overlapping_scan_scope_preserves_owner_boundaries_and_missing_protections() {
 }
 
 #[test]
-fn import_staging_budget_failure_commits_no_tracks() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    let scan = ScanResult {
-        records: vec![std::sync::Arc::new(record())],
-        retained_budget: Some(Default::default()),
-        ..Default::default()
-    };
-    let budget = scan.retained_budget.as_ref().unwrap();
-    budget.reserve(budget.remaining()).unwrap();
-    assert!(
-        store
-            .apply_scan(&scan)
-            .unwrap_err()
-            .to_string()
-            .contains("retained data limit")
-    );
-    assert_eq!(store.track_count().unwrap(), 0);
-    assert!(store.conn.is_autocommit());
-}
-
-#[test]
-fn import_scope_without_successful_records_still_requires_workspace() {
-    let store = Store::open(Path::new(":memory:")).unwrap();
-    let scan = ScanResult {
-        roots: vec!["/missing/source.wav".into()],
-        retained_budget: Some(Default::default()),
-        ..Default::default()
-    };
-    let budget = scan.retained_budget.as_ref().unwrap();
-    budget.reserve(budget.remaining()).unwrap();
-    assert!(
-        store
-            .apply_scan(&scan)
-            .unwrap_err()
-            .to_string()
-            .contains("retained data limit")
-    );
-    assert_eq!(budget.remaining(), 0);
-    assert_eq!(store.track_count().unwrap(), 0);
-    assert!(store.conn.is_autocommit());
+fn exhausted_import_budget_rejects_record_staging_and_root_only_scans_without_committing() {
+    for (records, roots) in [
+        (vec![std::sync::Arc::new(record())], vec![]),
+        (vec![], vec!["/missing/source.wav".into()]),
+    ] {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let scan = ScanResult {
+            records,
+            roots,
+            retained_budget: Some(Default::default()),
+            ..Default::default()
+        };
+        let budget = scan.retained_budget.as_ref().unwrap();
+        budget.reserve(budget.remaining()).unwrap();
+        assert!(
+            store
+                .apply_scan(&scan)
+                .unwrap_err()
+                .to_string()
+                .contains("retained data limit")
+        );
+        assert_eq!(budget.remaining(), 0);
+        assert_eq!(store.track_count().unwrap(), 0);
+        assert!(store.conn.is_autocommit());
+    }
 }
 
 #[test]

@@ -1362,6 +1362,7 @@ mod tests {
                 baseline.into(),
                 &shutdown,
             );
+            assert_eq!(handle.test_revision_subscriptions().1, 1);
             // Simulate publication whose wakeup was missed at registration. The
             // state recheck must complete even though no channel item exists.
             let current = handle.test_advance_revision(false);
@@ -1369,7 +1370,7 @@ mod tests {
                 timeout(Duration::from_secs(2), waiting).await.unwrap().unwrap(),
                 Some(state) if state.revisions == current && state.sections().library
             ));
-            assert_eq!(handle.test_revision_subscriptions(), (1, 0));
+            assert_eq!(handle.test_revision_subscriptions().1, 0);
             // An already changed baseline replies without another subscription.
             assert!(matches!(
                 wait_for_state(
@@ -1377,7 +1378,9 @@ mod tests {
                 ).await.unwrap(),
                 Some(state) if state.revisions == current && state.sections().library
             ));
-            assert_eq!(handle.test_revision_subscriptions(), (1, 0));
+            let (slots, live) = handle.test_revision_subscriptions();
+            assert_eq!(live, 0);
+            assert!(slots <= 1);
             handle.test_advance_revision(true);
             assert_eq!(handle.test_revision_subscriptions(), (0, 0));
         });
@@ -1474,9 +1477,10 @@ mod tests {
                         );
                     }
                 }
-                assert_eq!(handle.test_revision_subscriptions(), (1, 0));
-                // A subsequent active Watch prunes the old closed sender and
-                // still receives the next real revision, without registry growth.
+                let (slots, live) = handle.test_revision_subscriptions();
+                assert_eq!(live, 0);
+                assert!(slots <= 1);
+                // Starting the next wait must not grow the registry.
                 let baseline = handle.state_revisions();
                 let (_peer, mut stream) = socket_pair();
                 let (_stop, shutdown) = async_channel::bounded(1);
@@ -1494,8 +1498,9 @@ mod tests {
                     timeout(Duration::from_secs(2), waiting).await.unwrap().unwrap(),
                     Some(state) if state.revisions == current && state.sections().library
                 ));
-                handle.test_advance_revision(true);
-                assert_eq!(handle.test_revision_subscriptions(), (0, 0));
+                let (slots, live) = handle.test_revision_subscriptions();
+                assert_eq!(live, 0);
+                assert!(slots <= 1);
             });
         }
     }

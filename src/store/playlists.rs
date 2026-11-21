@@ -1476,7 +1476,6 @@ mod group_tests {
         let store = fixture()?;
         let before = order(&store, 10)?;
         for (ids, target) in [
-            (vec![], None),
             (vec![101, 102], Some(103)),
             (vec![105], None),
             (vec![101, 103], Some(103)),

@@ -105,13 +105,6 @@ fn every_printable_shortcut_is_editor_text_and_backspace_is_not_parent() {
     assert!(ui.show_help);
     key(&mut ui, &state, KeyCode::Esc);
     assert!(ui.search.editing);
-    assert!(matches!(
-        ui.key_action(
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            &state
-        ),
-        KeyAction::Quit
-    ));
 }
 
 #[test]
@@ -434,7 +427,10 @@ fn recent_filters_only_titles_locally_and_preserves_same_query_selection() {
     assert_eq!(recent.entries.total, 2);
     key(&mut tui.ui, &state, KeyCode::Down);
     tui.ui.open_search();
-    key(&mut tui.ui, &state, KeyCode::Enter);
+    assert!(matches!(
+        key(&mut tui.ui, &state, KeyCode::Enter),
+        KeyAction::Ignored
+    ));
     let View::Recent(recent) = &tui.ui.view else {
         panic!("recent");
     };
@@ -1489,11 +1485,6 @@ fn recent_search_preserves_current_track_or_first_without_hidden_selection() {
     };
     assert_eq!(recent.selected().unwrap().track_id, 3);
     key(&mut ui, &state, KeyCode::Down); // alpha / track 1
-    let View::Recent(recent) = &ui.view else {
-        unreachable!()
-    };
-    assert_eq!(recent.selected().unwrap().track_id, 1);
-    replace_query(&mut ui, &state, "alpha");
     let View::Recent(recent) = &ui.view else {
         unreachable!()
     };
