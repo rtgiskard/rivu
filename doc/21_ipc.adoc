@@ -305,12 +305,11 @@ unchanged metadata, and a metadata edit can advance its token without replacing
 the playback source. When both sections change, a read selecting both gets the
 new values from one publication.
 
-The CLI's `status --json` includes current-track data inside `playback`. Its
-`revisions.playback` changes when either Playback or current-track state changes;
-it is not an IPC section token.
-Its `revisions.configuration` is an opaque equality token covering cold settings
-and the live controls included in `configuration.config`; playback progress
-alone does not invalidate it. Neither CLI token is an IPC section token.
+`rivu status --json` outputs the full sectioned state response, including the
+unmodified section tokens in `revisions`. Read the track and source generation
+from `current_track`, live controls from `playback.playback`, and the selected
+device from `system.selected_device`, not from `configuration.config`.
+The pre-v57 CLI layout and its synthesized revision tokens are not retained.
 
 Processing is an independent selected state section and revision domain, with
 its own client snapshot field. Its payload is `processing.task`; a requested
