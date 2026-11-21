@@ -688,7 +688,7 @@ impl Library {
                     self.tr("gl-locate-library"),
                 )
                 .surface(crate::gui::appearance::material::surface(cx))
-                .enabled(self.state.current_track().is_some() && !self.library.locate.loading)
+                .enabled(self.state.current_track().is_some() && !self.library.locate.is_reading())
                 .build(
                     IconButtonStyle::Surface,
                     IconButtonDensity::Regular,

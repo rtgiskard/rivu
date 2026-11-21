@@ -10,27 +10,59 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub(in crate::gui) struct LibraryLocateState {
     projection: QueryTracker,
-    // Logical cancellation never releases the physical ancestor worker.
-    pub(in crate::gui) pending: bool,
-    pub(super) loading: bool,
-    queued: bool,
+    worker: WorkerStage,
     pub(in crate::gui) notice: Option<(i64, LibraryLocateResult)>,
-    pub(in crate::gui) reveal: Option<(i64, TreeBranch, usize)>,
-    pub(in crate::gui) reveal_scrolled: bool,
+    reveal: Option<PendingReveal>,
     pub(in crate::gui) highlight: Option<(i64, Instant)>,
     pub(in crate::gui) highlight_task: Option<gpui::Task<()>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum WorkerStage {
+    #[default]
+    Idle,
+    Reading,
+    // Logical cancellation never releases the physical ancestor worker.
+    Draining,
+    DrainingWithRestart,
+}
+
+struct PendingReveal {
+    track_id: i64,
+    branch: TreeBranch,
+    offset: usize,
+    scrolled: bool,
+}
+
+impl PendingReveal {
+    fn new(track_id: i64, branch: TreeBranch, offset: usize) -> Self {
+        Self {
+            track_id,
+            branch,
+            offset,
+            scrolled: false,
+        }
+    }
+}
+
 impl LibraryLocateState {
+    pub(super) fn is_reading(&self) -> bool {
+        self.worker == WorkerStage::Reading
+    }
+
     pub(in crate::gui) fn invalidate(&mut self) {
         self.projection.cancel();
-        self.loading = false;
-        self.queued = false;
+        if self.worker != WorkerStage::Idle {
+            self.worker = WorkerStage::Draining;
+        }
         self.notice = None;
         self.reveal = None;
-        self.reveal_scrolled = false;
         self.highlight = None;
         self.highlight_task = None;
+    }
+
+    fn retire_worker(&mut self) -> bool {
+        std::mem::take(&mut self.worker) == WorkerStage::DrainingWithRestart
     }
 
     fn sync(&mut self, query: &Query, revisions: QueryRevisions) {
@@ -83,6 +115,16 @@ impl Library {
         let Some(track) = self.state.current_track() else {
             return;
         };
+        cx.emit(LibraryEvent::Reveal);
+        if !self.available {
+            return;
+        }
+        self.library.locate.invalidate();
+        if self.library.locate.worker != WorkerStage::Idle {
+            self.library.locate.worker = WorkerStage::DrainingWithRestart;
+            cx.notify();
+            return;
+        }
         let track_id = track.id;
         let ancestry_limit = track.path.components().count();
         let root = self
@@ -94,17 +136,6 @@ impl Library {
             .enumerate()
             .find(|(_, root)| track.path.starts_with(root))
             .map(|(index, root)| (index, root.clone()));
-        cx.emit(LibraryEvent::Reveal);
-        if !self.available {
-            return;
-        }
-        if self.library.locate.pending {
-            self.library.locate.invalidate();
-            self.library.locate.queued = true;
-            cx.notify();
-            return;
-        }
-        self.library.locate.invalidate();
         let other_tracks = root.is_none();
         let (root_index, mut path) = root
             .map(|(index, path)| (Some(index), path))
@@ -143,8 +174,7 @@ impl Library {
         };
         let ticket = self.library.locate.projection.ticket();
         let handle = self.context.handle().clone();
-        self.library.locate.pending = true;
-        self.library.locate.loading = true;
+        self.library.locate.worker = WorkerStage::Reading;
         cx.spawn(async move |this, cx| {
             // One worker and one scalar query per ancestor; no full-library pages.
             let mut locations = Vec::new();
@@ -227,7 +257,7 @@ impl Library {
                                 this.library.reveal_playing(root_index, roots, &locations)
                             {
                                 this.library.locate.reveal =
-                                    Some((track_id, branch.clone(), offset));
+                                    Some(PendingReveal::new(track_id, branch.clone(), offset));
                                 this.request_directory_page(branch, offset, cx);
                             }
                             cx.notify();
@@ -279,9 +309,7 @@ impl Library {
     }
 
     fn complete_library_locate(&mut self, cx: &mut Context<Self>) {
-        self.library.locate.pending = false;
-        self.library.locate.loading = false;
-        if std::mem::take(&mut self.library.locate.queued) {
+        if self.library.locate.retire_worker() {
             self.begin_library_locate(cx);
         }
         cx.notify();
@@ -313,10 +341,16 @@ impl Library {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((track_id, branch, offset)) = self.library.locate.reveal.clone() else {
+        let Some(target) = self.library.locate.reveal.as_ref() else {
             return;
         };
-        let Some(index) = self.library.tree().location_index(&branch, offset) else {
+        let PendingReveal {
+            track_id,
+            ref branch,
+            offset,
+            scrolled,
+        } = *target;
+        let Some(index) = self.library.tree().location_index(branch, offset) else {
             return;
         };
         if self
@@ -329,48 +363,46 @@ impl Library {
         }
         let ready = matches!(self.library.tree().item(index), Some(TreeItem::Entry(row))
             if matches!(&row.row, DirectoryRow::Track(track) if track.id == track_id));
-        if !ready && self.library.locate.reveal_scrolled {
+        if !ready && scrolled {
             return;
         }
+        let branch = branch.clone();
         let generation = self.library.locate.projection.generation();
         let entity = cx.entity().downgrade();
         window.defer(cx, move |_, cx| {
-            let _ =
-                entity.update(cx, |this, cx| {
-                    if this.library.locate.projection.generation() == generation
-                        && this
-                            .state
-                            .current_track()
-                            .is_some_and(|track| track.id == track_id)
-                        && this.library.locate.reveal.as_ref().is_some_and(
-                            |(id, target, position)| {
-                                *id == track_id && target == &branch && *position == offset
-                            },
-                        )
-                    {
-                        this.library.locate.reveal_scrolled = true;
-                        this.library
-                            .tree()
-                            .scroll
-                            .scroll_to_item(index, ScrollStrategy::Nearest);
-                        if ready {
-                            this.library.locate.reveal = None;
-                            this.library.locate.highlight = Some((track_id, Instant::now()));
-                            this.library.locate.highlight_task =
-                                Some(cx.spawn(async move |this, cx| {
-                                    cx.background_executor().timer(Duration::from_secs(2)).await;
-                                    let _ = this.update(cx, |this, cx| {
-                                        if this.library.locate.projection.generation() == generation
-                                        {
-                                            this.library.locate.highlight = None;
-                                            cx.notify();
-                                        }
-                                    });
-                                }));
-                        }
-                        cx.notify();
+            let _ = entity.update(cx, |this, cx| {
+                if this.library.locate.projection.generation() == generation
+                    && this
+                        .state
+                        .current_track()
+                        .is_some_and(|track| track.id == track_id)
+                    && let Some(target) = this.library.locate.reveal.as_mut()
+                    && target.track_id == track_id
+                    && target.branch == branch
+                    && target.offset == offset
+                {
+                    target.scrolled = true;
+                    this.library
+                        .tree()
+                        .scroll
+                        .scroll_to_item(index, ScrollStrategy::Nearest);
+                    if ready {
+                        this.library.locate.reveal = None;
+                        this.library.locate.highlight = Some((track_id, Instant::now()));
+                        this.library.locate.highlight_task =
+                            Some(cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(Duration::from_secs(2)).await;
+                                let _ = this.update(cx, |this, cx| {
+                                    if this.library.locate.projection.generation() == generation {
+                                        this.library.locate.highlight = None;
+                                        cx.notify();
+                                    }
+                                });
+                            }));
                     }
-                });
+                    cx.notify();
+                }
+            });
         });
     }
 }
@@ -426,8 +458,7 @@ mod tests {
             .library
             .locate
             .sync(&query, owner.state.query_revisions(None));
-        owner.library.locate.pending = true;
-        owner.library.locate.loading = true;
+        owner.library.locate.worker = WorkerStage::Reading;
         Request {
             generation: owner.library.locate.projection.generation(),
             query,
@@ -436,24 +467,47 @@ mod tests {
     }
 
     #[gpui::test]
+    fn queued_locate_restarts_only_when_the_old_worker_retires(cx: &mut gpui::TestAppContext) {
+        with_library(cx, |owner, cx| {
+            let request = pending_request(owner);
+            assert!(owner.library.locate.is_reading());
+            owner.library.cancel_navigation();
+            assert!(!owner.library.locate.is_reading());
+
+            owner.begin_library_locate(cx);
+            assert_eq!(
+                owner.library.locate.worker,
+                WorkerStage::DrainingWithRestart
+            );
+            assert!(!owner.library.locate.is_reading());
+            assert!(!request.current(owner));
+
+            owner.complete_library_locate(cx);
+            assert!(owner.library.locate.is_reading());
+            owner.cancel_reads();
+        });
+    }
+
+    #[gpui::test]
     fn navigation_cancels_a_locate_queued_behind_a_cancelled_worker(cx: &mut gpui::TestAppContext) {
         with_library(cx, |owner, cx| {
             let request = pending_request(owner);
             owner.library.cancel_navigation();
-            assert!(owner.library.locate.pending);
-            assert!(!owner.library.locate.loading);
+            assert_eq!(owner.library.locate.worker, WorkerStage::Draining);
+            assert!(!owner.library.locate.is_reading());
             // Logical cancellation enables the button, but the old worker
             // still owns the physical slot; the second click must queue.
             owner.begin_library_locate(cx);
-            assert!(owner.library.locate.queued);
-            assert!(owner.library.locate.pending);
+            assert_eq!(
+                owner.library.locate.worker,
+                WorkerStage::DrainingWithRestart
+            );
             owner.library.cancel_navigation();
-            assert!(!owner.library.locate.queued);
+            assert_eq!(owner.library.locate.worker, WorkerStage::Draining);
             assert!(!request.current(owner));
             owner.complete_library_locate(cx);
-            assert!(!owner.library.locate.pending);
-            assert!(!owner.library.locate.loading);
-            assert!(!owner.library.locate.queued);
+            assert_eq!(owner.library.locate.worker, WorkerStage::Idle);
+            assert!(!owner.library.locate.is_reading());
             assert!(owner.library.locate.reveal.is_none());
         });
     }
@@ -468,26 +522,35 @@ mod tests {
                 let request = pending_request(owner);
                 let ticket = owner.library.locate.projection.ticket();
                 owner.library.locate.notice = Some((7, LibraryLocateResult::OutsideRoot));
-                owner.library.locate.reveal = Some((7, TreeBranch::default(), 2));
-                owner.library.locate.queued = true;
-                if hide {
-                    owner.set_visible(false, cx);
-                } else {
-                    owner.cancel_reads();
-                }
+                owner.library.locate.reveal = Some(PendingReveal::new(7, TreeBranch::default(), 2));
+                let cancel = |owner: &mut Library, cx: &mut Context<Library>| {
+                    if hide {
+                        owner.set_visible(false, cx);
+                    } else {
+                        owner.cancel_reads();
+                    }
+                };
+                cancel(owner, cx);
                 assert!(!ticket.is_current());
                 // Ancestor continuation and final reveal publication both use
                 // these guards, including responses predating cancellation.
                 assert!(!request.accepts(owner, owner.state.query_revisions(None)));
                 assert!(!request.current(owner));
-                assert!(owner.library.locate.pending);
-                assert!(!owner.library.locate.loading);
-                assert!(!owner.library.locate.queued);
+                assert_eq!(owner.library.locate.worker, WorkerStage::Draining);
+                assert!(!owner.library.locate.is_reading());
                 assert!(owner.library.locate.notice.is_none());
                 assert!(owner.library.locate.reveal.is_none());
+                owner.set_visible(true, cx);
+                owner.begin_library_locate(cx);
+                assert_eq!(
+                    owner.library.locate.worker,
+                    WorkerStage::DrainingWithRestart
+                );
+                cancel(owner, cx);
+                assert_eq!(owner.library.locate.worker, WorkerStage::Draining);
                 owner.complete_library_locate(cx);
-                assert!(!owner.library.locate.pending);
-                assert!(!owner.library.locate.loading);
+                assert_eq!(owner.library.locate.worker, WorkerStage::Idle);
+                assert!(!owner.library.locate.is_reading());
             }
         });
     }
@@ -518,17 +581,18 @@ mod tests {
         let query = query();
         state.sync(&query, revisions());
         let generation = state.projection.generation();
-        state.pending = true;
+        state.worker = WorkerStage::Reading;
         state.notice = Some((7, LibraryLocateResult::OutsideRoot));
-        state.reveal = Some((7, TreeBranch::default(), 2));
+        state.reveal = Some(PendingReveal::new(7, TreeBranch::default(), 2));
         state.invalidate();
-        assert!(state.pending);
+        assert_eq!(state.worker, WorkerStage::Draining);
         assert!(state.notice.is_none());
         assert!(state.reveal.is_none());
         assert!(!state.projection.accepts(&query, generation, revisions()));
         // Only the worker completion releases the slot; another explicit locate
         // can then reuse the same identity with a new submission generation.
-        state.pending = false;
+        assert!(!state.retire_worker());
+        assert_eq!(state.worker, WorkerStage::Idle);
         state.sync(&query, revisions());
         assert!(
             state
