@@ -593,7 +593,13 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         exists_playlist(&tx, playlist_id)?;
         let removed = tx.execute(
-            "WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY position,id) AS occurrence FROM playlist_entries WHERE playlist_id=?1) DELETE FROM playlist_entries WHERE playlist_id=?1 AND id IN (SELECT id FROM ranked WHERE occurrence>1)",
+            "WITH repeated AS (
+                SELECT track_id,MIN(position) AS first FROM playlist_entries INDEXED BY playlist_order
+                WHERE playlist_id=?1 GROUP BY track_id HAVING COUNT(*)>1
+             ) DELETE FROM playlist_entries WHERE id IN (
+                SELECT e.id FROM repeated CROSS JOIN playlist_entries AS e INDEXED BY playlist_track_lookup
+                WHERE e.playlist_id=?1 AND e.track_id=repeated.track_id AND e.position>repeated.first
+             )",
             [playlist_id],
         )?;
         if removed == 0 {
