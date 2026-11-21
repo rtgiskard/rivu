@@ -35,7 +35,7 @@ impl Store {
                     |row| row.get(0),
                 )?;
                 ensure!(exists, "Playlist not found");
-                tx.execute("INSERT INTO insertion_tracks SELECT row_number() OVER (ORDER BY position,id)-1,track_id FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id", [playlist_id])?;
+                tx.execute("INSERT INTO insertion_tracks SELECT position,track_id FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id", [playlist_id])?;
             }
         }
         let missing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM insertion_tracks s LEFT JOIN tracks t ON t.id=s.track_id WHERE t.id IS NULL)", [], |row| row.get(0))?;
