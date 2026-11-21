@@ -757,6 +757,235 @@ sys.stdout.buffer.flush()
     }
 }
 
+pub(super) fn real_dry_speech_bundle(
+    directory: &Path,
+) -> (rivu_format::config::NeuralConfig, String) {
+    // Use the provisioned worker and its runtime sidecars without requiring model inference.
+    let setup = std::process::Command::new("python3")
+        .arg("-B")
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tools/audio_processing/bundle_fixture.py"),
+        )
+        .arg(directory)
+        .output()
+        .expect("dry worker fixture requires python3 on PATH");
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    let stdout = String::from_utf8(setup.stdout).unwrap();
+    let (hash, interpreter) = stdout.trim_end().split_once('\n').unwrap();
+    let config = rivu_format::config::NeuralConfig {
+        speech_interpreter: interpreter.into(),
+        worker: directory.join("runtime/worker.py"),
+        speech_manifest: Some(directory.join("manifest.json")),
+        speech_wet_mix: 0.0,
+        ..Default::default()
+    };
+    (config, hash.to_owned())
+}
+
+#[test]
+fn model_final_export_streams_native_tail_without_a_second_pcm() {
+    use rivu_dsp::equalizer::config::{EqBand, EqualizerConfig, FilterKind};
+
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(30)) {
+        return;
+    }
+    let frames = 4093;
+    let (directory, track, _) = source_fixture(
+        2,
+        48_000,
+        (0..frames * 2).map(|i| (i as f32 * 0.17).cos() * 0.3),
+    );
+    let (model, hash) = real_dry_speech_bundle(directory.path());
+    let config = graph_config(vec![
+        GraphNodeKind::Speech { config: model },
+        GraphNodeKind::Equalizer {
+            config: EqualizerConfig {
+                enabled: true,
+                bands: vec![EqBand {
+                    kind: FilterKind::LowPass,
+                    frequency_hz: 1500.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            implementation: EqImplementation::LinearPhase { taps: 257 },
+        },
+    ]);
+    let target = GraphPort { node: 2, port: 0 };
+    let destination = directory.path().join("export.wav");
+    let request = AudioExportRequest {
+        source: AudioExportSource::Graph {
+            track_id: track.id,
+            target,
+            revision: config.processing_graph.revision,
+        },
+        path: destination.clone(),
+        encoding: AudioExportEncoding {
+            pcm_bits: 16,
+            ..Default::default()
+        },
+        monitor_eq: None,
+    };
+
+    // The dry model returns its validated input. A budget the size of the final causal
+    // PCM admits that boundary, but cannot hold both it and a materialized FIR result.
+    let reference = completed_graph(&mut Service::new(), &track, Arc::clone(&config)).unwrap();
+    let output = &reference.graph_outputs[&target];
+    let context = output.context.as_ref().unwrap();
+    assert!(context.start_frame < 0 && context.pcm.frames() > frames);
+    let mut service = Service::with_memory_limit(context.pcm.retained_bytes());
+    let (expected, _) = export::prepare_encoded_export(
+        &output.pcm,
+        &destination,
+        Some(&request),
+        &AtomicBool::new(false),
+        |_, _| {},
+    )
+    .unwrap();
+    let id = service
+        .start_graph(
+            track,
+            config,
+            GraphRequest {
+                target,
+                mode: GraphExecutionMode::Offline,
+                export_path: Some(destination.clone()),
+                source_run: None,
+                cached_output: None,
+                audio_export: Some(request),
+            },
+        )
+        .unwrap();
+    let result = loop {
+        if let Event::Finished { result, .. } = next_event(&mut service) {
+            assert_eq!(service.finish_task(id), Some(false));
+            break result.unwrap();
+        }
+    };
+    assert!(result.graph_outputs.is_empty() && result.status.graph_outputs.is_empty());
+    assert_eq!(result.status.frames, Some(frames));
+    assert_eq!(service.memory_bytes(), 0);
+    assert!(
+        result
+            .status
+            .graph_nodes
+            .iter()
+            .all(|n| n.phase == ProcessingPhase::Complete)
+    );
+    let speech = result
+        .status
+        .graph_nodes
+        .iter()
+        .find(|n| n.node == 3)
+        .unwrap();
+    assert_eq!(speech.model_sha256.as_deref(), Some(hash.as_str()));
+    let (temporary, path) = result.pending_export.as_ref().unwrap();
+    assert_eq!(path, &destination);
+    assert!(!destination.exists());
+    let scratch = temporary.path().to_owned();
+    assert_eq!(
+        fs::read(&scratch).unwrap(),
+        fs::read(expected.path()).unwrap()
+    );
+    drop(result);
+    assert!(!scratch.exists() && !destination.exists());
+}
+
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn model_final_export_flush_failure_preserves_completed_nodes() {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(30)) {
+        return;
+    }
+    if audio::ExportConverter::new(48_000, 3, 44_100, 3).is_err() {
+        assert!(std::env::var_os("RIVU_TEST_REQUIRE_FFMPEG_EXPORT").is_none());
+        return;
+    }
+    // The converter holds the only sample until finish().
+    check_model_export_clipping(Some(44_100), 1, true);
+}
+
+#[test]
+fn model_final_export_direct_write_failure_preserves_only_rendered_nodes() {
+    if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(30)) {
+        return;
+    }
+    check_model_export_clipping(None, 1, true);
+    check_model_export_clipping(None, 4093, false);
+}
+
+fn check_model_export_clipping(sample_rate: Option<u32>, frames: usize, fully_rendered: bool) {
+    let (directory, track, _) = source_fixture(2, 48_000, std::iter::repeat_n(0.75, frames * 2));
+    let (model, _) = real_dry_speech_bundle(directory.path());
+    let config = graph_config(vec![
+        GraphNodeKind::Speech { config: model },
+        GraphNodeKind::Equalizer {
+            config: rivu_dsp::equalizer::config::EqualizerConfig {
+                enabled: true,
+                output_gain_db: 6.0,
+                ..Default::default()
+            },
+            implementation: EqImplementation::Iir,
+        },
+    ]);
+    let output_dir = directory.path().join("exports");
+    fs::create_dir(&output_dir).unwrap();
+    let path = output_dir.join("output.wav");
+    let target = GraphPort { node: 2, port: 0 };
+    let request = AudioExportRequest {
+        source: AudioExportSource::Graph {
+            track_id: track.id,
+            target,
+            revision: config.processing_graph.revision,
+        },
+        path: path.clone(),
+        encoding: AudioExportEncoding {
+            sample_rate,
+            pcm_bits: 16,
+            ..Default::default()
+        },
+        monitor_eq: None,
+    };
+    let mut service = Service::new();
+    let task = service
+        .start_graph(
+            track,
+            config,
+            GraphRequest {
+                target,
+                mode: GraphExecutionMode::Offline,
+                export_path: Some(path),
+                source_run: None,
+                cached_output: None,
+                audio_export: Some(request),
+            },
+        )
+        .unwrap();
+    let (status, _) = failed_prepared_model_task(&mut service, task);
+    assert!(status.error.unwrap().contains("Export would clip"));
+    assert_eq!(status.phase, ProcessingPhase::Failed);
+    for node in &status.graph_nodes {
+        // Model inference finishes before streaming. A rejected first block
+        // of a longer stream must not complete the remaining native work.
+        if fully_rendered || node.node == 3 {
+            assert_eq!(node.phase, ProcessingPhase::Complete);
+        } else if node.node == target.node {
+            assert_eq!(node.phase, ProcessingPhase::Failed);
+        }
+        assert!(
+            node.error.is_none(),
+            "encoding error attributed to {node:?}"
+        );
+    }
+    assert_eq!(service.memory_bytes(), 0);
+    assert_eq!(fs::read_dir(output_dir).unwrap().count(), 0);
+}
+
 #[test]
 fn graph_model_failure_keeps_each_nodes_provenance_and_original_operation() {
     let (directory, mut service, track, _) = fixture();
@@ -2459,7 +2688,7 @@ fn guarded_profile_selection_uses_source_frame_floor_in_both_execution_paths() {
                 BTreeMap::new(),
             )
             .unwrap();
-            let retained = samples(&retained[&GraphPort { node: 2, port: 0 }].pcm);
+            let retained = samples(&retained.outputs[&GraphPort { node: 2, port: 0 }].pcm);
             assert_eq!(retained.len(), expected.len());
             for (actual, &expected) in retained.into_iter().zip(expected) {
                 assert!((actual - expected).abs() < 1e-5);

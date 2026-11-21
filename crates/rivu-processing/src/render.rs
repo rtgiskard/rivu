@@ -279,7 +279,7 @@ pub(super) fn run(
         let input = renderer.render_pcm(Arc::clone(&budget), cancel)?;
         status.frames = Some(input.frames());
         if status.operation == ProcessingOperation::Graph {
-            graph_outputs = graph::execute(
+            let rendered = graph::execute(
                 execution
                     .as_ref()
                     .context("Missing admitted graph execution")?,
@@ -290,6 +290,8 @@ pub(super) fn run(
                 &mut progress,
                 models,
             )?;
+            graph_outputs = rendered.outputs;
+            pending_export = rendered.pending_export;
             AudioOutputs::default()
         } else {
             let outcome = neural::run(
