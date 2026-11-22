@@ -1,8 +1,8 @@
 use crate::model::{
-    Batch, BatchContinuation, ClientSnapshot, ConfigurationState, DatabaseOptimization,
-    DirectoryRow, LibraryRootCount, LibraryRow, LibrarySnapshot, LibraryStats, Page, PlaybackState,
-    PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, QueueCursor,
-    QueueRow, QueueState, SystemState, Track,
+    Batch, BatchContinuation, ClientSnapshot, ConfigurationState, DirectoryRow, LibraryRootCount,
+    LibraryRow, LibrarySnapshot, LibraryStats, Page, PlaybackState, PlaylistEntryCursor,
+    PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, QueueCursor, QueueRow, QueueState,
+    SystemState, Track,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
@@ -471,54 +471,6 @@ pub enum AckStatus {
     NotAdmitted,
     /// Admission or completion cannot be established. Never replay automatically.
     Unknown,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Ack {
-    pub status: AckStatus,
-    pub error: Option<String>,
-    pub revision: u64,
-    /// Present when this command accepted a scan, import, recheck or external admission task.
-    pub scan_id: Option<u64>,
-    /// Present only when this command accepted a manual relocation task.
-    pub relocation_id: Option<u64>,
-    pub processing_id: Option<u64>,
-    /// Present only after successful database optimization and physical worker retirement.
-    pub database_optimization: Option<DatabaseOptimization>,
-    /// Verified source values, also returned when the file saved but database sync failed.
-    pub source_tags: Option<rivu_format::tags::TagValues>,
-    /// The file save was verified, whether it replaced bytes or was unchanged.
-    pub source_file_saved: bool,
-    /// Tags committed successfully, but refreshing Core projections failed.
-    pub source_refresh_error: Option<String>,
-}
-
-impl Ack {
-    pub fn from_result(result: anyhow::Result<()>, revision: u64) -> Self {
-        match result {
-            Ok(()) => Self::new(AckStatus::Succeeded, None, revision),
-            Err(error) => Self::new(AckStatus::Failed, Some(format!("{error:#}")), revision),
-        }
-    }
-
-    pub fn new(status: AckStatus, error: Option<String>, revision: u64) -> Self {
-        Self {
-            status,
-            error,
-            revision,
-            scan_id: None,
-            relocation_id: None,
-            processing_id: None,
-            database_optimization: None,
-            source_tags: None,
-            source_file_saved: false,
-            source_refresh_error: None,
-        }
-    }
-
-    pub fn is_success(&self) -> bool {
-        self.status == AckStatus::Succeeded
-    }
 }
 
 #[cfg(test)]

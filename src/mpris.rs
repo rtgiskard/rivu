@@ -549,7 +549,7 @@ impl Root {
             Ok(())
         } else {
             Err(fdo::Error::Failed(
-                ack.error.unwrap_or_else(|| "Shutdown failed".into()),
+                ack.error().unwrap_or("Shutdown failed").into(),
             ))
         }
     }
@@ -788,14 +788,12 @@ async fn request(handle: &CoreHandle, command: Command) -> fdo::Result<()> {
     acknowledge(handle.request_ack(command).await)
 }
 
-fn acknowledge(response: rivu_protocol::response::Ack) -> fdo::Result<()> {
+fn acknowledge(response: rivu_protocol::wire::CommandReceipt) -> fdo::Result<()> {
     if response.is_success() {
         Ok(())
     } else {
         Err(fdo::Error::Failed(
-            response
-                .error
-                .unwrap_or_else(|| "Core command failed".into()),
+            response.error().unwrap_or("Core command failed").into(),
         ))
     }
 }
@@ -1201,9 +1199,12 @@ mod tests {
             index: None,
             expected_revision: None,
         }));
-        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(ack.is_success(), "{:?}", ack.error());
         async_io::block_on(handle.wait_task(rivu_protocol::model::TaskTarget::Scan {
-            id: ack.scan_id.unwrap(),
+            id: match ack.output() {
+                Some(rivu_protocol::wire::CommandOutput::Scan(id)) => *id,
+                other => panic!("Expected scan output, got {other:?}"),
+            },
         }))
         .unwrap();
     }
@@ -1220,7 +1221,7 @@ mod tests {
         let ack = async_io::block_on(handle.request_ack(Command::MutateConfig {
             change: ConfigMutation::Settings(Box::new(ConfigPatch::between(&baseline, &draft))),
         }));
-        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(ack.is_success(), "{:?}", ack.error());
     }
 
     #[track_caller]

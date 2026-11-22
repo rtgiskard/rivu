@@ -114,7 +114,7 @@ pub(super) fn run(
                 TaskKind::Relocation => Command::CancelRelocation { id },
                 TaskKind::Processing => Command::CancelProcessing { id },
             };
-            let ack = super::output::legacy_ack(session.request_command(command)?)?;
+            let ack = super::output::require_receipt(session.request_command(command)?)?;
             super::output::show_task_ack(i18n, &session, &ack, mode)
         }
     }

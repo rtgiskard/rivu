@@ -166,7 +166,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         }
         Action::Task(action) => return tasks::run(&i18n, &data_dir, action, mode),
         Action::Quit => {
-            let ack = output::legacy_ack(rivu_client::request_command(
+            let ack = output::require_receipt(rivu_client::request_command(
                 &data_dir,
                 rivu_protocol::AppCommand::Shutdown,
             )?)?;
@@ -290,12 +290,15 @@ fn submit_command(
     mode: OutputMode,
 ) -> Result<()> {
     let mut session = rivu_client::client_session(data_dir);
-    let ack = output::legacy_ack(session.request_command(command)?)?;
+    let ack = output::require_receipt(session.request_command(command)?)?;
     if !ack.is_success() {
         return output::show_task_ack(i18n, &session, &ack, mode);
     }
     if wait_scan {
-        let id = ack.scan_id.context("Scan startup omitted task ID")?;
+        let Some(rivu_protocol::wire::CommandOutput::Scan(id)) = ack.output() else {
+            anyhow::bail!("Scan startup omitted task ID");
+        };
+        let id = *id;
         return tasks::wait_scan(i18n, &mut session, id, mode == OutputMode::Json);
     }
     output::show_task_ack(i18n, &session, &ack, mode)

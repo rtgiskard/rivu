@@ -132,7 +132,7 @@ fn dispatched_mpris_seek_during_saving_only_gates_navigation() {
     let revision = core.state.playback.seek_revision;
     assert!(seek(&mut core, queue_id + 1, i64::MAX).is_success());
     let rejected = seek(&mut core, queue_id, 1);
-    assert_eq!(rejected.status, AckStatus::Failed);
+    assert_eq!(rejected.status(), AckStatus::Failed);
     assert_eq!(core.state.queue.current_id, Some(queue_id));
     assert_eq!(core.state.playback.position, 10.0);
     assert_eq!(core.state.playback.seek_revision, revision);

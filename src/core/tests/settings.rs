@@ -1952,7 +1952,7 @@ fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
             }),
             Duration::from_secs(5),
         ));
-        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(ack.is_success(), "{:?}", ack.error());
     };
 
     configure(true);

@@ -336,7 +336,7 @@ pub(super) fn run(
                 decoder_hint: None,
                 release_date: None,
             };
-            let ack = output::legacy_ack(rivu_client::request_command(data_dir, command)?)?;
+            let ack = output::require_receipt(rivu_client::request_command(data_dir, command)?)?;
             show_ack(i18n, &ack, mode)
         }
         LibraryAction::Duplicates {
@@ -467,30 +467,33 @@ pub(super) fn run(
             wait,
         } => {
             let mut session = rivu_client::client_session(data_dir);
-            let ack = output::legacy_ack(session.request_command(Command::RelocateTrack {
-                source_id,
-                target_id,
-            })?)?;
+            let ack =
+                output::require_receipt(session.request_command(Command::RelocateTrack {
+                    source_id,
+                    target_id,
+                })?)?;
             if !ack.is_success() || !wait {
                 return output::show_task_ack(i18n, &session, &ack, mode);
             }
-            let id = ack
-                .relocation_id
-                .context("Relocation startup omitted task ID")?;
+            let Some(rivu_protocol::wire::CommandOutput::Relocation(id)) = ack.output() else {
+                anyhow::bail!("Relocation startup omitted task ID");
+            };
+            let id = *id;
             tasks::wait_relocation(i18n, &mut session, id, json)
         }
         LibraryAction::Optimize => {
-            let ack = output::legacy_ack(rivu_client::request_command(
+            let ack = output::require_receipt(rivu_client::request_command(
                 data_dir,
                 Command::OptimizeDatabase,
             )?)?;
             if json || !ack.is_success() {
                 return show_ack(i18n, &ack, mode);
             }
-            let report = ack
-                .database_optimization
-                .as_ref()
-                .context("Database optimization returned no size report")?;
+            let Some(rivu_protocol::wire::CommandOutput::DatabaseOptimization(report)) =
+                ack.output()
+            else {
+                anyhow::bail!("Database optimization returned no size report");
+            };
             let before = report
                 .database_bytes_before
                 .saturating_add(report.wal_bytes_before);

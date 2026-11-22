@@ -67,7 +67,7 @@ fn navigation_commands_preserve_execution_status_and_occurrence_selection() {
             let port = audio_port(&mut core);
             let (handle, control, worker, publications) = navigation_runtime(core);
             let ack = futures::executor::block_on(handle.request_ack(command));
-            assert!(ack.is_success(), "{:?}", ack.error);
+            assert!(ack.is_success(), "{:?}", ack.error());
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.playback.status, status);
             assert_eq!(snapshot.queue.current_id, Some(expected));
@@ -925,7 +925,7 @@ fn mpris_relative_seeks_accumulate_at_execution_and_keep_pause() {
     handle.send(Command::Seek { seconds: 2.0 }).unwrap();
     for expected in [3.25, 4.5] {
         let ack = futures::executor::block_on(handle.mpris_seek(queue_id, 1_250_000));
-        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(ack.is_success(), "{:?}", ack.error());
         let state = handle.mpris_snapshot();
         assert_eq!(state.playback.position, expected);
         assert_eq!(state.playback.status, PlaybackStatus::Paused);
@@ -1063,7 +1063,7 @@ fn mpris_over_end_seek_recovers_a_surviving_tail_after_committed_removal() {
             offset: i64::MAX,
         },
     );
-    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(ack.is_success(), "{:?}", ack.error());
     assert!(!core.transport.projection_stale);
     assert_eq!(core.shared.read().queue.total, 3);
     assert_eq!(core.state.queue.current_id, Some(5));
@@ -1106,7 +1106,7 @@ fn stale_queue_navigation_operation_recovers_order_before_selecting() {
     let _commands = recording_audio(&mut core);
     let (handle, control, worker, _publications) = navigation_runtime(core);
     let ack = futures::executor::block_on(handle.request_ack(Command::Next));
-    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(ack.is_success(), "{:?}", ack.error());
     let state = handle.mpris_snapshot();
     assert_eq!(state.queue.current_id, Some(4));
     assert_eq!(state.queue.total, 3);
@@ -1375,7 +1375,7 @@ fn empty_navigation_and_resume_do_not_send_audio_commands() {
     let port = audio_port(&mut core);
     for command in [Command::Next, Command::Previous, Command::Resume] {
         let ack = operation_ack(&mut core, Operation::Command(command));
-        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(ack.is_success(), "{:?}", ack.error());
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_eq!(core.state.queue.current_id, None);
         assert_eq!(core.transport.generation, generation);
@@ -1480,7 +1480,7 @@ fn mpris_set_position_uses_execution_duration_and_ignores_stale_or_stopped_occur
             &mut core,
             Operation::MprisSetPosition { queue_id, position },
         );
-        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(ack.is_success(), "{:?}", ack.error());
         assert_eq!(core.state.playback.seek_revision, revision);
         assert!(recorded_audio(&port, &commands).is_empty());
     }
@@ -1489,7 +1489,7 @@ fn mpris_set_position_uses_execution_duration_and_ignores_stale_or_stopped_occur
             &mut core,
             Operation::MprisSetPosition { queue_id, position },
         );
-        assert!(ack.is_success(), "{:?}", ack.error);
+        assert!(ack.is_success(), "{:?}", ack.error());
         let seconds = position as f64 / 1_000_000.0;
         assert_eq!(core.state.playback.position, seconds);
         assert_eq!(core.state.playback.status, PlaybackStatus::Paused);

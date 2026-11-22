@@ -16,15 +16,13 @@ use rivu_protocol::transport::{
     timeout_at, write_error_frame, write_frame_buffered,
 };
 use rivu_protocol::wire::{
-    CommandRefusal, CommandReply, HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST,
-    SessionState, UNKNOWN_INSTANCE, WireRequest, WireResponse, wire_state,
+    CommandReceipt, CommandRefusal, CommandReply, HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS,
+    MAX_REQUEST, SessionState, UNKNOWN_INSTANCE, WireRequest, WireResponse, wire_state,
 };
 use rivu_protocol::{
     model::Query,
     query_tracking::QueryEpoch,
-    response::{
-        Ack, QueryError, QueryResponse, StateRequest, StateResponse, StateWatch, TaskOutcome,
-    },
+    response::{QueryError, QueryResponse, StateRequest, StateResponse, StateWatch, TaskOutcome},
 };
 use std::{
     fs,
@@ -132,7 +130,7 @@ impl Drop for Server {
         }
     }
 }
-async fn run_command(app: &AppHandle, command: AppCommand) -> Result<Ack> {
+async fn run_command(app: &AppHandle, command: AppCommand) -> Result<CommandReceipt> {
     let duration = bridge_timeout(command.wait_timeout());
     timeout(duration, app.request_ack_async(command))
         .await
@@ -463,7 +461,7 @@ async fn serve_connection(
                     desktop_registration = Some(app.register_desktop());
                     Ok(())
                 };
-                let ack = Ack::from_result(result, handle.publication_revision());
+                let ack = CommandReceipt::from_result(result, handle.publication_revision());
                 let response = WireResponse::Command(ack.into());
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }

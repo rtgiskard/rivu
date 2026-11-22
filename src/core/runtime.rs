@@ -53,7 +53,7 @@ struct Completion {
 
 #[derive(Default)]
 struct CompletionState {
-    ack: Option<Ack>,
+    ack: Option<CommandReceipt>,
     finished: bool,
     callback: Option<Arc<dyn Fn() + Send + Sync>>,
     error: Option<anyhow::Error>,
@@ -95,7 +95,7 @@ impl CoreLifecycle {
     }
 
     /// Acknowledges the shutdown request, not completion of runtime teardown.
-    pub(crate) async fn shutdown_ack_async(&self, revision: impl Fn() -> u64) -> Ack {
+    pub(crate) async fn shutdown_ack_async(&self, revision: impl Fn() -> u64) -> CommandReceipt {
         let requested = self.request_shutdown();
         let waiting = async {
             loop {
@@ -111,24 +111,21 @@ impl CoreLifecycle {
         };
         let _ = rivu_protocol::transport::timeout(REPLY_TIMEOUT, waiting).await;
         self.completion.state.lock().ack.clone().unwrap_or_else(|| {
-            let status = if requested.is_err() {
-                AckStatus::NotAdmitted
+            let outcome = if requested.is_err() {
+                CommandOutcome::NotAdmitted("Core stopped; shutdown request not admitted".into())
             } else {
-                AckStatus::Unknown
+                CommandOutcome::Unknown(
+                    "Core shutdown outcome unknown; do not automatically retry".into(),
+                )
             };
-            Ack::new(
-                status,
-                Some(if status == AckStatus::NotAdmitted {
-                    "Core stopped; shutdown request not admitted".into()
-                } else {
-                    "Core shutdown outcome unknown; do not automatically retry".into()
-                }),
-                revision(),
-            )
+            CommandReceipt {
+                revision: revision(),
+                outcome,
+            }
         })
     }
 
-    pub(super) fn acknowledge(&self, ack: Ack) {
+    pub(super) fn acknowledge(&self, ack: CommandReceipt) {
         self.completion.state.lock().ack = Some(ack);
         self.completion.acknowledged.notify(usize::MAX);
     }

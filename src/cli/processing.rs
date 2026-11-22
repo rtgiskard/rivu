@@ -425,13 +425,14 @@ fn run_live(
             }
         }
     };
-    let ack = super::output::legacy_ack(session.request_command(command)?)?;
+    let ack = super::output::require_receipt(session.request_command(command)?)?;
     if !wait || !ack.is_success() {
         return super::output::show_task_ack(i18n, &session, &ack, mode);
     }
-    let id = ack
-        .processing_id
-        .context("Processing startup omitted task id")?;
+    let Some(rivu_protocol::wire::CommandOutput::Processing(id)) = ack.output() else {
+        anyhow::bail!("Processing startup omitted task id");
+    };
+    let id = *id;
     super::tasks::wait_processing(i18n, &mut session, id, mode == OutputMode::Json)
 }
 

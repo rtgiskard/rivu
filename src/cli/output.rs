@@ -3,6 +3,7 @@ use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
     model::{Batch, MAX_QUERY_ROWS, PlaybackStatus, Query},
     response::{QueryError, QueryRevisions, StateResponse, StateSections, ViewResponse},
+    wire::{CommandOutput, CommandReceipt, CommandReply},
 };
 use rivu_utils::terminal::{TerminalEscaped, terminal_text};
 use std::{
@@ -410,39 +411,25 @@ pub(super) fn show_duplicates(output: &mut impl Write, view: &ViewResponse) -> R
 pub(super) fn show_task_ack(
     i18n: &Localizer,
     session: &rivu_client::ClientSession,
-    ack: &rivu_protocol::response::Ack,
+    ack: &CommandReceipt,
     mode: OutputMode,
 ) -> Result<()> {
-    let ids = [
-        ("scan", ack.scan_id),
-        ("relocation", ack.relocation_id),
-        ("processing", ack.processing_id),
-    ];
-    if !ids.iter().any(|(_, id)| id.is_some()) {
-        return show_ack(i18n, ack, mode);
-    }
+    let (kind, id) = match ack.output() {
+        Some(CommandOutput::Scan(id)) => ("scan", *id),
+        Some(CommandOutput::Relocation(id)) => ("relocation", *id),
+        Some(CommandOutput::Processing(id)) => ("processing", *id),
+        _ => return show_ack(i18n, ack, mode),
+    };
     let instance_id = super::tasks::instance_id(session)?;
     let mut output = io::stdout().lock();
     if mode == OutputMode::Json {
-        let mut value = serde_json::to_value(ack)?;
+        let mut value = serde_json::to_value(receipt_json(ack))?;
         let fields = value
             .as_object_mut()
             .context("Expected acknowledgement object")?;
         fields.insert("instance_id".into(), instance_id.into());
-        let references: serde_json::Map<String, serde_json::Value> = ids
-            .into_iter()
-            .filter_map(|(kind, id)| {
-                id.map(|id| {
-                    (
-                        kind.into(),
-                        super::tasks::TaskReference { instance_id, id }
-                            .to_string()
-                            .into(),
-                    )
-                })
-            })
-            .collect();
-        fields.insert("task_refs".into(), references.into());
+        let reference = super::tasks::TaskReference { instance_id, id }.to_string();
+        fields.insert("task_refs".into(), serde_json::json!({ (kind): reference }));
         writeln!(output, "{}", serde_json::to_string_pretty(&value)?)?;
         output.flush()?;
         return check_ack(ack);
@@ -451,100 +438,85 @@ pub(super) fn show_task_ack(
     if mode == OutputMode::Verbose {
         write_ack_revision(&mut output, i18n, ack)?;
     }
-    for (kind, id) in ids {
-        if let Some(id) = id {
-            writeln!(
-                output,
-                "{}",
-                i18n.format(
-                    "core-task-accepted",
-                    &[
-                        ("kind", kind.into()),
-                        (
-                            "id",
-                            super::tasks::TaskReference { instance_id, id }
-                                .to_string()
-                                .into()
-                        )
-                    ]
-                )
-            )?;
-        }
-    }
+    writeln!(
+        output,
+        "{}",
+        i18n.format(
+            "core-task-accepted",
+            &[
+                ("kind", kind.into()),
+                (
+                    "id",
+                    super::tasks::TaskReference { instance_id, id }
+                        .to_string()
+                        .into()
+                ),
+            ]
+        )
+    )?;
     output.flush()?;
     Ok(())
 }
 
-/// Project typed owner receipts onto the established CLI JSON and text fields.
-pub(super) fn legacy_ack(
-    reply: rivu_protocol::wire::CommandReply,
-) -> Result<rivu_protocol::response::Ack> {
-    use rivu_protocol::{
-        response::{Ack, AckStatus},
-        wire::{CommandOutcome, CommandOutput, CommandReply},
-    };
-
-    let receipt = match reply {
-        CommandReply::Receipt(receipt) => receipt,
-        CommandReply::Refused(refusal) => return Err(refusal.into()),
-    };
-    let revision = receipt.revision;
-    let (mut ack, source_tags) = match receipt.outcome {
-        CommandOutcome::Succeeded(output) => {
-            let mut ack = Ack::new(AckStatus::Succeeded, None, revision);
-            let source_tags = match output {
-                CommandOutput::None => None,
-                CommandOutput::Scan(id) => {
-                    ack.scan_id = Some(id);
-                    None
-                }
-                CommandOutput::Relocation(id) => {
-                    ack.relocation_id = Some(id);
-                    None
-                }
-                CommandOutput::Processing(id) => {
-                    ack.processing_id = Some(id);
-                    None
-                }
-                CommandOutput::DatabaseOptimization(report) => {
-                    ack.database_optimization = Some(report);
-                    None
-                }
-                CommandOutput::SourceTags(tags) => Some(tags),
-            };
-            (ack, source_tags)
-        }
-        CommandOutcome::Failed { error, source_tags } => (
-            Ack::new(AckStatus::Failed, Some(error), revision),
-            source_tags,
-        ),
-        CommandOutcome::NotAdmitted(error) => (
-            Ack::new(AckStatus::NotAdmitted, Some(error), revision),
-            None,
-        ),
-        CommandOutcome::Unknown(error) => {
-            (Ack::new(AckStatus::Unknown, Some(error), revision), None)
-        }
-    };
-    if let Some(source_tags) = source_tags {
-        ack.source_tags = source_tags.tags;
-        ack.source_file_saved = source_tags.file_saved;
-        ack.source_refresh_error = source_tags.refresh_error;
+pub(super) fn require_receipt(reply: CommandReply) -> Result<CommandReceipt> {
+    match reply {
+        CommandReply::Receipt(receipt) => Ok(receipt),
+        CommandReply::Refused(refusal) => Err(refusal.into()),
     }
-    Ok(ack)
 }
 
-pub(super) fn show_ack(
-    i18n: &Localizer,
-    ack: &rivu_protocol::response::Ack,
-    mode: OutputMode,
-) -> Result<()> {
+// Only the JSON renderer needs the established flat acknowledgement schema.
+#[derive(serde::Serialize)]
+struct ReceiptJson<'a> {
+    status: rivu_protocol::response::AckStatus,
+    error: Option<&'a str>,
+    revision: u64,
+    scan_id: Option<u64>,
+    relocation_id: Option<u64>,
+    processing_id: Option<u64>,
+    database_optimization: Option<&'a rivu_protocol::model::DatabaseOptimization>,
+    source_tags: Option<&'a rivu_format::tags::TagValues>,
+    source_file_saved: bool,
+    source_refresh_error: Option<&'a str>,
+}
+
+fn receipt_json(receipt: &CommandReceipt) -> ReceiptJson<'_> {
+    let source = receipt.outcome.source_tags();
+    let mut json = ReceiptJson {
+        status: receipt.status(),
+        error: receipt.error(),
+        revision: receipt.revision,
+        scan_id: None,
+        relocation_id: None,
+        processing_id: None,
+        database_optimization: None,
+        source_tags: source.and_then(|source| source.tags.as_ref()),
+        source_file_saved: source.is_some_and(|source| source.file_saved),
+        source_refresh_error: source.and_then(|source| source.refresh_error.as_deref()),
+    };
+    match receipt.output() {
+        Some(CommandOutput::Scan(id)) => json.scan_id = Some(*id),
+        Some(CommandOutput::Relocation(id)) => json.relocation_id = Some(*id),
+        Some(CommandOutput::Processing(id)) => json.processing_id = Some(*id),
+        Some(CommandOutput::DatabaseOptimization(report)) => {
+            json.database_optimization = Some(report)
+        }
+        _ => {}
+    }
+    json
+}
+
+pub(super) fn show_ack(i18n: &Localizer, ack: &CommandReceipt, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Text {
         return check_ack(ack);
     }
     let mut output = io::stdout().lock();
     if mode == OutputMode::Json {
-        writeln!(output, "{}", serde_json::to_string_pretty(ack)?)?;
+        writeln!(
+            output,
+            "{}",
+            serde_json::to_string_pretty(&receipt_json(ack))?
+        )?;
         output.flush()?;
         return check_ack(ack);
     }
@@ -554,12 +526,12 @@ pub(super) fn show_ack(
     Ok(())
 }
 
-fn check_ack(ack: &rivu_protocol::response::Ack) -> Result<()> {
+fn check_ack(ack: &CommandReceipt) -> Result<()> {
     if !ack.is_success() {
         bail!(
             "{:?}: {}",
-            ack.status,
-            ack.error.as_deref().unwrap_or("Command failed")
+            ack.status(),
+            ack.error().unwrap_or("Command failed")
         );
     }
     Ok(())
@@ -568,7 +540,7 @@ fn check_ack(ack: &rivu_protocol::response::Ack) -> Result<()> {
 fn write_ack_revision(
     output: &mut impl Write,
     i18n: &Localizer,
-    ack: &rivu_protocol::response::Ack,
+    ack: &CommandReceipt,
 ) -> io::Result<()> {
     writeln!(
         output,
@@ -804,22 +776,72 @@ mod tests {
             revision: 7,
             outcome: CommandOutcome::Succeeded(CommandOutput::Scan(3)),
         });
-        let value = serde_json::to_value(super::legacy_ack(reply).unwrap()).unwrap();
-        assert_eq!(value["status"], "Succeeded");
-        assert_eq!(value["revision"], 7);
-        assert_eq!(value["scan_id"], 3);
-        assert!(value["processing_id"].is_null());
-        assert_eq!(value["source_file_saved"], false);
+        let value =
+            serde_json::to_value(super::receipt_json(&super::require_receipt(reply).unwrap()))
+                .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "status": "Succeeded", "error": null, "revision": 7,
+                "scan_id": 3, "relocation_id": null, "processing_id": null,
+                "database_optimization": null, "source_tags": null,
+                "source_file_saved": false, "source_refresh_error": null,
+            })
+        );
 
         let refused =
             CommandReply::Refused(CommandRefusal::InvalidCommand("invalid command".into()));
-        let error = super::legacy_ack(refused).unwrap_err();
+        let error = super::require_receipt(refused).unwrap_err();
         let mut bytes = Vec::new();
         write_error(&mut bytes, &error, true).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
             serde_json::json!({"status": "NotAdmitted", "error": "invalid command"})
+        );
+    }
+
+    #[test]
+    fn command_receipt_json_distinguishes_partial_failure_and_unknown() {
+        use rivu_protocol::wire::{CommandOutcome, CommandReceipt, SourceTagOutput};
+
+        let tags = rivu_format::tags::TagValues {
+            title: "Verified".into(),
+            ..Default::default()
+        };
+        let partial = CommandReceipt {
+            revision: 8,
+            outcome: CommandOutcome::Failed {
+                error: "database sync failed".into(),
+                source_tags: Some(SourceTagOutput {
+                    tags: Some(tags.clone()),
+                    file_saved: true,
+                    refresh_error: None,
+                }),
+            },
+        };
+        let value = serde_json::to_value(super::receipt_json(&partial)).unwrap();
+        assert_eq!(value["status"], "Failed");
+        assert_eq!(value["error"], "database sync failed");
+        assert_eq!(value["source_file_saved"], true);
+        assert_eq!(value["source_tags"], serde_json::to_value(tags).unwrap());
+        assert_eq!(
+            super::check_ack(&partial).unwrap_err().to_string(),
+            "Failed: database sync failed"
+        );
+
+        let unknown = CommandReceipt {
+            revision: 9,
+            outcome: CommandOutcome::Unknown("do not automatically retry".into()),
+        };
+        let value = serde_json::to_value(super::receipt_json(&unknown)).unwrap();
+        assert_eq!(value["status"], "Unknown");
+        assert_eq!(value["revision"], 9);
+        assert_eq!(value["source_file_saved"], false);
+        assert!(value["source_tags"].is_null());
+        assert_eq!(
+            super::check_ack(&unknown).unwrap_err().to_string(),
+            "Unknown: do not automatically retry"
         );
     }
 

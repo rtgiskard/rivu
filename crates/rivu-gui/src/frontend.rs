@@ -346,6 +346,7 @@ struct CommandRequest {
 }
 struct QueryRequest {
     query: Query,
+    refresh_state: bool,
     ticket: Option<QueryTicket>,
     owner: QueryTicket,
     reply: oneshot::Sender<QueryResponse>,
@@ -639,6 +640,11 @@ fn query_worker(shared: Arc<Shared>, mut session: ClientSession, receiver: Recei
                 .is_some_and(|ticket| !ticket.is_current())
         {
             shared.query_error(scope, QueryError::Cancelled)
+        } else if request.refresh_state
+            && response.result.is_ok()
+            && let Err(error) = shared.refresh_state(&mut session)
+        {
+            shared.query_error(scope, QueryError::from(error))
         } else {
             response
         };
@@ -768,14 +774,19 @@ impl FrontendHandle {
         self
     }
     pub(crate) async fn query_for_gui(&self, query: Query) -> QueryResponse {
-        self.query_with_ticket(query, None, REPLY_TIMEOUT).await
+        self.query_with_ticket(query, None, REPLY_TIMEOUT, false)
+            .await
+    }
+    pub(crate) async fn query_and_refresh_state(&self, query: Query) -> QueryResponse {
+        self.query_with_ticket(query, None, REPLY_TIMEOUT, true)
+            .await
     }
     pub(crate) async fn query_if_current(
         &self,
         query: Query,
         ticket: QueryTicket,
     ) -> QueryResponse {
-        self.query_with_ticket(query, Some(ticket), REPLY_TIMEOUT)
+        self.query_with_ticket(query, Some(ticket), REPLY_TIMEOUT, false)
             .await
     }
     async fn query_with_ticket(
@@ -783,6 +794,7 @@ impl FrontendHandle {
         query: Query,
         ticket: Option<QueryTicket>,
         duration: std::time::Duration,
+        refresh_state: bool,
     ) -> QueryResponse {
         let scope = QueryRevisionScope::for_query(&query);
         if ticket.as_ref().is_some_and(|ticket| !ticket.is_current()) {
@@ -792,6 +804,7 @@ impl FrontendHandle {
         let mut owner = QueryEpoch::default();
         let request = QueryRequest {
             query,
+            refresh_state,
             ticket: ticket.clone(),
             owner: owner.ticket(),
             reply,
@@ -920,7 +933,7 @@ impl FrontendHandle {
 mod tests {
     use super::*;
     use crate::test_support::ConfigFixture;
-    use rivu_protocol::response::Ack;
+    use rivu_protocol::wire::{CommandOutcome, CommandOutput, CommandReceipt, SourceTagOutput};
     use std::time::Duration;
 
     fn fixture() -> (tempfile::TempDir, crate::test_support::CoreRuntime) {
@@ -1073,7 +1086,25 @@ mod tests {
     #[test]
     fn shutdown_retains_admission_after_failed_unknown_or_successful_ack() {
         let (_directory, runtime) = fixture();
-        for status in [AckStatus::Failed, AckStatus::Unknown, AckStatus::Succeeded] {
+        for (status, outcome) in [
+            (
+                AckStatus::Failed,
+                CommandOutcome::Failed {
+                    error: "Command failed".into(),
+                    source_tags: None,
+                },
+            ),
+            (
+                AckStatus::Unknown,
+                CommandOutcome::Unknown(
+                    "Command outcome unknown; do not automatically retry".into(),
+                ),
+            ),
+            (
+                AckStatus::Succeeded,
+                CommandOutcome::Succeeded(CommandOutput::None),
+            ),
+        ] {
             let mut handle = runtime.handle.clone();
             let (shutdown, requests) = async_channel::bounded(1);
             handle.shutdown = shutdown;
@@ -1085,7 +1116,11 @@ mod tests {
                     &handle.shared,
                     matches!(request.command, AppCommand::Shutdown),
                     Some(reply),
-                    Ok(Ack::new(status, None, 1).into()),
+                    Ok(CommandReceipt {
+                        revision: 1,
+                        outcome
+                    }
+                    .into()),
                     None,
                     || panic!("shutdown must not refresh"),
                 ),
@@ -1276,9 +1311,11 @@ mod tests {
         let mut session = handle.session().unwrap();
         let stale = session.get_state(StateSections::ALL).unwrap();
         let (reply, receiver) = oneshot::channel();
-        let mut ack = Ack::from_result(Ok(()), 42);
-        ack.scan_id = Some(11);
-        let reply_value: CommandReply = ack.into();
+        let reply_value: CommandReply = CommandReceipt {
+            revision: 42,
+            outcome: CommandOutcome::Succeeded(CommandOutput::Scan(11)),
+        }
+        .into();
         let expected = serde_json::to_value(&reply_value).unwrap();
         let mut refreshes = 0;
         assert!(!finish_command(
@@ -1322,15 +1359,22 @@ mod tests {
     fn fire_and_forget_skips_observation_but_reports_command_failure() {
         let (_directory, runtime) = fixture();
         let handle = &runtime.handle;
-        for (status, error) in [
-            (AckStatus::Succeeded, None),
-            (AckStatus::Failed, Some("playback command failed")),
-        ] {
+        for error in [None, Some("playback command failed")] {
             assert!(!finish_command(
                 &handle.shared,
                 false,
                 None,
-                Ok(Ack::new(status, error.map(str::to_owned), 1).into()),
+                Ok(CommandReceipt {
+                    revision: 1,
+                    outcome: match error {
+                        Some(error) => CommandOutcome::Failed {
+                            error: error.into(),
+                            source_tags: None
+                        },
+                        None => CommandOutcome::Succeeded(CommandOutput::None),
+                    },
+                }
+                .into()),
                 None,
                 || panic!("fire-and-forget commands must not refresh"),
             ));
@@ -1341,9 +1385,18 @@ mod tests {
 
     #[test]
     fn failed_ack_and_successful_observation_remain_independent() {
-        let mut ack = Ack::new(AckStatus::Failed, Some("partially committed".into()), 73);
-        ack.source_file_saved = true;
-        let reply_value: CommandReply = ack.into();
+        let reply_value: CommandReply = CommandReceipt {
+            revision: 73,
+            outcome: CommandOutcome::Failed {
+                error: "partially committed".into(),
+                source_tags: Some(SourceTagOutput {
+                    tags: None,
+                    file_saved: true,
+                    refresh_error: None,
+                }),
+            },
+        }
+        .into();
         let expected = serde_json::to_value(&reply_value).unwrap();
         let (_directory, runtime) = fixture();
         let (reply, receiver) = oneshot::channel();
@@ -1599,6 +1652,7 @@ mod tests {
                 Query::Track { track_id: i64::MAX },
                 None,
                 Duration::from_millis(10),
+                false,
             ));
             finished.send(response).unwrap();
         });
@@ -1697,6 +1751,7 @@ mod tests {
                 .queries
                 .try_send(QueryRequest {
                     query: Query::LibraryStats,
+                    refresh_state: false,
                     ticket: None,
                     owner: QueryEpoch::default().ticket(),
                     reply: occupied_reply,
@@ -1706,7 +1761,7 @@ mod tests {
         let query = Query::Track { track_id: 42 };
         let submitted = query.stamp(handle.gui_snapshot().query_revisions_for(&query));
         let mut pending =
-            Box::pin(handle.query_with_ticket(query, Some(ticket.clone()), Duration::ZERO));
+            Box::pin(handle.query_with_ticket(query, Some(ticket.clone()), Duration::ZERO, false));
         assert!(pending.as_mut().now_or_never().is_none());
         publish_track_metadata(&handle.shared, 42);
         drop(requests.try_recv().unwrap());

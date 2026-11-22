@@ -2,16 +2,12 @@ use super::queue::QueueRefresh;
 use super::*;
 use anyhow::{bail, ensure};
 
-#[derive(Debug, PartialEq)]
-pub(super) enum CommandOutcome {
-    Immediate,
-    Scan(u64),
-    Relocation(u64),
-    Processing(u64),
+#[derive(Debug)]
+pub(super) enum CommandExecution {
+    Complete(CommandOutput),
     DeferredExport,
     DeferredOptimization,
     DeferredSourceTags,
-    SourceTags(rivu_format::tags::TagValues, Option<String>),
 }
 
 #[derive(Debug)]
@@ -104,7 +100,7 @@ impl Core {
     pub(in crate::core) fn command(
         &mut self,
         command: Command,
-    ) -> std::result::Result<CommandOutcome, CommandError> {
+    ) -> std::result::Result<CommandExecution, CommandError> {
         // Scan failures with an awaiting caller belong to that library surface;
         // fire-and-forget failures still reach the shared system error.
         let library_owned = matches!(
@@ -113,7 +109,7 @@ impl Core {
         );
         let result = (|| {
             if self.database_maintenance_active() && self.maintenance_control(&command)? {
-                return Ok(CommandOutcome::Immediate);
+                return Ok(CommandExecution::Complete(CommandOutput::None));
             }
             self.apply_command(command)
         })();
@@ -123,12 +119,12 @@ impl Core {
         })
     }
 
-    fn apply_command(&mut self, command: Command) -> Result<CommandOutcome> {
+    fn apply_command(&mut self, command: Command) -> Result<CommandExecution> {
         self.source_tag_control(&command)?;
         match command {
             Command::LoadSourceTags { track_id, encoding } => {
                 self.start_source_tags(track_id, encoding, None)?;
-                return Ok(CommandOutcome::DeferredSourceTags);
+                return Ok(CommandExecution::DeferredSourceTags);
             }
             Command::SaveSourceTags {
                 track_id,
@@ -140,7 +136,7 @@ impl Core {
                     rivu_format::tags::TagEncoding::Declared,
                     Some((tags, *expected)),
                 )?;
-                return Ok(CommandOutcome::DeferredSourceTags);
+                return Ok(CommandExecution::DeferredSourceTags);
             }
             Command::SyncTrackTags {
                 track_id,
@@ -152,11 +148,23 @@ impl Core {
                 if tags.release_date.as_deref() == Some("") {
                     tags.release_date = None;
                 }
-                return Ok(CommandOutcome::SourceTags(tags, warning));
+                return Ok(CommandExecution::Complete(CommandOutput::SourceTags(
+                    SourceTagOutput {
+                        tags: Some(tags),
+                        file_saved: false,
+                        refresh_error: warning,
+                    },
+                )));
             }
             Command::RetrySourceTagSync { track_id, tags } => {
                 let (tags, warning) = self.commit_saved_tags(track_id, Some(&tags))?;
-                return Ok(CommandOutcome::SourceTags(tags, warning));
+                return Ok(CommandExecution::Complete(CommandOutput::SourceTags(
+                    SourceTagOutput {
+                        tags: Some(tags),
+                        file_saved: false,
+                        refresh_error: warning,
+                    },
+                )));
             }
             Command::TransferCollection {
                 source,
@@ -200,7 +208,7 @@ impl Core {
                 }
                 let count = self.store.transfer_collection(&source, destination)?;
                 if count == 0 {
-                    return Ok(CommandOutcome::Immediate);
+                    return Ok(CommandExecution::Complete(CommandOutput::None));
                 }
                 match destination {
                     CollectionDestination::Queue { .. } => {
@@ -218,12 +226,14 @@ impl Core {
                 self.queue_mutation_committed(QueueRefresh::Projection)?;
             }
             Command::Scan { paths, force } => {
-                return self.scan(paths, force).map(CommandOutcome::Scan);
+                return self
+                    .scan(paths, force)
+                    .map(|id| CommandExecution::Complete(CommandOutput::Scan(id)));
             }
             Command::CheckOtherTracks { force } => {
                 return self
                     .start_other_tracks_check(force)
-                    .map(CommandOutcome::Scan);
+                    .map(|id| CommandExecution::Complete(CommandOutput::Scan(id)));
             }
             Command::QueueExternalPaths {
                 paths,
@@ -232,7 +242,7 @@ impl Core {
             } => {
                 return self
                     .start_external_admission(paths, index, expected_revision)
-                    .map(CommandOutcome::Scan);
+                    .map(|id| CommandExecution::Complete(CommandOutput::Scan(id)));
             }
             Command::CancelScan { id } => self.cancel_scan(id)?,
             Command::RelocateTrack {
@@ -241,7 +251,7 @@ impl Core {
             } => {
                 return self
                     .relocate_track(source_id, target_id)
-                    .map(CommandOutcome::Relocation);
+                    .map(|id| CommandExecution::Complete(CommandOutput::Relocation(id)));
             }
             Command::CancelRelocation { id } => self.cancel_relocation(id)?,
             Command::KeepTrackIndependent { track_id } => self.keep_track_independent(track_id)?,
@@ -264,15 +274,19 @@ impl Core {
             } => {
                 return self
                     .processing_graph_run(track_id, target, mode)
-                    .map(CommandOutcome::Processing);
+                    .map(|id| CommandExecution::Complete(CommandOutput::Processing(id)));
             }
             Command::ProcessingGraphAudition { id, node } => {
-                return self
-                    .processing_graph_audition(id, node)
-                    .map(|id| id.map_or(CommandOutcome::Immediate, CommandOutcome::Processing));
+                return self.processing_graph_audition(id, node).map(|id| {
+                    CommandExecution::Complete(
+                        id.map_or(CommandOutput::None, CommandOutput::Processing),
+                    )
+                });
             }
             Command::AudioExport { request } => {
-                return self.audio_export(request).map(CommandOutcome::Processing);
+                return self
+                    .audio_export(request)
+                    .map(|id| CommandExecution::Complete(CommandOutput::Processing(id)));
             }
             Command::ProbeAudioExportFormats => self.probe_audio_export_formats(),
             Command::StartProcessing {
@@ -282,7 +296,7 @@ impl Core {
             } => {
                 return self
                     .start_processing(track_id, operation, profile)
-                    .map(CommandOutcome::Processing);
+                    .map(|id| CommandExecution::Complete(CommandOutput::Processing(id)));
             }
             Command::CancelProcessing { id } => self.cancel_processing(id)?,
             Command::AuditionProcessing {
@@ -293,7 +307,11 @@ impl Core {
             } => {
                 return self
                     .audition_processing(id, mode, vocal_gain_db, accompaniment_gain_db)
-                    .map(|id| id.map_or(CommandOutcome::Immediate, CommandOutcome::Processing));
+                    .map(|id| {
+                        CommandExecution::Complete(
+                            id.map_or(CommandOutput::None, CommandOutput::Processing),
+                        )
+                    });
             }
             Command::Play { track_id } => {
                 let existing = self.store.queued_track(track_id)?;
@@ -332,7 +350,7 @@ impl Core {
                 {
                     self.seek((self.state.playback.position + delta).max(0.0))?;
                 }
-                return Ok(CommandOutcome::Immediate);
+                return Ok(CommandExecution::Complete(CommandOutput::None));
             }
             Command::Volume { value } => {
                 if !value.is_finite() || !(0.0..=1.0).contains(&value) {
@@ -554,11 +572,13 @@ impl Core {
                         .into_owned()
                 });
                 Store::validate_playlist_name(&name)?;
-                return self.import_playlist(path, name).map(CommandOutcome::Scan);
+                return self
+                    .import_playlist(path, name)
+                    .map(|id| CommandExecution::Complete(CommandOutput::Scan(id)));
             }
             Command::ExportPlaylist { playlist_id, path } => {
                 self.export_playlist(playlist_id, &path)?;
-                return Ok(CommandOutcome::DeferredExport);
+                return Ok(CommandExecution::DeferredExport);
             }
             Command::EditTrack {
                 track_id,
@@ -595,7 +615,7 @@ impl Core {
             }
             Command::DismissError => {
                 self.state.system.last_error = None;
-                return Ok(CommandOutcome::Immediate);
+                return Ok(CommandExecution::Complete(CommandOutput::None));
             }
             Command::DismissScanResult => {
                 if !self.state.system.scanning {
@@ -604,20 +624,20 @@ impl Core {
                     self.state.system.scan_task_id = None;
                     self.state.system.scan_message.clear();
                 }
-                return Ok(CommandOutcome::Immediate);
+                return Ok(CommandExecution::Complete(CommandOutput::None));
             }
             Command::MutateConfig { change } => self.mutate_config(change)?,
             Command::SeekQueue { queue_id, seconds } => {
                 if self.state.queue.current_id == Some(queue_id) {
                     self.seek(seconds)?;
                 }
-                return Ok(CommandOutcome::Immediate);
+                return Ok(CommandExecution::Complete(CommandOutput::None));
             }
             Command::OptimizeDatabase => {
                 self.optimize_database()?;
-                return Ok(CommandOutcome::DeferredOptimization);
+                return Ok(CommandExecution::DeferredOptimization);
             }
         }
-        Ok(CommandOutcome::Immediate)
+        Ok(CommandExecution::Complete(CommandOutput::None))
     }
 }

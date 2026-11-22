@@ -288,10 +288,12 @@ fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
         index: None,
         expected_revision: None,
     }));
-    assert_eq!(ack.status, AckStatus::Succeeded);
-    let id = ack
-        .scan_id
-        .expect("admitted external files expose a media task identity");
+    assert_eq!(ack.status(), AckStatus::Succeeded);
+    let id = (match ack.output() {
+        Some(CommandOutput::Scan(value)) => Some(*value),
+        _ => None,
+    })
+    .expect("admitted external files expose a media task identity");
     let ViewResponse::ScanTask(status) = handle.query(Query::ScanTask { id }).result.unwrap()
     else {
         panic!("expected active task")
@@ -302,7 +304,7 @@ fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
     control.request_shutdown().unwrap();
     let core = worker.join().unwrap();
     // Shutdown may cancel preparation or join Saving, but the same retained task
-    // must truthfully distinguish those outcomes; the admission Ack is not a commit.
+    // must truthfully distinguish those outcomes; the admission CommandReceipt is not a commit.
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("expected retained task")
     };

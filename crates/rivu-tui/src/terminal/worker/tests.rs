@@ -666,7 +666,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         complete_test_handshake, complete_test_handshake_for_instance, read_test_command,
         reply_test_command,
     };
-    use rivu_protocol::response::{Ack, AckStatus};
+    use rivu_protocol::wire::CommandReceipt;
 
     if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
         return;
@@ -692,7 +692,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
             assert!(
                 matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
             );
-            reply_test_command(&mut stream, Ack::new(AckStatus::Succeeded, None, 2).into());
+            reply_test_command(&mut stream, CommandReceipt::from_result(Ok(()), 2).into());
         });
         let worker = spawn_command_worker(directory.path(), 1);
         assert!(
@@ -968,10 +968,7 @@ fn command_shutdown_stops_real_core_and_publishes_terminal_watch_state() {
 #[test]
 fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
     use ipc::{complete_test_handshake, read_test_request, reply_test_command};
-    use rivu_protocol::{
-        response::AckStatus,
-        wire::{WireCommand, WireRequest},
-    };
+    use rivu_protocol::wire::{WireCommand, WireRequest};
 
     if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
         return;
@@ -988,11 +985,12 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
             if rejected {
                 reply_test_command(
                     &mut stream,
-                    rivu_protocol::response::Ack::new(
-                        AckStatus::NotAdmitted,
-                        Some("shutdown rejected".into()),
-                        0,
-                    )
+                    rivu_protocol::wire::CommandReceipt {
+                        revision: 0,
+                        outcome: rivu_protocol::wire::CommandOutcome::NotAdmitted(
+                            "shutdown rejected".into(),
+                        ),
+                    }
                     .into(),
                 );
             }

@@ -9,7 +9,7 @@ use crate::{
     AppCommand,
     model::{Command, ConfigurationState, DatabaseOptimization, Query, SystemState},
     response::{
-        Ack, AckStatus, QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections,
+        AckStatus, QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections,
         StateWatch,
     },
 };
@@ -1882,46 +1882,45 @@ pub struct SourceTagOutput {
     pub refresh_error: Option<String>,
 }
 
-impl From<Ack> for CommandReply {
-    fn from(ack: Ack) -> Self {
-        let source_tags = (ack.source_tags.is_some()
-            || ack.source_file_saved
-            || ack.source_refresh_error.is_some())
-        .then_some(SourceTagOutput {
-            tags: ack.source_tags,
-            file_saved: ack.source_file_saved,
-            refresh_error: ack.source_refresh_error,
-        });
-        let outcome =
-            match ack.status {
-                AckStatus::Succeeded => CommandOutcome::Succeeded(if let Some(id) = ack.scan_id {
-                    CommandOutput::Scan(id)
-                } else if let Some(id) = ack.relocation_id {
-                    CommandOutput::Relocation(id)
-                } else if let Some(id) = ack.processing_id {
-                    CommandOutput::Processing(id)
-                } else if let Some(report) = ack.database_optimization {
-                    CommandOutput::DatabaseOptimization(report)
-                } else if let Some(source_tags) = source_tags {
-                    CommandOutput::SourceTags(source_tags)
-                } else {
-                    CommandOutput::None
-                }),
-                AckStatus::Failed => CommandOutcome::Failed {
-                    error: ack.error.unwrap_or_else(|| "Command failed".into()),
-                    source_tags,
-                },
-                AckStatus::NotAdmitted => CommandOutcome::NotAdmitted(
-                    ack.error.unwrap_or_else(|| "Command not admitted".into()),
-                ),
-                AckStatus::Unknown => CommandOutcome::Unknown(ack.error.unwrap_or_else(|| {
-                    "Command outcome unknown; do not automatically retry".into()
-                })),
-            };
-        Self::Receipt(CommandReceipt {
-            revision: ack.revision,
-            outcome,
-        })
+impl CommandReceipt {
+    pub fn from_result(result: anyhow::Result<()>, revision: u64) -> Self {
+        Self::from_output(result.map(|()| CommandOutput::None), revision)
+    }
+
+    pub fn from_output(result: anyhow::Result<CommandOutput>, revision: u64) -> Self {
+        let outcome = match result {
+            Ok(output) => CommandOutcome::Succeeded(output),
+            Err(error) => CommandOutcome::Failed {
+                error: format!("{error:#}"),
+                source_tags: None,
+            },
+        };
+        Self { revision, outcome }
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(self.outcome, CommandOutcome::Succeeded(_))
+    }
+
+    pub fn status(&self) -> AckStatus {
+        self.outcome.status()
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.outcome.error()
+    }
+
+    pub fn output(&self) -> Option<&CommandOutput> {
+        match &self.outcome {
+            CommandOutcome::Succeeded(output) => Some(output),
+            _ => None,
+        }
+    }
+}
+
+impl From<CommandReceipt> for CommandReply {
+    fn from(receipt: CommandReceipt) -> Self {
+        Self::Receipt(receipt)
     }
 }
 

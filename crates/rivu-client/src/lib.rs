@@ -550,12 +550,12 @@ mod tests {
     use super::*;
     use rivu_protocol::{
         model::Command,
-        response::Ack,
         test_support::{
             complete_test_handshake, complete_test_handshake_for_instance, read_test_command,
             read_test_request, reply_test_command, write_test_response,
         },
         transport::encode_response_frame_into,
+        wire::CommandReceipt,
         wire::{HelloResponse, wire_state},
     };
     use std::sync::{Condvar, Mutex};
@@ -657,7 +657,7 @@ mod tests {
             // Advance the response clock, then wait until the client's timeout
             // branch has observed it before making the response readable.
             clock.advance_and_wait_for_poll(Duration::from_secs(121));
-            reply_test_command(&mut stream, Ack::from_result(Ok(()), 17).into());
+            reply_test_command(&mut stream, CommandReceipt::from_result(Ok(()), 17).into());
         });
 
         let ack = client.request_command(Command::OptimizeDatabase).unwrap();
@@ -697,7 +697,7 @@ mod tests {
             assert!(
                 matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
             );
-            reply_test_command(&mut stream, Ack::from_result(Ok(()), 2).into());
+            reply_test_command(&mut stream, CommandReceipt::from_result(Ok(()), 2).into());
         });
         let mut client = client_session(directory.path());
         client.response_clock = Some(clock);
@@ -1121,7 +1121,7 @@ mod tests {
                     assert!(matches!(request, WireRequest::WaitState(_)));
                     WireResponse::Error("Interrupted state wait".into())
                 } else {
-                    WireResponse::Command(Ack::from_result(Ok(()), 1).into())
+                    WireResponse::Command(CommandReceipt::from_result(Ok(()), 1).into())
                 };
                 write_test_response(&mut stream, response);
                 assert_eq!(stream.read(&mut [0]).unwrap(), 0);

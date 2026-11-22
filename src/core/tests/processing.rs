@@ -1701,8 +1701,8 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
     let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
     assert!(matches!(event, rivu_processing::Event::MixFinished { .. }));
     core.processing_event(event);
-    let (mixed, _) = core.processing.resume_audition().unwrap();
-    let actual = pcm_samples(mixed.as_ref().unwrap());
+    let mixed = core.processing.audition_pcm().unwrap();
+    let actual = pcm_samples(&mixed);
     assert_eq!(actual.len(), original.len());
     let vocal_gain = 10.0_f32.powf(-6.0 / 20.0);
     for ((actual, vocal), backing) in actual
@@ -1717,8 +1717,8 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
     core.processing_bypass(true).unwrap();
     assert_eq!(core.processing.audition_id(), Some(1));
     core.processing_bypass(false).unwrap();
-    let (resumed, _) = core.processing.resume_audition().unwrap();
-    assert_eq!(pcm_samples(resumed.as_ref().unwrap()), actual);
+    let resumed = core.processing.audition_pcm().unwrap();
+    assert_eq!(pcm_samples(&resumed), actual);
 }
 
 #[test]
@@ -4029,7 +4029,7 @@ fn processing_and_audition_create_no_implicit_files() {
     let event = mix_completion(&mut core);
     core.processing_event(event);
     assert_eq!(core.processing.audition_id(), Some(id));
-    assert!(core.processing.resume_audition().unwrap().0.is_some());
+    assert!(core.processing.audition_pcm().is_some());
     assert_eq!(tree(), before);
     assert_eq!(
         std::fs::read(directory.path().join("1.wav")).unwrap(),
@@ -4139,7 +4139,7 @@ fn graph_export_rechecks_canonical_parent_before_publication() {
     assert!(!scratch.join("export.wav").exists());
 }
 
-fn processing_command_ack(core: &mut Core, command: Command) -> Ack {
+fn processing_command_ack(core: &mut Core, command: Command) -> CommandReceipt {
     let ack = operation_ack(core, Operation::Command(command));
     assert!(ack.is_success(), "{ack:?}");
     ack
@@ -4156,13 +4156,19 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
         mode: GraphExecutionMode::Offline,
     };
     assert_eq!(
-        processing_command_ack(&mut core, run()).processing_id,
+        (match processing_command_ack(&mut core, run()).output() {
+            Some(CommandOutput::Processing(value)) => Some(*value),
+            _ => None,
+        }),
         Some(1)
     );
     complete(&mut core);
     core.processing_graph_audition(1, graph_port(1, 0)).unwrap();
     assert_eq!(
-        processing_command_ack(&mut core, run()).processing_id,
+        (match processing_command_ack(&mut core, run()).output() {
+            Some(CommandOutput::Processing(value)) => Some(*value),
+            _ => None,
+        }),
         Some(2)
     );
     let event = completion(&mut core);
@@ -4173,7 +4179,13 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
             node: graph_port(1, 0),
         },
     );
-    assert_eq!(cached.processing_id, None);
+    assert_eq!(
+        (match cached.output() {
+            Some(CommandOutput::Processing(value)) => Some(*value),
+            _ => None,
+        }),
+        None
+    );
     assert_eq!(core.processing.active_id().unwrap(), 2);
     core.processing_event(event);
     let uncached = processing_command_ack(
@@ -4183,7 +4195,13 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
             node: graph_port(2, 0),
         },
     );
-    assert_eq!(uncached.processing_id, Some(3));
+    assert_eq!(
+        (match uncached.output() {
+            Some(CommandOutput::Processing(value)) => Some(*value),
+            _ => None,
+        }),
+        Some(3)
+    );
     core.processing_bypass(true).unwrap();
     complete(&mut core);
     let export = processing_command_ack(
@@ -4200,7 +4218,13 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
             },
         },
     );
-    assert_eq!(export.processing_id, Some(4));
+    assert_eq!(
+        (match export.output() {
+            Some(CommandOutput::Processing(value)) => Some(*value),
+            _ => None,
+        }),
+        Some(4)
+    );
     complete(&mut core);
     let native = processing_command_ack(
         &mut core,
@@ -4210,7 +4234,13 @@ fn processing_acks_identify_only_the_task_admitted_by_that_command() {
             profile: None,
         },
     );
-    assert_eq!(native.processing_id, Some(5));
+    assert_eq!(
+        (match native.output() {
+            Some(CommandOutput::Processing(value)) => Some(*value),
+            _ => None,
+        }),
+        Some(5)
+    );
     complete(&mut core);
 }
 
@@ -4323,7 +4353,13 @@ fn processing_mix_ack_reports_admission_but_synchronous_audition_does_not() {
                 accompaniment_gain_db: 0.0,
             },
         );
-        assert_eq!(ack.processing_id, expected);
+        assert_eq!(
+            (match ack.output() {
+                Some(CommandOutput::Processing(value)) => Some(*value),
+                _ => None,
+            }),
+            expected
+        );
     }
     let event = mix_completion(&mut core);
     core.processing_bypass(true).unwrap();

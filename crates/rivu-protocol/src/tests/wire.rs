@@ -1,7 +1,7 @@
 use crate as rivu_protocol;
 use crate::{
     model::{Command, Query},
-    response::{Ack, QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections},
+    response::{QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections},
     transport::*,
     wire::*,
 };
@@ -878,29 +878,43 @@ fn assert_command_reply_round_trip(
 
 #[test]
 fn verified_source_write_survives_success_warning_and_partial_failure() {
-    use rivu_protocol::{response::AckStatus, wire::CommandReply};
+    use rivu_protocol::{
+        response::AckStatus,
+        wire::{CommandOutcome, CommandOutput, CommandReceipt, SourceTagOutput},
+    };
 
     let tags = rivu_format::tags::TagValues {
         title: "Verified".into(),
         ..Default::default()
     };
     for status in [AckStatus::Succeeded, AckStatus::Failed] {
-        let mut ack = Ack::new(
-            status,
-            (status == AckStatus::Failed).then(|| "database sync failed".into()),
-            42,
+        let warning = (status == AckStatus::Succeeded).then(|| "projection refresh failed".into());
+        let source = SourceTagOutput {
+            tags: Some(tags.clone()),
+            file_saved: true,
+            refresh_error: warning.clone(),
+        };
+        let error = (status == AckStatus::Failed).then_some("database sync failed");
+        let outcome = match error {
+            Some(error) => CommandOutcome::Failed {
+                error: error.into(),
+                source_tags: Some(source),
+            },
+            None => CommandOutcome::Succeeded(CommandOutput::SourceTags(source)),
+        };
+        let decoded = assert_command_reply_round_trip(
+            CommandReceipt {
+                revision: 42,
+                outcome,
+            }
+            .into(),
         );
-        ack.source_tags = Some(tags.clone());
-        ack.source_file_saved = true;
-        ack.source_refresh_error =
-            (status == AckStatus::Succeeded).then(|| "projection refresh failed".into());
-        let decoded = assert_command_reply_round_trip(CommandReply::from(ack.clone()));
         assert_eq!(decoded.status(), status);
-        assert_eq!(decoded.error(), ack.error.as_deref());
+        assert_eq!(decoded.error(), error);
         let source = decoded.receipt().unwrap().outcome.source_tags().unwrap();
         assert!(source.file_saved);
         assert_eq!(source.tags.as_ref(), Some(&tags));
-        assert_eq!(source.refresh_error, ack.source_refresh_error);
+        assert_eq!(source.refresh_error, warning);
     }
 }
 

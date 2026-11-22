@@ -5,7 +5,7 @@ fn wav(path: &Path) {
     rivu_audio::test_support::write_i16_wav(path, 1, 8_000, [123]).unwrap();
 }
 
-fn finish(core: &mut Core) -> Ack {
+fn finish(core: &mut Core) -> CommandReceipt {
     let (reply, response) = oneshot::channel();
     core.active_source_tags.as_mut().unwrap().reply = Some(reply);
     core.shutdown_source_tags();
@@ -49,8 +49,12 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
     let Some(CoreResponse::Ack(ack)) = response.try_recv().unwrap() else {
         panic!("expected source tag reply after owner dispatch");
     };
-    assert!(ack.is_success(), "{:?}", ack.error);
-    let loaded = ack.source_tags.unwrap();
+    assert!(ack.is_success(), "{:?}", ack.error());
+    let loaded = ack
+        .outcome
+        .source_tags()
+        .and_then(|source| source.tags.as_ref())
+        .unwrap();
     assert_eq!(loaded.title, "File title");
     assert_eq!(loaded.release_date.as_deref(), Some("2024-03"));
     assert_eq!(loaded.replaygain_track_gain, Some(-4.5));
@@ -62,7 +66,7 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
     })
     .unwrap();
     let after = core.track(1).unwrap();
-    assert_eq!(source_tags::track_tags(&after), loaded);
+    assert_eq!(&source_tags::track_tags(&after), loaded);
     assert_eq!(after.play_count, before.play_count);
     assert_eq!(after.favorite, before.favorite);
     assert_eq!(after.decoder_hint, before.decoder_hint);
@@ -174,9 +178,18 @@ fn file_save_commits_verified_dates_and_numbers_without_backups() {
     })
     .unwrap();
     let ack = finish(&mut core);
-    assert!(ack.is_success(), "{:?}", ack.error);
-    assert!(ack.source_file_saved);
-    assert_eq!(ack.source_tags, Some(requested.clone()));
+    assert!(ack.is_success(), "{:?}", ack.error());
+    assert!(
+        ack.outcome
+            .source_tags()
+            .is_some_and(|source| source.file_saved)
+    );
+    assert_eq!(
+        ack.outcome
+            .source_tags()
+            .and_then(|source| source.tags.as_ref()),
+        Some(&requested)
+    );
     assert_eq!(source_tags::track_tags(&core.track(1).unwrap()), requested);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     let (hash, size, modified): (Vec<u8>, i64, i64) = connection
@@ -240,7 +253,7 @@ fn file_save_updates_shared_cue_source_but_not_equal_content_at_another_path() {
     })
     .unwrap();
     let ack = finish(&mut core);
-    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(ack.is_success(), "{:?}", ack.error());
     let updated = core.track(2).unwrap();
     assert_ne!(updated.fingerprint, segment.fingerprint);
     assert_eq!(updated.fingerprint, core.track(1).unwrap().fingerprint);
@@ -281,7 +294,7 @@ fn saving_unchanged_database_tags_refreshes_stopped_source_identity() {
     })
     .unwrap();
     let ack = finish(&mut core);
-    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(ack.is_success(), "{:?}", ack.error());
     let stored = core.track(1).unwrap();
     assert_eq!(source_tags::track_tags(&stored), tags);
     let bytes = std::fs::read(&before.path).unwrap();
@@ -308,7 +321,11 @@ fn failed_file_write_does_not_commit_displayed_values_to_database() {
     .unwrap();
     let ack = finish(&mut core);
     assert!(!ack.is_success());
-    assert!(!ack.source_file_saved);
+    assert!(
+        !ack.outcome
+            .source_tags()
+            .is_some_and(|source| source.file_saved)
+    );
     assert_eq!(core.track(1).unwrap(), before);
 }
 
@@ -355,11 +372,25 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
         assert_eq!(recovery.tags, tags);
         assert!(recovery.error.contains("reject database sync"));
         assert!(!ack.is_success(), "{column}");
-        assert!(ack.source_file_saved);
-        assert_eq!(ack.source_tags, Some(tags.clone()));
-        assert!(ack.source_refresh_error.is_none());
         assert!(
-            ack.error
+            ack.outcome
+                .source_tags()
+                .is_some_and(|source| source.file_saved)
+        );
+        assert_eq!(
+            ack.outcome
+                .source_tags()
+                .and_then(|source| source.tags.as_ref()),
+            Some(&tags)
+        );
+        assert!(
+            ack.outcome
+                .source_tags()
+                .and_then(|source| source.refresh_error.as_deref())
+                .is_none()
+        );
+        assert!(
+            ack.error()
                 .unwrap()
                 .contains("retry database synchronization only")
         );
@@ -431,9 +462,18 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
         .unwrap();
 
         let ack = operation_ack(&mut core, Operation::Command(retry()));
-        assert!(ack.is_success(), "{:?}", ack.error);
-        assert!(!ack.source_file_saved);
-        assert_eq!(ack.source_tags, Some(tags.clone()));
+        assert!(ack.is_success(), "{:?}", ack.error());
+        assert!(
+            !ack.outcome
+                .source_tags()
+                .is_some_and(|source| source.file_saved)
+        );
+        assert_eq!(
+            ack.outcome
+                .source_tags()
+                .and_then(|source| source.tags.as_ref()),
+            Some(&tags)
+        );
         let recovered = core.track(1).unwrap();
         assert_eq!(source_tags::track_tags(&recovered), tags);
         assert_eq!(recovered.fingerprint.as_deref(), Some(fingerprint.as_str()));
@@ -484,7 +524,12 @@ fn postcommit_refresh_failure_is_not_a_retryable_database_failure() {
         let mut ack = finish(&mut core);
         if recover_first {
             assert!(!ack.is_success());
-            assert!(ack.source_refresh_error.is_none());
+            assert!(
+                ack.outcome
+                    .source_tags()
+                    .and_then(|source| source.refresh_error.as_deref())
+                    .is_none()
+            );
             connection
                 .execute_batch("DROP TRIGGER reject_tags;")
                 .unwrap();
@@ -496,11 +541,23 @@ fn postcommit_refresh_failure_is_not_a_retryable_database_failure() {
                 }),
             );
         }
-        assert!(ack.is_success(), "{:?}", ack.error);
-        assert_eq!(ack.source_file_saved, !recover_first);
-        assert_eq!(ack.source_tags, Some(tags.clone()));
+        assert!(ack.is_success(), "{:?}", ack.error());
+        assert_eq!(
+            ack.outcome
+                .source_tags()
+                .is_some_and(|source| source.file_saved),
+            !recover_first
+        );
+        assert_eq!(
+            ack.outcome
+                .source_tags()
+                .and_then(|source| source.tags.as_ref()),
+            Some(&tags)
+        );
         assert!(
-            ack.source_refresh_error
+            ack.outcome
+                .source_tags()
+                .and_then(|source| source.refresh_error.as_deref())
                 .unwrap()
                 .contains("File and database saved; refresh failed")
         );

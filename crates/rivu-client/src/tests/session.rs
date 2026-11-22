@@ -39,7 +39,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
         ));
         reply_test_command(
             &mut stream,
-            Ack::from_result(Err(anyhow::anyhow!("rejected")), 3).into(),
+            CommandReceipt::from_result(Err(anyhow::anyhow!("rejected")), 3).into(),
         );
         assert!(matches!(
             read_test_query(&mut stream),
@@ -109,7 +109,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         );
         let mut frame = Vec::new();
         encode_response_frame_into(
-            &WireResponse::Command(Ack::from_result(Ok(()), 1).into()),
+            &WireResponse::Command(CommandReceipt::from_result(Ok(()), 1).into()),
             &mut frame,
         )
         .unwrap();
@@ -122,7 +122,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         assert!(
             matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
         );
-        reply_test_command(&mut stream, Ack::from_result(Ok(()), 2).into());
+        reply_test_command(&mut stream, CommandReceipt::from_result(Ok(()), 2).into());
     });
     let mut session = client_session(directory.path());
     session.bind_instance(1).unwrap();
@@ -302,7 +302,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
         assert!(
             matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
         );
-        reply_test_command(&mut stream, Ack::from_result(Ok(()), 2).into());
+        reply_test_command(&mut stream, CommandReceipt::from_result(Ok(()), 2).into());
     });
     let mut session = client_session(directory.path());
     assert!(

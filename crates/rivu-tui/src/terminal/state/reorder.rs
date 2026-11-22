@@ -466,7 +466,10 @@ mod tests {
             apply_command_completion,
             worker::{CommandCompletion, CommandFeedback},
         };
-        use rivu_protocol::response::{Ack, AckStatus};
+        use rivu_protocol::{
+            response::AckStatus,
+            wire::{CommandOutcome, CommandReceipt},
+        };
 
         for ack_first in [true, false] {
             for transport_error in [true, false] {
@@ -483,7 +486,13 @@ mod tests {
                     })
                     .into())
                 } else {
-                    Ok(Ack::new(AckStatus::Unknown, None, 0).into())
+                    Ok(CommandReceipt {
+                        revision: 0,
+                        outcome: CommandOutcome::Unknown(
+                            "Command outcome unknown; do not automatically retry".into(),
+                        ),
+                    }
+                    .into())
                 };
                 apply_command_completion(
                     &mut tui.ui,

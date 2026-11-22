@@ -356,11 +356,28 @@ impl Core {
             self.state.system.last_error = Some(format!("{error:#}"));
         }
         self.publish();
-        let mut ack = Ack::from_result(result.result, self.state.system.revision);
-        ack.source_tags = result.tags;
-        ack.source_file_saved = result.file_saved;
-        ack.source_refresh_error = refresh_error;
         if let Some(reply) = task.reply.take() {
+            let source_tags = (result.tags.is_some()
+                || result.file_saved
+                || refresh_error.is_some())
+            .then_some(SourceTagOutput {
+                tags: result.tags,
+                file_saved: result.file_saved,
+                refresh_error,
+            });
+            let outcome = match result.result {
+                Ok(()) => CommandOutcome::Succeeded(
+                    source_tags.map_or(CommandOutput::None, CommandOutput::SourceTags),
+                ),
+                Err(error) => CommandOutcome::Failed {
+                    error: format!("{error:#}"),
+                    source_tags,
+                },
+            };
+            let ack = CommandReceipt {
+                revision: self.state.system.revision,
+                outcome,
+            };
             let _ = reply.send(CoreResponse::Ack(ack));
         }
     }

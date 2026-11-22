@@ -333,7 +333,7 @@ fn synchronous_projection_refreshes_do_not_admit_duplicate_background_reads() {
             _ => Command::CreatePlaylist { name: "New".into() },
         };
         let ack = operation_ack(&mut core, Operation::Command(command));
-        assert!(ack.is_success(), "{entry}: {:?}", ack.error);
+        assert!(ack.is_success(), "{entry}: {:?}", ack.error());
         assert!(!core.projections.track_total);
         assert!(!core.projections.playlist_total);
         assert!(!core.transport.history_pending);
@@ -377,7 +377,7 @@ fn remaining_dirty_domains_recover_once_and_failures_wait_for_new_demand() {
         &mut core,
         Operation::Command(Command::RemoveHistory { track_ids: vec![1] }),
     );
-    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(ack.is_success(), "{:?}", ack.error());
     assert!(core.projections.in_flight);
     assert!(!core.transport.history_pending);
     transition.finish(false);
@@ -442,7 +442,7 @@ fn synchronous_refresh_does_not_retire_an_admitted_projection_worker() {
         &mut core,
         Operation::Command(Command::RemoveTracks { track_ids: vec![2] }),
     );
-    assert!(ack.is_success(), "{:?}", ack.error);
+    assert!(ack.is_success(), "{:?}", ack.error());
     assert!(!core.projections.track_total);
     assert!(!core.projections.playlist_total);
     assert!(!core.transport.history_pending);
@@ -488,8 +488,8 @@ fn failed_synchronous_reads_wait_for_new_demand_even_when_the_domain_was_already
                 Command::RemoveHistory { track_ids: vec![1] }
             };
             let ack = operation_ack(&mut core, Operation::Command(command));
-            assert_eq!(ack.status, AckStatus::Failed);
-            assert!(ack.error.as_ref().unwrap().contains("committed"));
+            assert_eq!(ack.status(), AckStatus::Failed);
+            assert!(ack.error().unwrap().contains("committed"));
             assert!(core.transport.history_pending);
             assert!(Arc::ptr_eq(&core.state.library.history, &previous));
             assert!(core.projections.request_attempts.is_none());
@@ -732,7 +732,7 @@ fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
     });
     assert_eq!(late_wakes.try_recv(), Ok(()));
     let ack = futures::executor::block_on(control.shutdown_ack_async(|| 17));
-    assert_eq!(ack.status, AckStatus::Unknown);
+    assert_eq!(ack.status(), AckStatus::Unknown);
 }
 
 #[test]
@@ -907,7 +907,7 @@ fn saturated_command_queue_reports_not_admitted_without_inserting_the_command() 
         Operation::Command(Command::Volume { value: 0.4 }),
         Duration::ZERO,
     ));
-    assert_eq!(ack.status, AckStatus::NotAdmitted);
+    assert_eq!(ack.status(), AckStatus::NotAdmitted);
     assert!(matches!(
         requests.recv_blocking().unwrap().operation,
         Operation::Command(Command::Pause)
@@ -922,7 +922,7 @@ fn admitted_command_timeout_leaves_owner_request_intact_without_replaying() {
         Operation::Command(Command::Volume { value: 0.4 }),
         Duration::ZERO,
     ));
-    assert_eq!(ack.status, AckStatus::Unknown);
+    assert_eq!(ack.status(), AckStatus::Unknown);
     // The owner can still receive and execute this exact request after timeout.
     let request = requests.recv_blocking().unwrap();
     assert!(
@@ -932,7 +932,7 @@ fn admitted_command_timeout_leaves_owner_request_intact_without_replaying() {
         request
             .reply
             .unwrap()
-            .send(CoreResponse::Ack(Ack::from_result(Ok(()), 1)))
+            .send(CoreResponse::Ack(CommandReceipt::from_result(Ok(()), 1)))
             .is_err()
     );
     assert!(requests.try_recv().is_err());
@@ -947,7 +947,7 @@ fn owner_disconnect_after_admission_reports_unknown_not_rejection() {
     let ack = futures::executor::block_on(
         handle.operation_ack_async(Operation::Command(Command::Pause), REPLY_TIMEOUT),
     );
-    assert_eq!(ack.status, AckStatus::Unknown);
+    assert_eq!(ack.status(), AckStatus::Unknown);
     owner.join().unwrap();
 }
 
@@ -1112,7 +1112,7 @@ fn accepted_shutdown_reports_stop_failure_without_rejecting_the_request() {
     let (handle, control, worker, _) = navigation_runtime(core);
     let ack =
         futures::executor::block_on(control.shutdown_ack_async(|| handle.publication_revision()));
-    assert_eq!(ack.status, AckStatus::Succeeded);
+    assert_eq!(ack.status(), AckStatus::Succeeded);
     let core = worker.join().unwrap();
     assert!(core.state.system.shutting_down);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
@@ -1200,10 +1200,19 @@ fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
     let ack = futures::executor::block_on(optimizing);
     assert!(ack.is_success());
     assert_eq!(
-        ack.database_optimization,
+        (match ack.output() {
+            Some(CommandOutput::DatabaseOptimization(value)) => Some(value.clone()),
+            _ => None,
+        }),
         handle.state.read().system.database_optimization
     );
-    assert!(ack.database_optimization.is_some());
+    assert!(
+        (match ack.output() {
+            Some(CommandOutput::DatabaseOptimization(value)) => Some(value.clone()),
+            _ => None,
+        })
+        .is_some()
+    );
     control.request_shutdown().unwrap();
     worker.join().unwrap();
 }
@@ -1349,20 +1358,21 @@ fn unrelated_album_query_failure_preserves_command_results_and_scan_identity() {
             .is_err()
     );
     let accepted = futures::executor::block_on(handle.request_ack(Command::Volume { value: 0.37 }));
-    assert_eq!(accepted.status, AckStatus::Succeeded);
+    assert_eq!(accepted.status(), AckStatus::Succeeded);
     assert_eq!(handle.state.read().playback.volume, 0.37);
     assert!(handle.state.read().system.last_error.is_none());
     let rejected = futures::executor::block_on(handle.request_ack(Command::Volume { value: -1.0 }));
-    assert_eq!(rejected.status, AckStatus::Failed);
-    assert_eq!(rejected.error.as_deref(), Some(original_error.as_str()));
+    assert_eq!(rejected.status(), AckStatus::Failed);
+    assert_eq!(rejected.error(), Some(original_error.as_str()));
     let accepted = futures::executor::block_on(handle.request_ack(Command::Scan {
         paths: vec![directory.path().join("1.wav")],
         force: true,
     }));
-    assert_eq!(accepted.status, AckStatus::Succeeded);
-    let id = accepted
-        .scan_id
-        .expect("accepted scan must remain queryable");
+    assert_eq!(accepted.status(), AckStatus::Succeeded);
+    let Some(CommandOutput::Scan(id)) = accepted.output() else {
+        panic!("accepted scan must remain queryable");
+    };
+    let id = *id;
     match handle.query(Query::ScanTask { id }).result.unwrap() {
         ViewResponse::ScanTask(task) => assert_eq!(task.id, id),
         other => panic!("Unexpected scan response: {other:?}"),

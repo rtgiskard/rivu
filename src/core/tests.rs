@@ -2,6 +2,7 @@ use super::*;
 use crate::library::ScanRecord;
 use crossbeam_channel::{Receiver, bounded};
 use rivu_protocol::query_tracking::QueryEpoch;
+use rivu_protocol::response::AckStatus;
 use std::sync::atomic::Ordering;
 
 mod admission;
@@ -309,7 +310,7 @@ fn recorded_audio(port: &AudioPort, commands: &Receiver<AudioCommand>) -> Vec<Au
     recorded
 }
 
-fn operation_ack(core: &mut Core, operation: Operation) -> Ack {
+fn operation_ack(core: &mut Core, operation: Operation) -> CommandReceipt {
     let (reply, response) = oneshot::channel();
     assert!(
         core.business_event(dispatch::BusinessEvent::Request(Request {

@@ -1028,9 +1028,11 @@ fn scan_start_ack_binds_the_accepted_task() {
         panic!("Expected ack");
     };
     assert!(ack.is_success());
-    let id = ack
-        .scan_id
-        .expect("Accepted scans must expose their identity");
+    let id = (match ack.output() {
+        Some(CommandOutput::Scan(value)) => Some(*value),
+        _ => None,
+    })
+    .expect("Accepted scans must expose their identity");
     let ViewResponse::ScanTask(task) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("Expected task");
     };
@@ -1058,7 +1060,13 @@ fn rejected_library_scan_ack_preserves_unrelated_global_errors() {
         panic!("Expected ack");
     };
     assert!(!ack.is_success());
-    assert!(ack.scan_id.is_none());
+    assert!(
+        (match ack.output() {
+            Some(CommandOutput::Scan(value)) => Some(*value),
+            _ => None,
+        })
+        .is_none()
+    );
     assert!(core.scan_results.is_empty());
     assert_eq!(
         core.state.system.last_error.as_deref(),
@@ -2253,7 +2261,13 @@ fn database_optimization_shutdown_waits_for_final_worker_result() {
         panic!("expected optimization acknowledgment");
     };
     assert!(ack.is_success());
-    assert_eq!(ack.database_optimization, Some(report.clone()));
+    assert_eq!(
+        (match ack.output() {
+            Some(CommandOutput::DatabaseOptimization(value)) => Some(value.clone()),
+            _ => None,
+        }),
+        Some(report.clone())
+    );
     assert_eq!(core.state.system.database_optimization, Some(report));
     assert!(core.shutdown_optimization().is_none());
 }
@@ -2269,8 +2283,14 @@ fn database_optimization_failed_ack_never_uses_a_previous_report() {
     let CoreResponse::Ack(ack) = futures::executor::block_on(receiver).unwrap() else {
         panic!("expected optimization acknowledgment");
     };
-    assert_eq!(ack.status, rivu_protocol::response::AckStatus::Failed);
-    assert!(ack.database_optimization.is_none());
+    assert_eq!(ack.status(), rivu_protocol::response::AckStatus::Failed);
+    assert!(
+        (match ack.output() {
+            Some(CommandOutput::DatabaseOptimization(value)) => Some(value.clone()),
+            _ => None,
+        })
+        .is_none()
+    );
     assert!(core.state.system.database_optimization.is_some());
 }
 

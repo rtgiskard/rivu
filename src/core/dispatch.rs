@@ -268,7 +268,10 @@ impl Core {
             BusinessEvent::Shutdown(control) => {
                 self.state.system.shutting_down = true;
                 self.publish();
-                control.acknowledge(Ack::from_result(Ok(()), self.state.system.revision));
+                control.acknowledge(CommandReceipt::from_result(
+                    Ok(()),
+                    self.state.system.revision,
+                ));
                 if let Err(error) = self.stop() {
                     self.state.system.last_error = Some(format!("{error:#}"));
                     tracing::error!(error = %error, "shutdown_playback_stop_failed");
@@ -443,7 +446,7 @@ impl Core {
                 }
             }
             Operation::Command(command) => {
-                use command::CommandOutcome;
+                use command::CommandExecution;
                 let result = self.command(command);
                 if let Err(error) = &result
                     && (!error.library_owned || request.reply.is_none())
@@ -451,44 +454,32 @@ impl Core {
                     self.state.system.last_error = Some(format!("{:#}", error.error));
                 }
                 self.publish();
-                let mut ack = Ack::from_result(Ok(()), self.state.system.revision);
-                match result {
-                    Ok(CommandOutcome::Immediate) => {}
-                    Ok(CommandOutcome::Scan(id)) => ack.scan_id = Some(id),
-                    Ok(CommandOutcome::Relocation(id)) => ack.relocation_id = Some(id),
-                    Ok(CommandOutcome::Processing(id)) => ack.processing_id = Some(id),
-                    Ok(CommandOutcome::SourceTags(tags, warning)) => {
-                        ack.source_tags = Some(tags);
-                        ack.source_refresh_error = warning;
-                    }
-                    Ok(CommandOutcome::DeferredSourceTags) => {
+                let result = match result {
+                    Ok(CommandExecution::Complete(output)) => Ok(output),
+                    Ok(CommandExecution::DeferredSourceTags) => {
                         self.active_source_tags
                             .as_mut()
                             .expect("source tag operation was accepted")
                             .reply = request.reply;
                         return;
                     }
-                    Ok(CommandOutcome::DeferredExport) => {
+                    Ok(CommandExecution::DeferredExport) => {
                         self.active_export
                             .as_mut()
                             .expect("export was accepted")
                             .reply = request.reply;
                         return;
                     }
-                    Ok(CommandOutcome::DeferredOptimization) => {
+                    Ok(CommandExecution::DeferredOptimization) => {
                         self.active_optimization
                             .as_mut()
                             .expect("optimization was accepted")
                             .reply = request.reply;
                         return;
                     }
-                    Err(error) => {
-                        ack = Ack::from_result(Err(error.error), self.state.system.revision);
-                    }
-                }
-                if let Some(reply) = request.reply {
-                    let _ = reply.send(CoreResponse::Ack(ack));
-                }
+                    Err(error) => Err(error.error),
+                };
+                self.reply_to_command(request.reply, result);
             }
             Operation::MprisSeek { queue_id, offset } => {
                 let result = self.mpris_seek(queue_id, offset);
@@ -497,7 +488,7 @@ impl Core {
                 }
                 self.publish();
                 if let Some(reply) = request.reply {
-                    let _ = reply.send(CoreResponse::Ack(Ack::from_result(
+                    let _ = reply.send(CoreResponse::Ack(CommandReceipt::from_result(
                         result,
                         self.state.system.revision,
                     )));
@@ -510,7 +501,7 @@ impl Core {
                 }
                 self.publish();
                 if let Some(reply) = request.reply {
-                    let _ = reply.send(CoreResponse::Ack(Ack::from_result(
+                    let _ = reply.send(CoreResponse::Ack(CommandReceipt::from_result(
                         result,
                         self.state.system.revision,
                     )));
@@ -584,15 +575,15 @@ impl Core {
         reply: Option<oneshot::Sender<CoreResponse>>,
         result: Result<DatabaseOptimization>,
     ) {
-        let report = result.as_ref().ok().cloned();
         if let Err(error) = &result {
             self.state.system.last_error = Some(format!("{error:#}"));
         }
         self.publish();
         if let Some(reply) = reply {
-            let mut ack = Ack::from_result(result.map(|_| ()), self.state.system.revision);
-            ack.database_optimization = report;
-            let _ = reply.send(CoreResponse::Ack(ack));
+            let _ = reply.send(CoreResponse::Ack(CommandReceipt::from_output(
+                result.map(CommandOutput::DatabaseOptimization),
+                self.state.system.revision,
+            )));
         }
     }
 
@@ -605,8 +596,16 @@ impl Core {
             self.state.system.last_error = Some(format!("{error:#}"));
         }
         self.publish();
+        self.reply_to_command(reply, result.map(|()| CommandOutput::None));
+    }
+
+    pub(in crate::core) fn reply_to_command(
+        &self,
+        reply: Option<oneshot::Sender<CoreResponse>>,
+        result: Result<CommandOutput>,
+    ) {
         if let Some(reply) = reply {
-            let _ = reply.send(CoreResponse::Ack(Ack::from_result(
+            let _ = reply.send(CoreResponse::Ack(CommandReceipt::from_output(
                 result,
                 self.state.system.revision,
             )));

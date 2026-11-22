@@ -151,7 +151,7 @@ impl WindowView {
             }
             ManualAction::ReloadPlayback => {
                 self.metadata.update(cx, |metadata, cx| {
-                    metadata.clear_selection(cx);
+                    metadata.reload_playback(cx);
                 });
             }
             ManualAction::Close(window) => {

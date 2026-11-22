@@ -26,9 +26,10 @@ use rivu_protocol::query_tracking::QueryTicket;
 use rivu_protocol::{
     model::*,
     response::{
-        Ack, AckStatus, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateRequest,
-        StateResponse, StateRevisions, StateSections, TaskOutcome, ViewResponse,
+        PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateRequest, StateResponse,
+        StateRevisions, StateSections, TaskOutcome, ViewResponse,
     },
+    wire::{CommandOutcome, CommandOutput, CommandReceipt, SourceTagOutput},
 };
 use std::{
     collections::VecDeque,
@@ -85,7 +86,7 @@ pub(super) fn retire_optional_worker(
 #[derive(Debug)]
 enum CoreResponse {
     Query(QueryResponse),
-    Ack(Ack),
+    Ack(CommandReceipt),
 }
 enum Operation {
     Query {
@@ -351,19 +352,19 @@ impl CoreHandle {
         self.state.read().revisions
     }
 
-    pub async fn request_ack(&self, command: Command) -> Ack {
+    pub async fn request_ack(&self, command: Command) -> CommandReceipt {
         let duration = command_reply_timeout(&command);
         self.operation_ack_async(Operation::Command(command), duration)
             .await
     }
 
     /// Keep the relative intent and occurrence bound until Core executes it.
-    pub(crate) async fn mpris_seek(&self, queue_id: u64, offset: i64) -> Ack {
+    pub(crate) async fn mpris_seek(&self, queue_id: u64, offset: i64) -> CommandReceipt {
         self.operation_ack_async(Operation::MprisSeek { queue_id, offset }, REPLY_TIMEOUT)
             .await
     }
 
-    pub(crate) async fn mpris_set_position(&self, queue_id: u64, position: i64) -> Ack {
+    pub(crate) async fn mpris_set_position(&self, queue_id: u64, position: i64) -> CommandReceipt {
         self.operation_ack_async(
             Operation::MprisSetPosition { queue_id, position },
             REPLY_TIMEOUT,
@@ -371,25 +372,27 @@ impl CoreHandle {
         .await
     }
 
-    async fn operation_ack_async(&self, operation: Operation, duration: Duration) -> Ack {
+    async fn operation_ack_async(
+        &self,
+        operation: Operation,
+        duration: Duration,
+    ) -> CommandReceipt {
         let (tx, rx) = oneshot::channel();
         let request = Request {
             operation,
             reply: Some(tx),
         };
         if let Err(error) = self.admit(request).await {
-            return Ack::new(
-                AckStatus::NotAdmitted,
-                Some(format!("Core command not admitted: {error}")),
-                self.publication_revision(),
-            );
+            return CommandReceipt {
+                outcome: CommandOutcome::NotAdmitted(format!("Core command not admitted: {error}")),
+                revision: self.publication_revision(),
+            };
         }
         match rivu_protocol::transport::timeout(duration, rx).await {
             Ok(Ok(CoreResponse::Ack(ack))) => ack,
             Ok(Ok(CoreResponse::Query(_))) => unreachable!("command request returned query"),
-            result => Ack::new(
-                AckStatus::Unknown,
-                Some(format!(
+            result => CommandReceipt {
+                outcome: CommandOutcome::Unknown(format!(
                     "Core command outcome unknown: {}; do not automatically retry",
                     match result {
                         Ok(Err(error)) => error.to_string(),
@@ -397,8 +400,8 @@ impl CoreHandle {
                         Ok(Ok(_)) => unreachable!("successful responses matched above"),
                     }
                 )),
-                self.publication_revision(),
-            ),
+                revision: self.publication_revision(),
+            },
         }
     }
 }

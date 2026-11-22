@@ -64,14 +64,26 @@ fn finish_playlist_name(
 #[test]
 fn unknown_playlist_name_requires_dismissal_and_a_new_command() {
     use crossterm::event::KeyEventKind;
-    use rivu_protocol::response::{Ack, AckStatus};
+    use rivu_protocol::{
+        response::AckStatus,
+        wire::{CommandOutcome, CommandReceipt},
+    };
 
     let held_enter = KeyEvent {
         kind: KeyEventKind::Repeat,
         ..KeyEvent::from(KeyCode::Enter)
     };
     for (verb, result) in [
-        ("save", Ok(Ack::new(AckStatus::Unknown, None, 0).into())),
+        (
+            "save",
+            Ok(CommandReceipt {
+                revision: 0,
+                outcome: CommandOutcome::Unknown(
+                    "Command outcome unknown; do not automatically retry".into(),
+                ),
+            }
+            .into()),
+        ),
         (
             "rename",
             Err(anyhow::Error::new(rivu_client::CommandFailure {
@@ -150,7 +162,7 @@ fn unknown_playlist_name_requires_dismissal_and_a_new_command() {
 
 #[test]
 fn rejected_playlist_name_stays_editable_for_retry() {
-    use rivu_protocol::response::{Ack, AckStatus};
+    use rivu_protocol::wire::CommandReceipt;
 
     let mut tui = queue_replace_tui();
     assert!(matches!(
@@ -160,7 +172,7 @@ fn rejected_playlist_name_stays_editable_for_retry() {
     for (message, result) in [
         (
             "duplicate",
-            Ok(Ack::new(AckStatus::Failed, Some("duplicate".into()), 0).into()),
+            Ok(CommandReceipt::from_result(Err(anyhow::anyhow!("duplicate")), 0).into()),
         ),
         ("not sent", Err(anyhow::anyhow!("not sent").into())),
     ] {
@@ -179,7 +191,7 @@ fn rejected_playlist_name_stays_editable_for_retry() {
     }
     finish_playlist_name(
         &mut tui.ui,
-        Ok(Ack::new(AckStatus::Succeeded, None, 0).into()),
+        Ok(CommandReceipt::from_result(Ok(()), 0).into()),
     );
     assert!(tui.ui.playlist_name.is_none());
 }

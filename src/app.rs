@@ -23,7 +23,7 @@ use crossbeam_channel::bounded;
 #[cfg(feature = "gui")]
 use desktop_launcher::DesktopLauncher;
 use futures::{FutureExt, StreamExt};
-use rivu_protocol::{AppCommand, model::Command, response::Ack};
+use rivu_protocol::{AppCommand, model::Command, wire::CommandReceipt};
 use std::{
     io::Write,
     panic::AssertUnwindSafe,
@@ -131,11 +131,11 @@ impl AppHandle {
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::Acquire)
     }
-    pub(crate) async fn request_ack_async(&self, command: AppCommand) -> Ack {
+    pub(crate) async fn request_ack_async(&self, command: AppCommand) -> CommandReceipt {
         match command {
             AppCommand::Core(command) => self.core.request_ack(command).await,
             AppCommand::ShowWindow => {
-                Ack::from_result(self.raise(), self.core.publication_revision())
+                CommandReceipt::from_result(self.raise(), self.core.publication_revision())
             }
             AppCommand::Shutdown => {
                 let _ = self.request_shutdown();
