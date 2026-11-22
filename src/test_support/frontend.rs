@@ -2,7 +2,7 @@
 use crate::{app::AppHandle, core::CoreRuntime, ipc};
 use anyhow::Result;
 use rivu_format::config::Config;
-use std::path::Path;
+use std::{fs, path::Path};
 
 /// Runs the same command and two PCM services as the application, without
 /// process-wide logging, signals, desktop launching or desktop-bus services.
@@ -14,10 +14,14 @@ pub struct FrontendFixture {
     runtime: CoreRuntime,
     // Storage authority outlives every service, including partial teardown.
     _owner: ipc::SocketOwner,
+    // Drop after the listener so every fork that inherits it also pins the inode.
+    _directory_identity: fs::File,
 }
 
 impl FrontendFixture {
     pub fn start(data_dir: &Path, config: &Path) -> Result<Self> {
+        fs::create_dir_all(data_dir)?;
+        let directory_identity = fs::File::open(data_dir)?;
         let owner = ipc::SocketOwner::acquire(data_dir)?;
         let runtime = CoreRuntime::start(data_dir, config)?;
         let app = AppHandle::new(&runtime, data_dir);
@@ -41,6 +45,7 @@ impl FrontendFixture {
             pcm: Some(pcm),
             runtime,
             _owner: owner,
+            _directory_identity: directory_identity,
         })
     }
 

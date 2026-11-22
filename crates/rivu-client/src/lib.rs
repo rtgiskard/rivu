@@ -647,11 +647,10 @@ mod tests {
         }
     }
 
-    fn socket_test_directory() -> tempfile::TempDir {
+    fn socket_test_directory() -> rivu_utils::test_support::SocketTestDirectory {
         let cache =
             std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(".cache");
-        std::fs::create_dir_all(&cache).unwrap();
-        tempfile::tempdir_in(cache).unwrap()
+        rivu_utils::test_support::SocketTestDirectory::new_in(&cache)
     }
 
     fn isolate_socket_test() -> bool {

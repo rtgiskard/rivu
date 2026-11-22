@@ -1,11 +1,17 @@
 use super::*;
+use rivu_utils::test_support::SocketTestDirectory;
 use std::os::unix::{
     fs::{MetadataExt, symlink},
     net::UnixListener,
 };
 
-fn fixture() -> (tempfile::TempDir, Options) {
-    let directory = tempfile::tempdir().unwrap();
+fn socket_test_directory() -> SocketTestDirectory {
+    let cache = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(".cache");
+    SocketTestDirectory::new_in(&cache)
+}
+
+fn fixture() -> (SocketTestDirectory, Options) {
+    let directory = socket_test_directory();
     let options = Options {
         data_dir: directory.path().to_path_buf(),
         config: directory.path().join("config.toml"),
@@ -181,7 +187,7 @@ fn config_preflight_rejects_fifos_without_a_writer_including_symlinks() {
 
 #[test]
 fn explicitly_missing_database_fails_without_creating_it_or_changing_config() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = socket_test_directory();
     let options = Options {
         data_dir: directory.path().to_path_buf(),
         config: directory.path().join("config.toml"),
@@ -258,6 +264,9 @@ fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
 
 #[test]
 fn database_ownership_excludes_apply_even_without_a_migration() {
+    if rivu_utils::test_support::run_in_subprocess(std::time::Duration::from_secs(10)) {
+        return;
+    }
     let (_directory, options) = fixture();
     fs::write(&options.config, "[playback]\n").unwrap();
     let alias = options.data_dir.join("alias");
@@ -453,8 +462,8 @@ fn transactional_change_failure_rolls_back_and_reentry_keeps_distinct_backups() 
     assert!(execute(&options, Mode::Apply).unwrap().backups.is_empty());
 }
 
-fn version_two_fixture() -> (tempfile::TempDir, Options) {
-    let directory = tempfile::tempdir().unwrap();
+fn version_two_fixture() -> (SocketTestDirectory, Options) {
+    let directory = socket_test_directory();
     let options = Options {
         data_dir: directory.path().to_path_buf(),
         config: directory.path().join("config.toml"),
@@ -835,7 +844,7 @@ fn schema_two_preflight_rejects_changed_constraints_and_defaults() {
             "favorite INTEGER NOT NULL DEFAULT 0",
         ),
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = socket_test_directory();
         let options = Options {
             data_dir: directory.path().to_path_buf(),
             config: directory.path().join("config.toml"),
