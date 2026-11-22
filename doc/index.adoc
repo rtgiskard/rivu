@@ -58,8 +58,8 @@ application unless explicitly marked as proposed or historical.
 
 == Project records
 
-* link:90_open_issues.adoc[Open issues and resolution records] — unresolved and
-  deferred issues first; resolved investigations retain their evidence boundaries
+* link:90_open_issues.adoc[Open issues] — unresolved defects and user-facing
+  risks, ordered by impact
 * link:91_design_decisions.adoc[Engineering decisions and tradeoffs] — accepted
   decisions and separately identified unapproved candidates
 * Historical measurements: link:25_gpu_measurements.adoc[GPU] and

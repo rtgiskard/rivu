@@ -1,19 +1,101 @@
-= Open issues and resolution records
+= Open issues
 
-Each entry records its investigation or resolution date. Resolved entries retain
-the original problem and evidence boundary; they are not new verification runs.
-Current behavior belongs in the linked user guides and design documents.
-Cross-cutting alternatives, accepted tradeoffs and reconsideration conditions are
-maintained in link:91_design_decisions.adoc[Engineering conclusions and design decisions].
+Unresolved defects and user-facing risks, ordered by user impact. Each entry
+states the trigger, impact, current boundary or workaround, and status. Remove an
+entry once its defect is fixed; current behavior belongs in the linked guides, and
+accepted tradeoffs and reconsideration conditions in
+link:91_design_decisions.adoc[Engineering conclusions and design decisions].
 
-== Open and deferred
+[[midi-short-sample-loops]]
+== RustySynth can index past short sample loops at high pitch
 
-=== Unmaintained transitive dependencies
+Status: open, upstream; identified 2026-11-19.
 
-Status: identified, unresolved, 2026-11-14. Replacing these dependency chains is
-not part of the implemented direct-dependency upgrade.
+Trigger:: MIDI playback (default `midi` feature) of a note whose per-sample pitch
+step exceeds its SoundFont sample's loop length, such as a very short loop played
+far above its root key.
+Impact:: RustySynth 1.3.8's
+https://github.com/sinshu/rustysynth/blob/8aa60afb3c14be0fd53d3ef40ef44a7ff8b72a45/rustysynth/src/oscillator.rs#L140-L155[oscillator]
+subtracts at most one loop period per output sample, so the position can remain
+past the loop end and eventually index past the sample data. That indexing is
+bounds-checked: rendering panics instead of producing audio.
+Boundary:: Rivu uses the published crate without a downstream patch; validating
+SoundFont table boundaries does not prevent this. Revisit when an upstream release
+handles steps that cross multiple loop periods.
 
-The locked graph retains the following RustSec maintenance advisories:
+[[database-file-aliases]]
+== Different data directories can share one database file
+
+Status: open, deferred 2026-10-29; conditional risk, no corruption observed.
+
+Trigger:: Two data directories whose `library.db` is the same file, for example
+through a symbolic link, hard link or file bind mount.
+Impact:: Exclusive ownership is keyed on the data directory's identity, not the
+database file's, so two hosts, or a host and the maintenance tool, can open the
+same database at once. Hard-linked aliases can also give each host a separate
+WAL file, so crash recovery is not guaranteed, and none of these aliases provide
+the exclusive access the
+link:10_upgrading.adoc#supported-source-formats[database upgrade] assumes.
+Boundary:: Keep one database file per data directory. A fix must define supported
+database aliases and cover both the host and the maintenance tool; a
+maintenance-only lock is insufficient.
+
+[[pipewire-context-retention]]
+== Native PipeWire output reopen retains libdbus allocations
+
+Status: open, reproduced 2026-11-07; upstream cleanup defect unidentified.
+
+Trigger:: Each native output opens its own PipeWire context and destroys it on
+Stop or reopen. Reproduced with PipeWire 1.6.10 and libdbus 1.16.2.
+Impact:: Allocations from the realtime module's libdbus calls remain after context
+destruction: about 3.9 KB in 34 objects per reopen, so growth is slow and
+proportional to reopen count. File descriptors and threads return to baseline.
+Boundary:: Disabling `module-rt` or keeping libdbus loaded largely removes the
+growth, also in a standalone `pw_context` create/destroy loop. These are
+diagnostic controls, not fixes. A fix must change context/module ownership or the
+dependency while preserving realtime scheduling, strict routing, recovery and
+physical retirement; see
+link:91_design_decisions.adoc#unapproved-candidates[unapproved candidates]. This
+retention does not explain <<waveform-rss-retention,waveform RSS growth>>.
+
+[[waveform-rss-retention]]
+== Process RSS stays elevated after full-waveform reads
+
+Status: open, attribution unresolved 2026-11-07; no trimming policy adopted.
+
+Trigger:: Full-waveform reads of long sources that complete or are cancelled by
+track switches.
+Impact:: Task buffers are released, but the allocator keeps the freed space
+resident: after Stop, about 10.7 MiB of free glibc arena remained in a
+240-second stereo test, and glibc in-use arena accounting (not measured RSS) grew
+by 90,160 bytes across 12 further completions and eight cancellations, unattributed.
+A separately reported 28–50 MB growth remains unexplained.
+Boundary:: No leak has been established; the Core-owned PCM window is expected
+residency. PCM transport and summary ownership are in
+link:91_design_decisions.adoc#DEC-006[DEC-006].
+
+[[queue-worker-wait-feedback]]
+== Queue rows lack loading feedback while an obsolete query worker retires
+
+Status: open, deferred 2026-10-18; feedback policy undecided. Found by code
+inspection, not reproduced as a GUI failure.
+
+Trigger:: Queue search replacement or hide/reopen while an earlier page query
+still occupies the physical query worker.
+Impact:: Unloaded rows stay blank without loading text until that worker retires,
+because the 150 ms loading delay starts only when the next page query is
+submitted. Retirement wakes the current demand, so rows do not stall
+permanently.
+Boundary:: Feedback for this interval must follow current demand identity and
+elapsed delay without reviving obsolete search feedback or bypassing the occupied
+worker; see link:22_cache.adoc#query-projection-retention[Query projection retention].
+
+[[unmaintained-dependencies]]
+== Unmaintained transitive dependencies
+
+Status: open, identified 2026-11-14; requires upstream migrations.
+
+The locked graph retains these RustSec maintenance advisories:
 
 * `paste` 1.0.15, through Lofty and platform-specific Metal:
   https://rustsec.org/advisories/RUSTSEC-2024-0436[RUSTSEC-2024-0436]
@@ -25,544 +107,8 @@ The locked graph retains the following RustSec maintenance advisories:
   https://rustsec.org/advisories/RUSTSEC-2026-0370[RUSTSEC-2026-0370] and
   https://rustsec.org/advisories/RUSTSEC-2026-0372[RUSTSEC-2026-0372]
 
-These are unmaintained-package notices, not evidence of an exploitable defect.
-Rivu's direct D-Bus consumers and GPUI's portal and secret-service consumers use
-zbus 6; the old standalone crates remain in the accessibility stack. Removing
-them requires compatible upstream migrations rather
-than forcing a semver-incompatible lockfile substitution. The findings use a
-cached advisory database; they do not establish a current, exhaustive security
-assessment or imply that every platform-specific chain is built on Linux.
-
-The GPUI `v0.2.2` migration removes `rustybuzz` 0.20.1 from the locked graph
-by updating the SVG stack to resvg/usvg 0.50 with `harfrust`.
-
-[[midi-short-sample-loops]]
-=== RustySynth can read past short sample loops at high pitch
-
-Status: unresolved, deferred, 2026-11-19. Rivu uses the published RustySynth
-1.3.8 without a downstream patch.
-
-The https://github.com/sinshu/rustysynth/blob/8aa60afb3c14be0fd53d3ef40ef44a7ff8b72a45/rustysynth/src/oscillator.rs#L140-L155[oscillator]
-subtracts at most one loop period per sample. With a short loop and a large
-pitch step, the sample position can remain outside the loop after wrapping and
-eventually index past the sample data. Validating SoundFont table boundaries
-does not address this playback behavior. Revisit when an upstream release
-handles steps that cross multiple loop periods.
-
-[[pipewire-context-retention]]
-=== Native PipeWire context retirement retains libdbus allocations
-
-Status: reproduced, unresolved, 2026-11-07. No production fix authorized.
-
-On PipeWire 1.6.10 / libdbus 1.16.2, each native output creates a fresh PipeWire
-context. Stop joins its owner and destroys the connection, but allocations from
-the realtime module's libdbus calls remain.
-
-Two isolated runs of debug artifact `0408252db99373b9` used an eight-second
-48 kHz stereo PCM source, three warmup reopens and 120 additional reopens, with
-MPRIS/tray disabled. Exact jemalloc profiles each showed 472,320 retained libdbus
-bytes across 4,080 objects: 3,936 bytes and 34 objects per reopen. Disabling
-`module-rt` reduced total live-byte growth to 992. FD/thread counts returned to
-baseline in a separate glibc run.
-
-A standalone `pw_context` create/destroy loop also reproduces growth; disabling
-the RT module or keeping libdbus loaded greatly reduces it. The exact upstream
-cleanup defect remains unidentified. These controls are not adopted fixes.
-
-Reconsider context/module ownership or a dependency fix while preserving realtime
-scheduling, strict routing, recovery and physical retirement; see
-link:91_design_decisions.adoc#unapproved-candidates[candidates]. This small
-per-reopen retention does not explain GUI/full-waveform RSS growth; observed
-task-buffer release and allocator retention are recorded in
-<<waveform-rss-retention,the waveform RSS investigation>>.
-
-[[waveform-rss-retention]]
-=== Full-waveform buffer release and residual RSS retention
-
-Status: investigated, residual attribution unresolved, 2026-11-07. No trimming
-policy adopted.
-
-The 2026-11-07 nested-Wayland check (debug `98a9d345c85c3292`, glibc 2.44,
-240-second stereo WAVs at 48/44.1 kHz, tray/MPRIS disabled) confirmed that full-read
-completion/cancellation releases task buffers without immediate RSS reclamation.
-After twelve further completions and eight switch-driven cancellations, about
-88 KiB of residual arena growth remained unattributed. Stop left about 10.7 MiB
-of free arena space; the Core-owned PCM window remained resident. This does not
-establish zero leakage or explain another instance's 28--50 MB observation.
-The separate <<pipewire-context-retention,native retention>> remains unresolved.
-PCM transport and summary ownership are retained in
-link:91_design_decisions.adoc#DEC-006[DEC-006].
-
-=== Queue feedback while waiting for a query worker
-
-Status: deferred, 2026-10-18. The open policy question is whether loading
-feedback should include time waiting for an obsolete physical worker to retire.
-
-Queue loading text starts its 150 ms delay when a page query is submitted. After
-search replacement or hide/reopen, unloaded rows can remain blank while an obsolete
-physical worker retires. This is a scheduling observation from code inspection,
-not a reproduced GUI failure or confirmed permanent stall: retirement wakes the
-current demand automatically.
-
-If feedback is extended to this waiting interval, its identity and elapsed delay
-must follow current demand without reviving obsolete search feedback or bypassing
-the occupied worker. Verify search replacement, hide/reopen and failed-page retry
-behind a query longer than 150 ms. See
-link:22_cache.adoc#query-projection-retention[Query projection retention].
-
-=== Different data directories sharing one database file
-
-Status: deferred, 2026-10-29; conditional ownership risk, not observed corruption.
-
-Exclusive ownership identifies the data-directory inode, not the database inode.
-Distinct directories whose `library.db` aliases the same file can therefore
-coexist. SQLite locking does not establish the application's offline migration
-precondition. A fix must define supported database aliases and involve both the
-host and maintenance tool; a maintenance-only lock is insufficient. The
-link:10_upgrading.adoc#supported-source-formats[supported database upgrade] performs
-its transformation under this data-directory exclusion. Database-file alias
-protection remains unresolved.
-
-== Resolved investigations
-
-=== Portal file chooser cache warning
-
-Status: resolved, 2026-11-14. The direct chooser dependency is published `ashpd`
-0.14.0, which includes the upstream Request/Session property-cache fix; no vendor
-backport, Git replacement or log filtering is used.
-
-With 0.13.13, opening a chooser emitted a `Failed to populate properties cache
-via GetAll` warning: the property-cached Request proxy preceded creation of its
-transient portal object. Selection still arrived through the independent
-`Response` signal. Request and Session proxies now disable property caching;
-this does not mean that all transient-object property reads are removed.
-
-Folder selection and cancellation through the GTK portal on isolated Wayland
-confirmed that the selected root is admitted, cancellation leaves roots unchanged,
-and the old cache warning is absent. This resolution covers Rivu's direct chooser
-calls; older `ashpd` versions retained by unrelated transitive dependencies are
-not evidence that these calls still use the old implementation.
-
-Upstream fix:
-https://github.com/bilelmoussaoui/ashpd/commit/e9e38113ad075042fcc48b8401010ca5f905db55[Disable property caching for Request/Session objects].
-
-[[artwork-cold-source-identity]]
-=== Cold embedded artwork can acquire a stale requested source identity
-
-Status: resolved, 2026-11-11. Cold embedded acquisition validates a supplied
-fingerprint against the opened source; historical cache hits remain reusable.
-
-Previously, replacing uncached source A at its path with B could associate B's
-embedded image with A's requested fingerprint. Restoring A or requesting A at a
-missing path still returned B within that manager. The association was not
-observed to persist across managers.
-
-The regression replaces A with a different embedded image at the same path while
-preserving file size and modification time. It rejects the association with A,
-accepts B under B's fingerprint, then recovers A after restoration. Both verified
-historical results survive source removal. Identity rejection is not retained as
-a negative result. The full-source read and fingerprintless boundary are documented
-in link:22_cache.adoc#artwork-uri-leases[Artwork lookup ownership].
-
-[[socket-eof-fixture-gaps]]
-=== Drop-driven socket EOF isolation
-
-Status: resolved and verified, 2026-11-06.
-
-Frontend startup cancellation, IPC abandoned-query admission, query/Watch
-disconnect handling, PCM aggregate disconnect, and GUI full waveform cancellation
-now construct their sockets inside bounded single-test subprocesses. Their
-Drop-driven EOF/cancellation assertions and operation timeouts remain unchanged.
-A controlled socket-pair fork/exec barrier kept a 2-second read from observing EOF
-after local peer close; exec then permitted EOF without retry. This proves the
-missing ownership precondition, not a reproduced failure of these Rust cases.
-
-Directory pins do not close inherited socket FDs. PCM/waveform pipelining fixtures
-with explicit write shutdown do not depend on Drop-driven EOF; unrelated test
-binaries without subprocess entry points retain ordinary concurrency.
-See link:91_design_decisions.adoc#DEC-010[DEC-010].
-
-[[socket-directory-pin-gaps]]
-=== Abstract socket directory identity fixtures
-
-Status: resolved and verified, 2026-11-06.
-
-App ownership/blocking-pool IPC, desktop activation, GUI waveform retirement and
-visual core-instance rejection fixtures now pin their directory identity.
-Redundant forwarding and duplicate gap checks were removed without reducing
-source-authority or actual GUI staging coverage.
-
-Both root and GUI test binaries contain subprocess launches. Without a pin, a
-child could retain an inherited listener after local fixture deletion and, if the
-temporary filesystem recycled its directory inode, a later fixture could collide
-with the stale abstract address. No inode-reuse collision was reproduced in this
-review. Pins and link:#socket-eof-fixture-gaps[EOF isolation] address different
-lifetimes; neither substitutes for the other.
-
-[[neural-unwind-trigger-coverage]]
-=== Neural unwind trigger coverage
-
-Status: resolved and verified, 2026-11-06; normal and negative paths exercised.
-
-`neural_unwind_reaps_live_interpreter_before_failure_event_and_owner_retirement`
-now owns an atomic trigger observation moved into its worker's test-only panic
-hook. The hook marks it immediately before panicking; after terminal delivery the
-test requires that observation before checking child absence or applying Finished.
-The wait/lifeline ownership checks remain unchanged; no error wording is matched.
-
-Before correction, a throwaway write interceptor replaced only `panic_progress.sh`
-with `exit 1`, leaving the test executable unchanged. The TUI-only regression still
-passed with no progress frame or injected panic. This demonstrated false-positive
-unwind coverage, not a production reaping defect. Repeating the same injection
-after correction now fails at the trigger-observation assertion with exit 101;
-the normal injected-panic regression passes in all five root feature combinations.
-Related PID-safe observation:
-link:#neural-retirement-pid-reuse[resolved]; see
-link:91_design_decisions.adoc#DEC-010[DEC-010].
-
-[[retiring-settings-failures]]
-=== Settings failures consumed during playback retirement
-
-Status: resolved in implementation, 2026-11-06.
-
-Stop and audition source replacement consume audio events while retiring playback.
-Their restricted dispatcher previously discarded output and EQ application failures,
-including failures still matching current settings. Shared settings-failure handling
-now preserves request/configuration/generation validation in both dispatch paths;
-retiring terminal events still cannot recurse into Stop or advance navigation.
-A standalone probe executing the extracted production dispatcher lost a current
-failure before correction and passed eight current/stale cases after correction.
-A real Core regression also passed, covering Stop waiting, post-reply draining,
-source replacement and shared-state publication. Neither check exercises a real
-output device. Design:
-link:91_design_decisions.adoc#DEC-011[DEC-011].
-
-[[model-boundary-retirement]]
-=== Obsolete neural PCM boundaries retained through inference
-
-Status: resolved in implementation, 2026-11-06.
-
-Materializing a model input previously released only unreachable original source;
-obsolete model boundaries remained charged until the next inference completed.
-The same reachability traversal now retires both before inference output allocation,
-without dropping boundaries reachable through other branches or storage pinned by
-an aliased input. A standalone probe using the production Engine and real budgeted
-PCM reproduced 164,514 retained bytes where only 82,257 were needed before correction;
-after correction, independent/aliased inputs with and without bypass branches all
-matched expected ownership. This proves PCM lifetime, not model inference or RSS.
-Permanent graph regressions also cover a surviving separation output on another
-port. Synthetic PCM checks with and without default features do not establish
-neural inference or RSS behavior. The PCM budget and model policy are unchanged. Design:
-link:91_design_decisions.adoc#DEC-012[DEC-012].
-
-[[denoise-hum-work-admission]]
-=== Denoise hum arithmetic-work admission
-
-Status: resolved, 2026-11-06. Realtime admission now charges active hum harmonics
-and width-dependent impulse repair. No measured device underrun or audible dropout.
-
-The original realtime estimate did not depend on enabled hum harmonic count,
-although each frame/channel executed every configured notch even with spectral
-Off. The pre-fix public `GraphRunner::plan` / prepare / process probe used
-48 kHz, 18 channels, two serial full-wet Denoise nodes, hum at 50 Hz, spectral
-Off and repair disabled. All configurations were admitted and processed a
-256-frame block with finite output:
-
-[cols="1,1,1",options="header"]
-|===
-|Harmonics per node |Estimated work units/second |Hum scalar arithmetic operations/second
-|1 |248,352,000 |15,552,000
-|8 |248,352,000 |124,416,000
-|32 |248,352,000 |497,664,000
-|===
-
-The final column counts five multiplications and four add/subtracts per notch,
-excluding validation, blending and buffer work. Identical charges despite
-independently increasing notch work exposed the admission gap; these source-derived
-counts are not hardware FLOPs, timings or proof of a device-deadline failure.
-The pre-fix probe linked a locked, no-default-features audio build with SHA-256
-prefixes `c380c04c82f43702` for `crates/rivu-audio/src/graph.rs` and
-`2c2aa07e76bc6336` for `crates/rivu-dsp/src/denoise/processor.rs`.
-
-The corrected planner charges active hum harmonics and width-dependent repair;
-the 300,000,000-unit limit, state admission, format validation, bypass and explicit
-execution-mode semantics are unchanged. Current allowances are documented in
-link:26_audio_processing.adoc[Audio processing budgets].
-
-A standalone post-fix execution admitted the one-harmonic graph at 269,088,000
-units/second and matched 4,096 frames exactly against two direct DSP processors.
-The eight- and 32-harmonic graphs were rejected. At 48 kHz stereo with six repair
-nodes, width 1 remained admissible while width 8 was rejected. Behavioral
-regressions cover disabled effects, Wet=0 and independently disabled hum/repair
-with spectral processing still active; existing bypass format/Profile rejection
-coverage remains unchanged. These are admission and sample-equivalence checks,
-not CPU-time or device-deadline measurements.
-The separate state-budget decision remains
-link:91_design_decisions.adoc#DEC-003[DEC-003].
-
-[[pcm-owner-retirement-coverage]]
-=== PCM owner-drop descriptor retirement
-
-Status: resolved in implementation, 2026-11-06; verified under DEC-010.
-
-The original CI correction correctly allowed fd-number reuse but lost the owner-fd
-release check. The cross-process regression now compares the reader-pinned memfd's
-device/inode with metadata of the old advertised path. A missing path or replacement
-passes; the original object fails, as do unexpected metadata errors. Native PCM
-remains checked after owner Drop. A real SharedPcmWindow smoke distinguished an
-unreleased owner, close without reuse, and reuse by another memfd or a socket while
-preserving the original mapped content. No production owner-fd leak was observed.
-Ownership and unchanged production attach admission:
-link:91_design_decisions.adoc#DEC-010[DEC-010].
-
-[[socket-retirement-test-isolation]]
-=== Socket retirement tests and fork inheritance
-
-Status: resolved in implementation, 2026-11-06. Follow-up
-link:#socket-eof-fixture-gaps[EOF] and link:#socket-directory-pin-gaps[identity fixture]
-corrections are recorded separately.
-
-IPC rebind/EOF, desktop singleton reacquisition and App startup/shutdown fixtures
-now use bounded isolated test processes. Immediate reacquisition and final-save
-failure checks remain; owned directories retain identity pins. Production behavior
-and ordinary test concurrency are unchanged.
-
-CI at `481a602d` reported failure at App's final-save-error reacquisition assertion.
-That repair had omitted both App shutdown cases from isolation; the assertion did
-not print the bind error. Both cases now use isolation and report acquisition
-errors without retrying. A controlled fork/exec barrier confirmed that a pinned
-directory does not prevent EADDRINUSE after local listener close while a pre-exec
-child retains its descriptor; exec permits immediate rebind. This establishes
-the fixture gap, not the exact errno of the reported CI failure. Directory pins
-prevent inode recycling, not listener inheritance.
-The client crate remains unchanged: no subprocess entry was found in its test binary.
-Scope and cleanup boundaries: link:91_design_decisions.adoc#DEC-010[DEC-010].
-
-[[neural-retirement-pid-reuse]]
-=== Neural retirement checks and numeric PID reuse
-
-Status: resolved in implementation, 2026-11-06; verified under DEC-010.
-
-The cancellation-after-stdout-EOF and unwind regressions no longer wait or signal
-an already-reaped numeric PID. Each runs in an isolated process, checks ordinary
-SIGCHLD semantics and an initially empty child set, then requires non-reaping
-P_ALL observation to report ECHILD after Finished but before event application or
-Core retirement. Live and zombie interpreters fail the assertion.
-
-Inherited lifelines replace the shell busy loops. Their guards retain both endpoints
-through asynchronous spawn and the retirement assertion; failure closes the sole
-peer before Core joins. Task-wait ordering and subsequent processing recovery
-remain covered. The separate
-link:#neural-unwind-trigger-coverage[unwind trigger observation] now excludes ordinary early failures.
-
-The investigation forced stale-PID reuse in a disposable namespace; the old cleanup
-killed a replacement while a retained-pidfd control left it alive. That was not an
-observed production reaping leak. The inherited-endpoint startup/failure probes
-establish fixture exit, not descendant reaping. Design and evidence boundaries:
-link:91_design_decisions.adoc#DEC-010[DEC-010].
-
-=== Filtered root-count dependency recovery
-
-Status: resolved, 2026-11-06. A failed root-total dependency remains retryable
-under active filtering. Final integration and real Wayland-input recovery passed:
-restoring the dependency and clicking recovered `0/0` without allocating a scan
-task. Mechanism and evidence boundaries: link:91_design_decisions.adoc#DEC-002[DEC-002].
-
-=== Denoise state admission accounting
-
-Status: resolved, 2026-11-06. State admission includes adapter storage and
-independently enabled hum/repair with spectral Off. Allocation regressions,
-disabled-feature validation and a standalone processing graph passed. Arithmetic
-work policy is unchanged; process RSS is outside this budget.
-See link:91_design_decisions.adoc#DEC-003[DEC-003].
-
-=== Cooperative retained-query waiting
-
-Status: resolved, 2026-11-06. A cumulative cooperation budget bounds ready
-cancellation consumption without releasing physical query ownership. Executor
-fairness and terminal progress regressions passed with and without default
-features; actual IPC retained-query completion and subsequent State alignment
-passed. See link:91_design_decisions.adoc#DEC-004[DEC-004].
-
-=== Structural GUI demand reconciliation during transport updates
-
-Status: resolved in implementation, 2026-10-29.
-
-Panel membership, active tabs and instance preferences now reconcile at structural
-changes rather than every transport update. Source, seek, Stop and progressive
-waveform handling remain dynamic. See link:24_layout.adoc[GUI layout].
-
-Historical nested-Wayland and TUI checks covered playback, seek, Stop, toggles,
-resize, locking and window recreation. Temporary probes observed no workspace
-rediscovery on transport-only changes; these were traversal counts, not frame-time
-measurements. The nested backend did not report occlusion reliably, so hidden-window
-and shutdown demand relied on deterministic regressions.
-
-=== Stable configuration in high-frequency System IPC state
-
-Status: resolved in implementation, 2026-10-29.
-
-System and Configuration now have independent sections and revisions. Omitted
-sections retain client values; configuration-only changes wake Watch, and restart
-requires a fresh Hello. See link:21_ipc.adoc#revisions-and-watching[Revisions and watching].
-
-A historical comparison with 256 long-path roots and three clients reduced each
-client's 100 runtime reads from 3,444,600 to 20,900 bytes, repeated three times.
-Selective reads and restart recovery were exercised. This is transfer/work-count
-evidence, not latency or RSS measurement.
-
-Update, 2026-11-05: Processing also has its own section and revision. Watch selects
-the sections its consumer needs; the TUI excludes processing task updates.
-
-=== Query timeout and physical worker retirement
-
-Status: resolved in implementation, 2026-10-19.
-
-The 12-second GUI deadline ends logical waiting without releasing the physical
-worker slot. Late results cannot publish; the latest demand starts only after
-physical retirement. See
-link:22_cache.adoc#query-projection-retention[Query projection retention].
-
-Update, 2026-11-05: Demand replacement and logical timeout cancel the corresponding
-read through IPC, including executing SQL. Cancellation still waits for a reply or
-disconnection before releasing the physical slot; it does not cancel accepted writes.
-
-=== Drag-only panel catalog insertion
-
-Status: resolved in implementation, 2026-10-21.
-
-Catalog insertion is drag-only, including an empty workspace; clicks and keyboard
-activation insert nothing. Historical layout tests and a nested-Wayland check
-covered valid/invalid drops, cancellation and tab transfers. Current operations
-are in link:05_layout.adoc#layout[Configuration and layout].
-
-=== Small visualization canvas feedback
-
-Status: resolved in implementation, 2026-10-29.
-
-Small views omit overlapping labels and retire undrawable seek targets without
-size warnings. Historical GUI checks shrank a captured waveform, restored its
-size while held, and confirmed that release did not seek; a fresh press did.
-Configured labels returned with sufficient space. Current rules are in
-link:24_layout.adoc#geometry-and-constrained-viewports[Geometry and constrained viewports].
-
-=== Saved queue selection after startup read failure
-
-Status: resolved in implementation, 2026-10-31.
-
-A failed startup read no longer lets an empty runtime selection overwrite the
-saved queue occurrence. Regressions covered shutdown after failure, recovery before
-append and retry of a failed selection save. A historical isolated headless check
-preserved the selected duplicate through shutdown and repair. Current behavior is
-in link:04_playback.adoc#queue[Queue].
-
-=== Multi-root scan missing reconciliation
-
-Status: resolved in implementation, 2026-10-31.
-
-Missing-source reconciliation now reuses indexed root membership instead of
-comparing every absent identity against every requested root. CUE ownership and
-incomplete-scan protection are unchanged.
-
-A historical 1,000-root/1,000-absent-source probe counted 500,500 root predicates
-before and 1,000 ancestor lookups after; these are operation counts, not timing.
-An isolated headless scan also verified that truncated diagnostics did not mark
-unconfirmed sources missing. See
-link:02_library.adoc#errors-and-partial-results[Errors and partial results].
-
-=== Repeated playlist import identity resolution
-
-Status: resolved in implementation, 2026-11-08.
-
-Repeated import occurrences reuse identity lookups within that import while
-preserving order, multiplicity, admission rules and separate scan/playlist commits.
-No identity cache survives the import.
-
-Lookup batches contain at most 32 distinct prepared ordinary/CUE identities;
-occurrence count does not multiply those lookups. Failed preparation and missing
-identities remain excluded. See
-link:03_playlist.adoc#commit-and-export-lifecycle[Commit and export lifecycle].
-
-[[pcm-continuity-and-frontend-readiness-from-branch-review]]
-=== PCM continuity and frontend readiness from branch review
-
-Status: resolved in implementation, 2026-11-06.
-
-Review of `wip/commit-review-20261104` found unchanged settings revoking PCM
-identity, prefetch exceeding fixed native retention, skipped growing tails and
-unconsumed clearing frames. Terminal entry operations could retry an unchanged
-failed playlist title, and executable bootstrap waited before terminal input
-could cancel readiness. These behaviors were corrected on mainline owners rather
-than by merging the old branch; the already-absorbed palette fix was retained.
-
-Regression checks covered unchanged settings, growing tails, title failures and
-shared-sample overwrite/reconfiguration. Against a stalled Hello in a real PTY,
-`q`, Ctrl-C and SIGTERM each exited, restored terminal settings and left the
-independent socket owner accepting connections. This does not establish device
-A/V synchronization, latency or physical GPU retirement. Retention sizing and
-before/after frame counts are in link:91_design_decisions.adoc#DEC-007[DEC-007];
-current mechanisms belong in link:21_ipc.adoc[PCM transport] and
-link:04_playback.adoc[frontend controls].
-
-The separate GUI complexity review retains cache/animation ownership, with
-independent disk-reload and cached-consumer behavior coverage rather than a
-production redesign; see link:91_design_decisions.adoc#DEC-008[DEC-008].
-
-=== Album menu loading keyboard cancellation
-
-Status: resolved, 2026-11-06.
-
-New playlist's deferred album read restored focus to an unmounted submenu trigger,
-preventing Escape from reaching cancellation. Loading now consumes that restoration
-intent while retaining menu-scope focus. A keyboard-dispatch regression covers
-Escape and Left without releasing the physical reader early. Isolated nested-Wayland
-input also dismissed the loading page; resuming the held Core query did not reopen
-the playlist dialog or create a playlist. This is cancellation evidence, not a query
-latency measurement. See link:02_library.adoc#albums[Album actions].
-
-[[material-atmosphere-negative-demand]]
-=== Material atmosphere repeats completed misses after cache eviction
-
-Status: resolved in the glass-material experiment, 2026-11-06.
-
-After rebasing onto the desktop/Core split, atmosphere acquisition did not adopt
-the shared artwork loader's consumer-owned negative result. Evicting a coverless
-track from the bounded lookup cache admitted another probe for unchanged visible
-demand. A deterministic regression first failed after eviction and then passed
-for both cached and asynchronously completed misses; hiding and revealing the
-consumer still discovers a subsequently repaired source. Existing path-change,
-stale-completion, derivative and retirement suites remain applicable.
-Ownership decision: link:91_design_decisions.adoc#DEC-008[DEC-008].
-
-[[material-artwork-panel-routing]]
-=== Material routing excludes the registered artwork panel
-
-Status: resolved, 2026-11-07.
-
-Material demand and decoration used `album_artwork`, but the registered panel key
-is `artwork`. Artwork-only layouts therefore did not acquire Atmosphere or Stage
-artwork, and their panels missed playback-class material composition. Routing now
-uses the registered panel kinds. Regression coverage exercises artwork-only
-demand and distinguishes Stage treatment from an ordinary reading panel.
-An isolated nested-Wayland artwork-only window reproduced the missing atmosphere;
-the fixed build displayed cover-derived Atmosphere and Stage backgrounds without
-a transport panel.
-
-[[material-cover-decode-sizing]]
-=== Material Cover sampling requests an undersized decode tier
-
-Status: resolved, 2026-11-07.
-
-Material sources requested only the viewport's longest edge, although Cover can
-enlarge a non-square image's shorter edge. Both source-image paths now bootstrap
-at viewport resolution and recalculate demand from exact oriented source
-dimensions after decode. The existing shared owner performs any promotion;
-native-size guards, budgets and retirement fences remain in force. Regression
-coverage includes portrait and landscape images, a rounded-thumbnail aspect-ratio
-boundary, orientation through shared/disk tiers, unchanged square/large-viewport
-demand, and retired handles that cannot restart cold work. The real nested-Wayland
-GUI also exercised Gradient translucency and the Experimental artwork-reflection
-Mirror lake with a 1000-by-4000 source in an 800-by-600 window. Exact decode-tier
-correctness is established by the regression tests, not a pixel-equivalence claim.
-See link:91_design_decisions.adoc#DEC-008[DEC-008].
-
+These are unmaintained-package notices, not known exploitable defects. Rivu's
+direct D-Bus consumers and GPUI's portal and secret-service consumers use zbus 6.
+Removing the old crates requires compatible upstream migrations, not a
+semver-incompatible lockfile substitution. The findings came from a cached
+advisory database and are not an exhaustive security assessment.

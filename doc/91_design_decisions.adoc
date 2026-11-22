@@ -2,7 +2,7 @@
 
 This record explains consequential choices and their evidence boundaries, not
 implementation steps or delivery checklists. Current behavior belongs in the
-linked guides; link:90_open_issues.adoc[open issues] owns defects and resolutions.
+linked guides; link:90_open_issues.adoc[open issues] owns unresolved defects.
 
 == Maintenance
 
@@ -56,9 +56,7 @@ See link:26_audio_processing.adoc[Audio processing budgets].
 Keep arithmetic policy in the graph planner, separate from this memory accounting:
 charge active hum per harmonic and repair per configured width without raising
 the work limit. Heavy valid graphs may require Hybrid/Offline execution;
-bypassed effects still undergo format validation. The resolved
-link:90_open_issues.adoc#denoise-hum-work-admission[arithmetic admission investigation]
-records the counterexample and verification boundaries.
+bypassed effects still undergo format validation.
 
 The per-runner realtime estimate is separate from the Offline engine: Offline
 caps each edge's delay at 64 MiB but
@@ -147,8 +145,7 @@ In a standalone quarter-second stereo publication, the original 32-slot window
 retained all frames at 48 kHz but only 32,640 of 48,000 at 192 kHz and 32,512 of
 96,000 at 384 kHz. After correction it retained every frame at all three rates,
 including fragmented writes. This establishes retention coverage, not measured
-audible dropout, device A/V synchronization or latency. Failure details belong in
-link:90_open_issues.adoc#pcm-continuity-and-frontend-readiness-from-branch-review[the resolution record].
+audible dropout, device A/V synchronization or latency.
 See link:21_ipc.adoc[PCM transport] and link:22_cache.adoc[resource lifecycles].
 
 [[DEC-008]]
@@ -188,10 +185,7 @@ scenes can retain GPU resources. See link:22_cache.adoc[Cache and retention].
 Materials reuse artwork ownership, consumer-owned negative lookup identities and
 the existing decode admission; they do not add a cache or relax the album-card
 size cap. Full-cover demand promotes through the same decode seat using exact
-oriented source dimensions. Resolved boundary defects are recorded under
-link:90_open_issues.adoc#material-atmosphere-negative-demand[negative demand],
-link:90_open_issues.adoc#material-artwork-panel-routing[panel routing] and
-link:90_open_issues.adoc#material-cover-decode-sizing[Cover sizing].
+oriented source dimensions.
 
 [[DEC-009]]
 === DEC-009: Stream uncached native exports instead of retaining output PCM
@@ -242,18 +236,11 @@ Child absence must be paired with proof that the intended failure path ran, and
 cleanup lifelines must not hide a missing production kill.
 
 These fixture choices preserve immediate retirement assertions without retries,
-global test serialization or changes to production ownership. Detailed observation
-and cleanup mechanics belong to the investigation records below. Production PCM
-attach retains the existing
+global test serialization or changes to production ownership. A child forked by
+another test retains inherited sockets until exec, delaying EOF and rebinding
+after local close; directory pins only prevent abstract-address collisions after
+inode recycling. Production PCM attach retains the existing
 link:21_ipc.adoc#realtime-pcm-transport[subscription admission ordering].
-
-The investigation records own the counterexamples and detailed evidence:
-link:90_open_issues.adoc#pcm-owner-retirement-coverage[PCM owner-drop],
-link:90_open_issues.adoc#socket-retirement-test-isolation[socket isolation],
-link:90_open_issues.adoc#socket-eof-fixture-gaps[EOF fixtures],
-link:90_open_issues.adoc#socket-directory-pin-gaps[directory identity fixtures],
-link:90_open_issues.adoc#neural-retirement-pid-reuse[child identity] and
-link:90_open_issues.adoc#neural-unwind-trigger-coverage[unwind trigger coverage].
 
 [[DEC-011]]
 === DEC-011: Retire playback without discarding current settings failures
@@ -264,8 +251,7 @@ Playback retirement suppresses transport terminal actions, not independent
 settings failure reporting. Normal and retiring dispatch share output-request
 and EQ configuration/generation validation; stale failures remain ignored.
 Do not route retiring terminal events through ordinary dispatch, which can
-recursively Stop or advance navigation. Evidence and resolution:
-link:90_open_issues.adoc#retiring-settings-failures[retiring settings failures].
+recursively Stop or advance navigation.
 
 Accepted refinement: listening duration, heard-time, count-commit, activity-commit
 and deferred bitrate facts belong to their source session. Retired settlement
@@ -286,8 +272,6 @@ model as a cut point and retire unreachable PCM boundaries and original source.
 Other branches keep their reachable boundaries; an aliased input pins its own
 backing storage. Apply the same reachability ownership after model completion.
 This changes PCM lifetime, not the budget, graph result or model execution policy.
-Evidence and resolution:
-link:90_open_issues.adoc#model-boundary-retirement[model-boundary retirement].
 
 [[DEC-013]]
 === DEC-013: History collection outlives presentation visibility
