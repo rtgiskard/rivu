@@ -33,13 +33,20 @@ struct ViewDemand {
 
 pub(in crate::gui) type SelectionKey = (u64, rivu_protocol::model::QueryStamp);
 
+#[derive(Default, PartialEq, Eq)]
+enum PublicationPhase {
+    #[default]
+    None,
+    Queued,
+    Taken,
+}
+
 /// One lane owns logical demand and publication independently of physical occupancy.
 #[derive(Default)]
 struct ViewRequestSlot {
     projection: QueryTracker,
-    publishing: bool,
+    publication: PublicationPhase,
     worker_active: bool,
-    queued: bool,
     // Latest intent outlives logical cancellation, hiding and worker completion.
     demand: Option<ViewDemand>,
     immediate: bool,
@@ -54,7 +61,7 @@ enum ViewPublication {
 
 impl ViewRequestSlot {
     fn pending_generation(&self) -> Option<u64> {
-        self.publishing.then(|| self.projection.generation())
+        (self.publication != PublicationPhase::None).then(|| self.projection.generation())
     }
 
     fn request(&self, kind: ViewRequestKind) -> ViewRequest {
@@ -102,8 +109,7 @@ impl ViewRequestSlot {
         if !self.projection.sync(&demand.query, revisions) {
             self.projection.cancel();
         }
-        self.publishing = true;
-        self.queued = true;
+        self.publication = PublicationPhase::Queued;
         self.take_read(kind, revisions, now)
     }
 
@@ -113,7 +119,7 @@ impl ViewRequestSlot {
         revisions: QueryRevisions,
         now: Instant,
     ) -> ViewRequest {
-        if !self.queued || self.worker_active {
+        if self.publication != PublicationPhase::Queued || self.worker_active {
             return self.request(kind);
         }
         let demand = self.demand.as_mut().expect("queued view demand");
@@ -123,7 +129,7 @@ impl ViewRequestSlot {
             demand.quiet_until = now + Duration::from_millis(80);
             self.projection.sync(&demand.query, revisions);
         }
-        self.queued = false;
+        self.publication = PublicationPhase::Taken;
         self.worker_active = true;
         let read = ViewRead {
             query: demand.query.clone(),
@@ -146,7 +152,7 @@ impl ViewRequestSlot {
         revisions: QueryRevisions,
         now: Instant,
     ) -> (ViewRequest, bool) {
-        if !self.queued {
+        if self.publication != PublicationPhase::Queued {
             return (self.request(kind), false);
         }
         if !demanded {
@@ -183,8 +189,7 @@ impl ViewRequestSlot {
     }
 
     fn cancel(&mut self) {
-        self.publishing = false;
-        self.queued = false;
+        self.publication = PublicationPhase::None;
         self.projection.cancel();
     }
 
@@ -1072,7 +1077,13 @@ mod tests {
                 .slot(ViewRequestKind::Entries)
                 .worker_active
         );
-        assert!(!browser.requests.slot(ViewRequestKind::Entries).queued);
+        assert!(
+            browser
+                .requests
+                .slot(ViewRequestKind::Entries)
+                .pending_generation()
+                .is_none()
+        );
         assert!(
             browser
                 .demand_playlist_entries(40..50, 20, current)
