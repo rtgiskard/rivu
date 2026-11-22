@@ -166,8 +166,8 @@ impl WaveformBinGeometry {
     }
 }
 
-/// Overlay new playback intervals onto the bounded full-scan geometry. Unknown
-/// duration coarsening grows the display only when PCM reaches beyond its end.
+/// Overlay new playback intervals. Only an unfinished display can grow to
+/// follow PCM beyond its current span.
 fn merge_progressive(
     display: &mut WaveformFrame,
     progressive: &WaveformFrame,
@@ -189,30 +189,32 @@ fn merge_progressive(
         return;
     };
     let (width, source_width) = display_geometry.relative_widths(progressive_geometry);
-    let exceeds_display = progressive
-        .rms_spans
-        .iter()
-        .flatten()
-        .map(|span| span.end)
-        .max()
-        .map_or_else(
-            || {
-                progressive
-                    .peaks
-                    .iter()
-                    .rposition(Option::is_some)
-                    .is_some_and(|bin| {
-                        (bin as u128 + 1) * source_width > display.peaks.len() as u128 * width
-                    })
-            },
-            |end| {
-                u128::from(end) * display_geometry.denominator
-                    > display_geometry.numerator
-                        * display.peaks.len() as u128
-                        * u128::from(progressive_geometry.sample_rate)
-            },
-        );
-    let geometry_changed = display.peaks.is_empty() || exceeds_display;
+    let exceeds_display = || {
+        progressive
+            .rms_spans
+            .iter()
+            .flatten()
+            .map(|span| span.end)
+            .max()
+            .map_or_else(
+                || {
+                    progressive
+                        .peaks
+                        .iter()
+                        .rposition(Option::is_some)
+                        .is_some_and(|bin| {
+                            (bin as u128 + 1) * source_width > display.peaks.len() as u128 * width
+                        })
+                },
+                |end| {
+                    u128::from(end) * display_geometry.denominator
+                        > display_geometry.numerator
+                            * display.peaks.len() as u128
+                            * u128::from(progressive_geometry.sample_rate)
+                },
+            )
+    };
+    let geometry_changed = !display.complete && (display.peaks.is_empty() || exceeds_display());
     if geometry_changed {
         let bins = progressive.peaks.len();
         let (width, source_width) = progressive_geometry.relative_widths(display_geometry);
@@ -779,6 +781,9 @@ fn preview_available(source: &Source, frame: &WaveformFrame) -> bool {
 }
 
 fn timeline(frame: &WaveformFrame, duration: Option<f64>) -> Option<f64> {
+    if frame.complete {
+        return frame.duration;
+    }
     if frame.span_seconds.is_finite() && frame.span_seconds > 0.0 {
         Some(frame.span_seconds)
     } else {
@@ -2379,6 +2384,16 @@ mod tests {
         assert_eq!(progress(f64::NAN, timeline(&frame, None)), None);
         assert_eq!(progress(1.0, Some(0.0)), None);
         assert_eq!(progress(1.0, Some(f64::INFINITY)), None);
+    }
+
+    #[test]
+    fn completed_waveform_right_edge_seeks_to_exact_eof() {
+        let mut frame = frame(vec![Some(0.25), Some(0.5)]);
+        frame.complete = true;
+        frame.duration = Some(1.75);
+        frame.span_seconds = 2.0;
+        let duration = timeline(&frame, Some(1.5)).unwrap();
+        assert_eq!(seek_seconds(px(100.0), px(0.0), px(100.0), duration), 1.75);
     }
 
     #[test]
