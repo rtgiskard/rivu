@@ -54,6 +54,7 @@ to 256 UTF-8 bytes and support Backspace.
 |`:q`, `:quit` |Close this TUI only; Core and playback continue
 |`:qa`, `:qall` |Stop playback and shut down Core and all connected GUI/TUI clients
 |`:now` |Jump to the playing or paused occurrence in Queue without changing playback. If a Queue search hides it, clear the search and retry.
+|`:scan [PATH]` |Scan all configured library roots or one absolute file or directory path within those roots. Enter paths containing spaces directly, without quotes. Scanning runs in the background.
 |`:save [NAME]` |In Queue, save the entire queue (even if empty) as a new playlist, preserving order and duplicates even under search
 |`:rename [NAME]` |In the Playlists list, rename the selected playlist
 |`:help` |Open the scrollable help page, including command descriptions

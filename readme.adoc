@@ -40,11 +40,15 @@ The desktop requires Wayland; audio output requires a running PipeWire 1.2 or ne
 
 == First use
 
-. link:doc/00_getting_started.adoc#build-and-install[Install Rivu].
-. Run `rivu gui` (or `rivu tui` for the terminal client).
-. Add a music directory in Library, then use its scan action to import tracks.
-. Double-click a track to play it. Closing the window leaves playback running;
-  use `rivu quit` to stop the instance.
+link:doc/00_getting_started.adoc#build-and-install[Install Rivu], then choose an interface.
+
+* *Desktop:* Run `rivu gui`. Add a music directory in Library, use its scan
+  action to import tracks, then double-click a track to play it.
+* *Terminal:* Add your music directory's absolute path to `library.roots` in
+  `config.toml`, then run `rivu tui` and enter `:scan` to import tracks.
+  Select a track in Library and press Enter to play it.
+
+Closing either client leaves playback running. Use `rivu quit` to stop the instance.
 
 See link:doc/00_getting_started.adoc[Getting started] for scanning, headless use
 and data directories, or link:doc/09_cli.adoc[CLI] for command-line control.

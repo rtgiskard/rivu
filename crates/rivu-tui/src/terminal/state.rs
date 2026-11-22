@@ -1881,9 +1881,29 @@ impl UiState {
                 let input = self.command_input.take().unwrap_or_default();
                 self.mark_local_change();
                 let input = input.trim();
-                let (verb, name) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+                let (verb, argument) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
                 if matches!(verb, "save" | "rename") {
-                    return self.open_playlist_name(verb, name.trim());
+                    return self.open_playlist_name(verb, argument.trim());
+                }
+                if verb == "scan" {
+                    let argument = argument.trim();
+                    let paths = if argument.is_empty() {
+                        state.configuration.library_roots.clone()
+                    } else {
+                        let path = PathBuf::from(argument);
+                        if !path.is_absolute() {
+                            self.set_notice(
+                                self.i18n.text("terminal-scan-absolute-path").into(),
+                                NoticeKind::Error,
+                            );
+                            return KeyAction::Ignored;
+                        }
+                        vec![path]
+                    };
+                    return KeyAction::Command(Command::Scan {
+                        paths,
+                        force: false,
+                    });
                 }
                 return match input.trim() {
                     "" => KeyAction::Ignored,

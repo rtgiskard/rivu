@@ -677,6 +677,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
             (":q / :quit", "terminal-command-close"),
             (":qa / :qall", "terminal-command-shutdown"),
             (":now", "terminal-command-now"),
+            (":scan [PATH]", "terminal-command-scan"),
             (":save [NAME]", "terminal-command-save"),
             (":rename [NAME]", "terminal-command-rename"),
             (":help", "terminal-command-help"),
