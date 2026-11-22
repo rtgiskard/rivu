@@ -1390,10 +1390,7 @@ fn two_missing_ordinary_sources_and_one_new_target_preserve_both_source_states()
     let prepared = store.prepare_relocation(first_id, target_id).unwrap();
     store.commit_relocation(&prepared).unwrap();
     assert_eq!(store.track(first_id).unwrap().unwrap().path, target.path);
-    assert_eq!(
-        store.track(first_id).unwrap().unwrap().title,
-        target.media.title
-    );
+    assert_eq!(store.track(first_id).unwrap().unwrap().title, "Owned title");
     assert!(store.track(first_id).unwrap().unwrap().favorite);
     assert!(!store.track(first_id).unwrap().unwrap().missing);
     assert_eq!(store.track(second_id).unwrap().unwrap().path, second.path);

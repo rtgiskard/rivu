@@ -834,22 +834,30 @@ fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
         .unwrap();
     store.commit_relocation(&prepared).unwrap();
     let albums = snapshot(&store);
-    assert_eq!(albums.len(), 1);
+    assert_eq!(albums.len(), 2);
     assert!(
         albums
             .iter()
             .all(|album| album.0.directory == Path::new("/music/new"))
     );
-    let moved = &albums[0];
-    assert_eq!(moved.0.title, "Destination");
-    assert_eq!(moved.1, 2);
-    assert_eq!(moved.2, "New artist");
-    assert_eq!(moved.3.id, peer_id);
+    let moved = albums
+        .iter()
+        .find(|album| album.0.title == "User album")
+        .unwrap();
+    assert_eq!(moved.1, 1);
+    assert_eq!(moved.2, "User artist");
+    assert_eq!(moved.3.id, source_id);
+    let destination = albums
+        .iter()
+        .find(|album| album.0.title == "Destination")
+        .unwrap();
+    assert_eq!(destination.1, 1);
+    assert_eq!(destination.3.id, peer_id);
     assert!(store.track(source_id).unwrap().unwrap().favorite);
     assert!(store.track(target_id).unwrap().is_none());
-    assert_eq!(moved.3.path, peer.path);
+    assert_eq!(destination.3.path, peer.path);
     assert_eq!(store.track(source_id).unwrap().unwrap().path, target.path);
-    // Rescans refresh both the relocated member and its peer, splitting the album.
+    // Rescans refresh the stored tags independently of manual relocation.
     target.media.album = "Refreshed target album".into();
     target.media.artist = "Refreshed target artist".into();
     peer.media.album = "Rescanned album".into();

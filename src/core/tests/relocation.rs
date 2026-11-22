@@ -207,7 +207,7 @@ fn manual_relocation_preserves_source_identity_state_and_references() {
     assert_eq!(status.phase, RelocationPhase::Completed);
     let retained = core.track(source).unwrap();
     assert_eq!(retained.path, target_path);
-    assert_eq!(retained.title, target_track.title);
+    assert_eq!(retained.title, "User title");
     assert_eq!(retained.decoder_hint, DecoderHint::Native);
     assert!(retained.favorite && !retained.missing);
     assert_eq!(retained.play_count, 1);

@@ -3,7 +3,6 @@ use super::rows::{
     TRACK_COLUMN_COUNT, TRACK_COLUMNS, fingerprint_from_row, fingerprint_hash_from_row,
     track_from_row,
 };
-use super::scan::{SOURCE_FIELDS, write_source_assignments};
 use anyhow::{Context, Result, bail};
 use rivu_protocol::model::{DuplicateGroup, DuplicateMember, Page};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -287,40 +286,38 @@ impl Store {
         if source.identity != prepared.source || target.identity != prepared.target {
             bail!("Relocation identity changed while the target was being verified");
         }
-        // Snapshot the target's scanned metadata before releasing its unique
-        // path. No target user state is transferred or discarded.
+        // Stage only file facts before releasing the target's unique path.
+        // The retained row owns its stored tags and user state.
         tx.execute(
-            &format!(
-                "CREATE TEMP TABLE relocation_target AS
-                 SELECT {SOURCE_FIELDS} FROM tracks WHERE id=?1"
-            ),
+            "CREATE TEMP TABLE relocation_target AS
+             SELECT path,fingerprint,file_size,modified_ns,duration,codec,channels,
+                    sample_rate,probe_version,bitrate_bps,bitrate_exact,bits_per_sample
+             FROM tracks WHERE id=?1",
             [target.identity.id],
         )?;
-        let queue = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=?1)",
-            [source.identity.id],
-            |row| row.get(0),
-        )?;
-        let (albums, history) = tx.query_row(
+        let (queue, albums) = tx.query_row(
             &format!(
-                "SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE id IN (?1,?2) AND {})
-                     OR EXISTS(SELECT 1 FROM tracks AS s CROSS JOIN temp.relocation_target AS t
-                         WHERE s.id=?1 AND {}),
-                     (SELECT s.last_played IS NOT NULL
-                         AND s.title IS NOT t.title
-                      FROM tracks AS s CROSS JOIN temp.relocation_target AS t WHERE s.id=?1)",
-                super::albums::eligible_member("t"),
-                rivu_format::database::eligible_title("t.album")
+                "SELECT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=0 AND track_id=?1),
+                        EXISTS(SELECT 1 FROM tracks AS t WHERE id IN (?1,?2) AND {})",
+                super::albums::eligible_member("t")
             ),
             params![source.identity.id, target.identity.id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         tx.execute("DELETE FROM tracks WHERE id=?1", [target.identity.id])?;
-        let mut update_sql = String::with_capacity(768);
-        update_sql.push_str("UPDATE tracks SET ");
-        write_source_assignments(&mut update_sql, false);
-        update_sql.push_str(" FROM temp.relocation_target AS s WHERE tracks.id=?1");
-        let updated = tx.execute(&update_sql, [source.identity.id])?;
+        // Cache reuse requires current probe data for both the retained tags
+        // and the transferred file facts. A ReplayGain edit invalidates the tags.
+        let updated = tx.execute(
+            "UPDATE tracks SET missing=0, path=s.path, fingerprint=s.fingerprint,
+                file_size=s.file_size, modified_ns=s.modified_ns, duration=s.duration,
+                codec=s.codec, channels=s.channels, sample_rate=s.sample_rate,
+                bitrate_bps=s.bitrate_bps, bitrate_exact=s.bitrate_exact,
+                bits_per_sample=s.bits_per_sample,
+                probe_version=CASE WHEN tracks.probe_version=s.probe_version
+                                   THEN s.probe_version ELSE 0 END
+             FROM temp.relocation_target AS s WHERE tracks.id=?1",
+            [source.identity.id],
+        )?;
         super::changed(updated, "track", source.identity.id)?;
         tx.execute_batch("DROP TABLE temp.relocation_target")?;
         tx.commit()?;
@@ -335,7 +332,6 @@ impl Store {
             duplicate_groups: true,
             queue,
             albums,
-            history,
             ..Default::default()
         })
     }
@@ -361,27 +357,6 @@ mod tests {
             params![hash.as_bytes().as_slice(), super::super::scan::PROBE_VERSION],
         )?;
         Ok(store)
-    }
-
-    #[test]
-    fn relocation_reports_history_only_when_a_played_title_changes() -> Result<()> {
-        for played in [false, true] {
-            let store = fixture()?;
-            if played {
-                store.mark_played(1, 42)?;
-            }
-            let prepared = store.prepare_relocation(1, 2)?;
-            let impacts = store.commit_relocation(&prepared)?;
-            assert_eq!(impacts.history, played);
-            let history = store.history(10)?;
-            if played {
-                assert_eq!(history[0].track_id, 1);
-                assert_eq!(history[0].title, "Target");
-            } else {
-                assert!(history.is_empty());
-            }
-        }
-        Ok(())
     }
 
     #[test]
@@ -519,7 +494,7 @@ mod tests {
              INSERT INTO playlist_entries(playlist_id,track_id,position) VALUES(1,1,0);",
         )?;
         let prepared = store.prepare_relocation(1, 2)?;
-        // Preferences edited while hashing survive; source tags refresh from target.
+        // Tags and preferences edited while hashing survive relocation.
         store.edit_track(
             1,
             Some("Custom"),
@@ -534,14 +509,16 @@ mod tests {
         let queue = store.queue_state()?;
         let before = store.track(1)?.unwrap();
         let target = store.track(2)?.unwrap();
-        let impacts = store.commit_relocation(&prepared)?;
-        assert!(impacts.history);
+        store.commit_relocation(&prepared)?;
+        let history = store.history(10)?;
+        assert_eq!(history[0].track_id, 1);
+        assert_eq!(history[0].title, "Custom");
         let retained = store.track(1)?.unwrap();
         assert_eq!(retained.id, before.id);
         assert_eq!(retained.path, target.path);
-        assert_eq!(retained.title, target.title);
-        assert_eq!(retained.artist, target.artist);
-        assert_eq!(retained.album, target.album);
+        assert_eq!(retained.title, before.title);
+        assert_eq!(retained.artist, before.artist);
+        assert_eq!(retained.album, before.album);
         assert_eq!(retained.favorite, before.favorite);
         assert_eq!(retained.play_count, before.play_count);
         assert_eq!(retained.last_played, before.last_played);
@@ -553,7 +530,9 @@ mod tests {
         assert!(retained.bitrate_exact);
         assert_eq!(retained.sample_rate, target.sample_rate);
         assert_eq!(retained.bits_per_sample, target.bits_per_sample);
-        assert_eq!(retained.release_date, target.release_date);
+        assert_eq!(retained.release_date, before.release_date);
+        assert_eq!(retained.track_number, before.track_number);
+        assert_eq!(retained.disc_number, before.disc_number);
         assert!(store.track(2)?.is_none());
         assert_eq!(store.queue_ids()?, ids);
         assert_eq!(store.queue_state()?.current_id, queue.current_id);
@@ -565,10 +544,25 @@ mod tests {
             1
         );
         let known = store.stored_scan_files(&[PathBuf::from("/new")])?;
-        assert_eq!(known[0].media.as_ref().unwrap().title, "Target");
+        assert_eq!(known[0].media.as_ref().unwrap().title, "Custom");
         assert_eq!(known[0].size, prepared.target.file_size);
         assert_eq!(known[0].modified_ns, prepared.target.modified_ns);
         assert!(store.duplicate_groups_page(0, 10)?.rows.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_preserves_edited_replaygain_until_the_next_probe() -> Result<()> {
+        let store = fixture()?;
+        let prepared = store.prepare_relocation(1, 2)?;
+        store.set_replaygain(1, Some(-8.0))?;
+
+        store.commit_relocation(&prepared)?;
+
+        assert_eq!(store.track(1)?.unwrap().replaygain_track_gain, Some(-8.0));
+        let known = store.stored_scan_files(&[prepared.target.path])?;
+        assert!(known[0].media.is_none());
+        assert_eq!(known[0].fingerprint, Some(prepared.target.fingerprint));
         Ok(())
     }
 
