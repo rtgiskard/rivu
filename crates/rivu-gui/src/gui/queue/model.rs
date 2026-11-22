@@ -168,6 +168,9 @@ pub(super) struct QueueBrowser {
     pub(super) busy: bool,
     // Retained identities need relocation before their positions can authorize actions.
     positions_stale: bool,
+    // Retained display rows still hold current occurrence positions: only
+    // payload-only refreshes retired them since the last structural change.
+    retained_positions: bool,
     pub(super) selection_error: Option<String>,
     pub(super) selection_retired: bool,
     pub(super) navigation: Option<usize>,
@@ -205,14 +208,26 @@ impl QueueBrowser {
         rows.sort_unstable_by_key(|row| row.position);
         rows
     }
-    pub(super) fn operation_rows(
-        &self,
-        source: QueueIdentity,
-        generation: u64,
-    ) -> Vec<QueueIdentity> {
-        if generation != self.page_projection.generation()
-            || self.rows.get(source.offset).map(QueueIdentity::from) != Some(source)
-        {
+    /// A row whose occurrence position is authoritative for the current page
+    /// projection: loaded, or retained across payload-only refreshes.
+    pub(super) fn positioned(&self, index: usize, now: Instant) -> Option<&QueueRow> {
+        self.rows.get(index).or_else(|| {
+            self.retained_positions
+                .then(|| self.rows.display(index, now))
+                .flatten()
+        })
+    }
+    /// Retained rows the viewport still shows; bounded by retention trimming.
+    fn shows_retained(&self, now: Instant) -> bool {
+        let page_size = self.page_size.max(1);
+        let visible = self.rows.visible();
+        let end = visible.end.saturating_add(page_size).min(self.rows.len());
+        (visible.start / page_size * page_size..end)
+            .any(|index| self.rows.get(index).is_none() && self.rows.display(index, now).is_some())
+    }
+    pub(super) fn operation_rows(&self, source: QueueIdentity, now: Instant) -> Vec<QueueIdentity> {
+        // Callers gate on the structure revision; row-value refreshes keep positions.
+        if self.positioned(source.offset, now).map(QueueIdentity::from) != Some(source) {
             return Vec::new();
         }
         if self.contains(&source.id) {
@@ -405,26 +420,27 @@ impl QueueBrowser {
         let impact = self.page_projection.impact(&query, revisions);
         let changed = self.page_projection.sync(&query, revisions);
         if changed {
-            self.locate.invalidate();
-            self.locate_filtered = None;
             if impact.identity_changed {
                 self.rows.clear();
+                self.retained_positions = false;
             } else if impact.coordinates_changed {
                 self.rows.refresh_at(now);
+                self.retained_positions = false;
             } else {
+                // Filtered ranks follow row values, so only unfiltered rows keep
+                // positions; older retained rows from another structure taint all.
+                self.retained_positions =
+                    self.query.is_none() && (self.retained_positions || !self.shows_retained(now));
                 self.rows.invalidate_payload(now);
             }
+            // Payload-only changes keep occurrence positions: selection, range
+            // and locate jobs stay bound to their current identity stamps.
             if impact.coordinates_changed {
+                self.locate.invalidate();
+                self.locate_filtered = None;
                 self.projection.sync(&self.selection_query(), revisions);
                 self.cancel();
                 self.schedule_reconcile(revisions);
-            } else {
-                self.cancel_manual();
-                if self.positions_stale && self.selection_error.is_none() {
-                    self.reconcile_projection.cancel();
-                    self.reconcile_pending = None;
-                    self.schedule_reconcile(revisions);
-                }
             }
         }
         if self.query.is_none() {
@@ -824,9 +840,11 @@ mod tests {
         assert!(selection.selected.capacity() <= 64);
     }
 
+    /// A structural queue change, which advances both queue tokens.
     fn revisions(queue: u64) -> QueryRevisions {
         QueryRevisions {
             queue,
+            queue_structure: queue,
             ..QueryRevisions::default()
         }
     }
@@ -859,23 +877,23 @@ mod tests {
             total: 3,
             rows: vec![row(10, 0), row(11, 1), row(12, 2)],
         });
-        let generation = queue.page_projection.generation();
+        let now = Instant::now();
         queue.select(identity(12, 2), false);
         queue.select(identity(10, 0), true);
-        let frozen = queue.operation_rows(identity(12, 2), generation);
+        let frozen = queue.operation_rows(identity(12, 2), now);
         assert_eq!(frozen, [identity(10, 0), identity(12, 2)]);
         assert_eq!(
             frozen.iter().map(|row| row.track_id).collect::<Vec<_>>(),
             [1, 1]
         );
         assert_eq!(
-            queue.operation_rows(identity(11, 1), generation),
+            queue.operation_rows(identity(11, 1), now),
             [identity(11, 1)]
         );
         assert_eq!(queue.ordered_ids(), [10, 12]);
-        assert!(queue.operation_rows(identity(11, 0), generation).is_empty());
+        assert!(queue.operation_rows(identity(11, 0), now).is_empty());
         queue.change_search(Some("different projection".into()));
-        assert!(queue.operation_rows(identity(12, 2), generation).is_empty());
+        assert!(queue.operation_rows(identity(12, 2), now).is_empty());
         assert_eq!(frozen, [identity(10, 0), identity(12, 2)]);
     }
     #[test]
@@ -886,17 +904,17 @@ mod tests {
             total: 3,
             rows: vec![row(10, 0), row(11, 1), row(12, 2)],
         });
-        let generation = queue.page_projection.generation();
-        assert!(queue.sync(revisions(8), 3, Instant::now()));
+        let now = Instant::now();
+        assert!(queue.sync(revisions(8), 3, now));
         assert!(queue.rows.get(1).is_none());
         assert!(queue.rows.position(|row| row.id == 11).is_none());
-        assert!(queue.operation_rows(identity(11, 1), generation).is_empty());
+        assert!(queue.operation_rows(identity(11, 1), now).is_empty());
         // Retained payload survives until the retention deadline, then disappears.
         let deadline = queue.rows.refresh_deadline().unwrap();
         let before = deadline - std::time::Duration::from_nanos(1);
         assert_eq!(queue.rows.display(1, before).unwrap().id, 11);
         assert!(!queue.rows.expire(before));
-        assert!(queue.operation_rows(identity(11, 1), generation).is_empty());
+        assert!(queue.operation_rows(identity(11, 1), before).is_empty());
         assert!(queue.rows.expire(deadline));
         assert!(queue.rows.display(1, deadline).is_none());
     }
@@ -924,9 +942,70 @@ mod tests {
             || "unexpected".into(),
         );
         assert_eq!(
-            queue.operation_rows(identity(10, 0), generation),
+            queue.operation_rows(identity(10, 0), Instant::now()),
             [identity(10, 0)]
         );
+    }
+
+    #[test]
+    fn row_value_refresh_keeps_operation_rows_until_structure_changes() {
+        use rivu_protocol::response::{QueryResponse, ViewResponse};
+        let mut queue = queue(7);
+        queue.page_size = 20;
+        queue.rows.begin(0, 20);
+        queue.rows.accept(Page {
+            total: 3,
+            rows: vec![row(10, 0), row(11, 1), row(12, 2)],
+        });
+        queue.select(identity(12, 2), false);
+        queue.select(identity(10, 0), true);
+        let group = [identity(10, 0), identity(12, 2)];
+        let now = Instant::now();
+        // A favorite or play count edit advances queue content only.
+        let content = QueryRevisions {
+            queue: 8,
+            ..revisions(7)
+        };
+        assert!(queue.sync(content, 3, now));
+        // Retained rows keep their positions before the page reloads...
+        assert!(queue.rows.get(1).is_none());
+        assert_eq!(queue.positioned(1, now).map(|row| row.id), Some(11));
+        assert_eq!(
+            queue.operation_rows(identity(11, 1), now),
+            [identity(11, 1)]
+        );
+        assert_eq!(queue.operation_rows(identity(12, 2), now), group);
+        // ...and after it reloads under a new page generation.
+        let (query, generation) = queue.demand_page(0..3, 20).unwrap();
+        queue.accept_page(
+            &query,
+            generation,
+            QueryResponse {
+                revisions: content,
+                result: Ok(ViewResponse::QueuePage(Page {
+                    total: 3,
+                    rows: vec![row(10, 0), row(11, 1), row(12, 2)],
+                })),
+            },
+            || "unexpected".into(),
+        );
+        assert_eq!(
+            queue.operation_rows(identity(11, 1), now),
+            [identity(11, 1)]
+        );
+        assert_eq!(queue.operation_rows(identity(12, 2), now), group);
+        // A structural change retires positions; its retained rows keep
+        // tainting a following row-value refresh.
+        assert!(queue.sync(revisions(9), 3, now));
+        assert!(queue.positioned(1, now).is_none());
+        assert!(queue.operation_rows(identity(11, 1), now).is_empty());
+        let content = QueryRevisions {
+            queue: 10,
+            ..revisions(9)
+        };
+        assert!(queue.sync(content, 3, now));
+        assert!(queue.positioned(1, now).is_none());
+        assert!(queue.operation_rows(identity(11, 1), now).is_empty());
     }
 
     #[test]
@@ -1362,6 +1441,33 @@ mod tests {
         assert!(queue.finish_selection(&next, Some(&"offline".to_owned())));
         assert_eq!(queue.navigation, None);
         assert_eq!(queue.active(), Some(identity(1, 0)));
+    }
+
+    #[test]
+    fn row_value_changes_keep_inflight_selection_and_structure_changes_retire_it() {
+        use crate::gui::coordination::manual_actions::ManualIntents;
+        let mut intents = ManualIntents::default();
+        let mut queue = queue(0);
+        queue.select(identity(1, 0), false);
+        let intent = intents.begin();
+        queue.begin_navigation(intent, revisions(0), 8, true);
+        let job = queue.take_job().unwrap();
+        // A play count edit advances queue content only.
+        let content = QueryRevisions {
+            queue: 1,
+            ..revisions(0)
+        };
+        assert!(queue.sync(content, 200_000, Instant::now()));
+        assert_eq!(queue.manual, Some(intent));
+        assert!(queue.current(job.generation, job.stamp));
+        assert!(queue.finish_selection(&job, None));
+        queue.release_worker(job.generation);
+        let intent = intents.begin();
+        queue.begin_navigation(intent, content, 9, true);
+        let job = queue.take_job().unwrap();
+        queue.sync(revisions(2), 200_000, Instant::now());
+        assert_eq!(queue.manual, None);
+        assert!(!queue.finish_selection(&job, None));
     }
     #[test]
     fn unrelated_publications_preserve_pages_failures_selection_and_playing_locate() {

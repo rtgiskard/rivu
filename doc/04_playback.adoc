@@ -384,8 +384,10 @@ Use `rivu queue list` to find occurrence IDs for `queue play`, `queue remove`,
 and `queue move`. Move positions start at zero in the queue after removing the
 moved selection; the end position is valid, larger positions are rejected.
 For `queue move QUEUE_ID INDEX --expected-revision REVISION`, first read
-`queue.revision` from `rivu --json status`, then run `queue list` and choose the
-position using that listing. Submit the earlier revision; `queue list` binds
+`queue.structure_revision` from `rivu --json status`, then run `queue list` and
+choose the position using that listing. Submit the earlier revision; it changes
+only when occurrences are added, removed or reordered, not when play counts or
+tags change. `queue list` binds
 its current-occurrence marker and all batches to one revision but does not
 print it. If Core rejects a stale revision, fetch the revision and listing
 again in that order and choose the position anew.
@@ -419,7 +421,7 @@ the operation without registering new tracks or appending elsewhere.
 rivu queue add-paths song.wav another.flac song.wav --wait
 ----
 
-For positional CLI insertion, read `queue.revision` before listing Queue, as
+For positional CLI insertion, read `queue.structure_revision` before listing Queue, as
 for `queue move` above. Pass the chosen `--index` and that `--expected-revision`.
 A terminal result can report skipped-file errors even when valid files were
 saved. Registered tracks appear under their configured folder or in
@@ -455,8 +457,8 @@ and all its occurrences. The toolbar offers group removal.
 Drag a selection to move it in original queue order, or an unselected row to move
 only that occurrence. The group stays fixed during the gesture. A row's upper/lower
 half inserts before/after it; the accent line marks the boundary, and blank space
-appends. Dropping on the group or pressing Esc cancels. Changed queue contents
-reject the drag.
+appends. Dropping on the group or pressing Esc cancels. Queue membership or order
+changes reject the drag; row-value changes such as favorite or play count do not.
 
 Cross-collection drops use these same boundaries. For supported sources, copy
 versus reorder semantics, and occurrence preservation, see

@@ -566,13 +566,13 @@ fn library_changes_do_not_proxy_for_queue_or_album_effects() {
         .media
         .release_date = Some("2042-01".into());
     let member = store.apply_scan(&scan).unwrap();
-    assert!(member.changed && member.library && !member.queue && !member.albums);
+    assert!(member.changed && member.library && !member.queue_row_values && !member.albums);
     std::sync::Arc::make_mut(&mut scan.records[2]).media.title = "Retitled plain track".into();
     let plain = store.apply_scan(&scan).unwrap();
-    assert!(plain.changed && plain.library && !plain.queue && !plain.albums);
+    assert!(plain.changed && plain.library && !plain.queue_row_values && !plain.albums);
     std::sync::Arc::make_mut(&mut scan.records[1]).media.title = "Retitled album member".into();
     let member = store.apply_scan(&scan).unwrap();
-    assert!(member.changed && member.library && !member.queue && member.albums);
+    assert!(member.changed && member.library && !member.queue_row_values && member.albums);
     std::sync::Arc::make_mut(&mut scan.records[0])
         .media
         .release_date = Some("2042-01".into());
@@ -580,12 +580,12 @@ fn library_changes_do_not_proxy_for_queue_or_album_effects() {
     assert!(
         representative.changed
             && representative.library
-            && !representative.queue
+            && !representative.queue_row_values
             && representative.albums
     );
     std::sync::Arc::make_mut(&mut scan.records[0]).media.title = "Retitled queued track".into();
     let queued = store.apply_scan(&scan).unwrap();
-    assert!(queued.changed && queued.library && queued.queue && queued.albums);
+    assert!(queued.changed && queued.library && queued.queue_row_values && queued.albums);
     assert_eq!(store.apply_scan(&scan).unwrap(), CatalogChanges::default());
 }
 
@@ -622,7 +622,7 @@ fn changed_scan_metadata_invalidates_queue_without_losing_entry_identity() {
             changed: true,
             library: true,
             counts: true,
-            queue: true,
+            queue_row_values: true,
             albums: true,
             ..CatalogChanges::default()
         }
@@ -679,7 +679,7 @@ fn audio_source_rescans_refresh_ordinary_and_cue_row_projections() {
             source.modified_ns += 1;
             let expected = source.media.clone();
             let impacts = store.apply_scan(&scan).unwrap();
-            assert!(impacts.library && impacts.queue && impacts.albums);
+            assert!(impacts.library && impacts.queue_row_values && impacts.albums);
             assert!(!impacts.structure);
             let track = store.track(id).unwrap().unwrap();
             let queued = store.queue_page(None, 0, 10).unwrap().rows.remove(0).track;
@@ -767,7 +767,7 @@ fn rescans_replace_edited_tags_and_invalidate_display_without_changing_queue_ide
             changed: true,
             library: true,
             counts: true,
-            queue: true,
+            queue_row_values: true,
             albums: true,
             ..CatalogChanges::default()
         }
@@ -873,7 +873,7 @@ fn missing_transitions_invalidate_once_and_recovery_preserves_queue_entry() {
         changed: true,
         library: true,
         counts: true,
-        queue: true,
+        queue_row_values: true,
         albums: true,
         duplicate_groups: true,
         ..CatalogChanges::default()
@@ -912,7 +912,7 @@ fn optional_scan_metadata_clears_and_restores_queue_values() {
         .media
         .bitrate_bps = None;
     std::sync::Arc::make_mut(&mut scan.records[0]).fingerprint = None;
-    assert!(store.apply_scan(&scan).unwrap().queue);
+    assert!(store.apply_scan(&scan).unwrap().queue_row_values);
     let cleared = store.queue_state().unwrap();
     assert_eq!(cleared, state);
     let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
@@ -923,7 +923,7 @@ fn optional_scan_metadata_clears_and_restores_queue_values() {
     assert_eq!(store.queue_state().unwrap(), cleared);
     assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], row);
     scan.records[0] = original;
-    assert!(store.apply_scan(&scan).unwrap().queue);
+    assert!(store.apply_scan(&scan).unwrap().queue_row_values);
     assert_eq!(store.queue_state().unwrap(), cleared);
     let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
     assert_eq!(row.track.duration, Some(60.0));
@@ -1038,7 +1038,7 @@ fn cue_source_rename_invalidates_queue_rows_without_changing_occurrences_or_curr
             changed: true,
             library: true,
             counts: true,
-            queue: true,
+            queue_row_values: true,
             albums: true,
             structure: true,
             ..CatalogChanges::default()
@@ -1660,7 +1660,7 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
         store
             .apply_other_tracks_check(&mut absent, &[])
             .unwrap()
-            .queue
+            .queue_row_values
     );
     assert!(store.track(id).unwrap().unwrap().missing);
     assert!(store.track(cue_id).unwrap().unwrap().missing);
@@ -1702,7 +1702,7 @@ fn other_check_preserves_registered_cue_identity_and_user_state_across_absence()
         store
             .apply_other_tracks_check(&mut restored, &[])
             .unwrap()
-            .queue
+            .queue_row_values
     );
     let segment = store.track(cue_id).unwrap().unwrap();
     assert!(!segment.missing);

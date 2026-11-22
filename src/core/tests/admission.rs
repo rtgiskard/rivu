@@ -140,10 +140,15 @@ fn external_insertions_invalidate_queue_intents_even_for_unchanged_registered_so
         write_pcm_frames(&path, 1);
         for _ in 0..2 {
             let before = core.state.query_revisions();
-            core.start_external_admission(vec![path.clone()], index, index.map(|_| before.queue))
-                .unwrap();
+            core.start_external_admission(
+                vec![path.clone()],
+                index,
+                index.map(|_| before.queue_structure),
+            )
+            .unwrap();
             finish_admission(&mut core);
             assert_ne!(core.state.queue.revision, before.queue);
+            assert_ne!(core.state.queue.structure_revision, before.queue_structure);
             let stale = Query::QueueBatch {
                 query: None,
                 after: None,
@@ -155,8 +160,12 @@ fn external_insertions_invalidate_queue_intents_even_for_unchanged_registered_so
                 Err(QueryError::RevisionChanged)
             ));
             assert!(
-                core.start_external_admission(vec![path.clone()], Some(0), Some(before.queue))
-                    .is_err()
+                core.start_external_admission(
+                    vec![path.clone()],
+                    Some(0),
+                    Some(before.queue_structure)
+                )
+                .is_err()
             );
         }
     }
@@ -168,7 +177,7 @@ fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_ap
     let path = directory.path().join("external.wav");
     write_pcm_frames(&path, 1);
     let before_total = core.state.library.track_total;
-    let revision = core.state.queue.revision;
+    let revision = core.state.queue.structure_revision;
     core.start_external_admission(vec![path.clone()], Some(1), Some(revision))
         .unwrap();
     let id = core.active_external_admission.as_ref().unwrap().status.id;
@@ -190,6 +199,34 @@ fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_ap
     };
     assert!(!status.library_committed);
     assert_eq!(status.progress.phase, ScanPhase::Failed);
+}
+
+#[test]
+fn play_count_during_probe_keeps_positional_admission_valid() {
+    let (directory, mut core) = fixture();
+    let path = directory.path().join("external.wav");
+    write_pcm_frames(&path, 1);
+    let revision = core.state.queue.structure_revision;
+    core.start_external_admission(vec![path.clone()], Some(1), Some(revision))
+        .unwrap();
+    let content = core.state.queue.revision;
+    // A displayed queued-row value changes while files are still being prepared.
+    core.command(Command::SetPlayCount {
+        track_id: 1,
+        play_count: 4,
+    })
+    .unwrap();
+    assert_ne!(core.state.queue.revision, content);
+    assert_eq!(core.state.queue.structure_revision, revision);
+    let before = core.store.queue_ids().unwrap();
+    finish_admission(&mut core);
+    let status = core.scan_results.back().unwrap();
+    assert!(status.library_committed);
+    assert_eq!(status.progress.phase, ScanPhase::Completed);
+    let after = core.store.queue_ids().unwrap();
+    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!((after[0], &after[2..]), (before[0], &before[1..]));
+    assert_ne!(core.state.queue.structure_revision, revision);
 }
 
 #[test]
@@ -651,6 +688,7 @@ fn saving_queue_bundle_remains_usable_when_later_scalar_reads_fail() {
         core.save_queue().unwrap();
         core.refresh_queue_tracks().unwrap();
         core.state.queue.revision = revision;
+        core.state.queue.structure_revision = revision;
         let before = core.state.queue.total;
         let path = directory.path().join("external.wav");
         write_pcm_frames(&path, 1);
@@ -698,14 +736,18 @@ fn saving_queue_bundle_preserves_newer_structure_and_already_saved_selection() {
         let revision = core.state.queue.revision;
         let path = directory.path().join("external.wav");
         write_pcm_frames(&path, 1);
-        core.start_external_admission(vec![path], Some(0), Some(revision))
-            .unwrap();
+        core.start_external_admission(
+            vec![path],
+            Some(0),
+            Some(core.state.queue.structure_revision),
+        )
+        .unwrap();
         let completion = take_admission_event(&mut core, |event| {
             matches!(event, crate::core::admission::Event::SavingRetired(_))
         });
         if changed_structure {
             core.store.enqueue_tracks(&[2]).unwrap();
-            core.advance_queue_revision();
+            core.advance_queue_structure();
         }
         core.start_with_status(3, QueueHistory::Record, PlaybackStatus::Stopped)
             .unwrap();
@@ -740,7 +782,7 @@ fn committed_external_queue_projection_failure_recovers_before_navigation() {
         let path = directory.path().join("external.wav");
         write_pcm_frames(&path, 1);
         let connection = fail_queue_projection_after(directory.path(), "INSERT");
-        let expected_revision = index.map(|_| core.state.queue.revision);
+        let expected_revision = index.map(|_| core.state.queue.structure_revision);
         core.start_external_admission(vec![path], index, expected_revision)
             .unwrap();
         let id = core.active_external_admission.as_ref().unwrap().status.id;

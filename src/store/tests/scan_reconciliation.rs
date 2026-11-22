@@ -873,7 +873,7 @@ fn audio_spec_rescans_refresh_queued_projection_without_changing_occurrences() {
             _ => record.media.bits_per_sample = Some(24),
         }
         let impacts = store.apply_scan(&scan(vec![record.clone()])).unwrap();
-        assert!(impacts.library && impacts.queue);
+        assert!(impacts.library && impacts.queue_row_values);
         assert!(!impacts.structure);
         let after = store.queue_page(None, 0, 2).unwrap();
         assert_eq!(after.total, before.total);
@@ -887,6 +887,11 @@ fn audio_spec_rescans_refresh_queued_projection_without_changing_occurrences() {
             assert_eq!(new.track.sample_rate, record.media.sample_rate);
             assert_eq!(new.track.bits_per_sample, record.media.bits_per_sample);
         }
-        assert!(!store.apply_scan(&scan(vec![record.clone()])).unwrap().queue);
+        assert!(
+            !store
+                .apply_scan(&scan(vec![record.clone()]))
+                .unwrap()
+                .queue_row_values
+        );
     }
 }

@@ -1037,8 +1037,9 @@ mod tests {
             bitrate_revision: 1,
             ..previous.clone()
         };
-        let revisions = previous.query_revisions(0, Some(1));
-        let current = latest.query_revisions(0, Some(1));
+        let queue = rivu_protocol::model::QueueState::default();
+        let revisions = previous.query_revisions(&queue, Some(1));
+        let current = latest.query_revisions(&queue, Some(1));
         browser.select_playlist(1, "one".into(), 0, Instant::now());
         browser.playlists.prepare_page(false, 0, 20);
         browser.playlists.accept_summaries(Page {
@@ -2046,19 +2047,20 @@ mod tests {
             playlist_id: 1,
             entry_ids: vec![3],
         };
-        let before = library.query_revisions(0, Some(1));
+        let queue = rivu_protocol::model::QueueState::default();
+        let before = library.query_revisions(&queue, Some(1));
         library.revision += 1;
-        let metadata = library.query_revisions(0, Some(1));
+        let metadata = library.query_revisions(&queue, Some(1));
         assert_eq!(summaries.stamp(before), summaries.stamp(metadata));
         assert_ne!(entries.stamp(before), entries.stamp(metadata));
         assert_eq!(compact.stamp(before), compact.stamp(metadata));
         library.playlist_revision += 1;
-        let renamed = library.query_revisions(0, Some(1));
+        let renamed = library.query_revisions(&queue, Some(1));
         assert_ne!(summaries.stamp(metadata), summaries.stamp(renamed));
         assert_eq!(entries.stamp(metadata), entries.stamp(renamed));
         assert_eq!(compact.stamp(metadata), compact.stamp(renamed));
         Arc::make_mut(&mut library.playlist_entry_revisions).remove(&1);
-        let deleted = library.query_revisions(0, Some(1));
+        let deleted = library.query_revisions(&queue, Some(1));
         assert_ne!(compact.stamp(renamed), compact.stamp(deleted));
     }
 

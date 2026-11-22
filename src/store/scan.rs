@@ -241,7 +241,7 @@ pub(super) fn staged_catalog_changes(
                 structure: row.get(1)?,
                 duplicate_groups: row.get(2)?,
                 duplicate_members: row.get(3)?,
-                queue: row.get(4)?,
+                queue_row_values: row.get(4)?,
                 albums: row.get(5)?,
                 history: row.get(6)?,
                 counts: row.get(7)?,
@@ -1222,7 +1222,7 @@ impl Store {
                 changed_tracks += 1;
                 impacts.library = true;
                 impacts.counts = true;
-                impacts.queue |= row.get::<_, bool>(1)?;
+                impacts.queue_row_values |= row.get::<_, bool>(1)?;
                 impacts.albums |= row.get::<_, bool>(2)?;
                 impacts.duplicate_groups |= duplicate_missing.contains(&id);
             }

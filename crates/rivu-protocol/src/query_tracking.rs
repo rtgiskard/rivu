@@ -249,9 +249,15 @@ mod tests {
             ..payload
         };
         assert!(!tracker.impact(&query, unrelated).rows_changed());
-        let related = QueryRevisions {
+        let content = QueryRevisions {
             queue: 1,
             ..payload
+        };
+        let change = tracker.impact(&query, content);
+        assert!(change.payload_changed && !change.coordinates_changed);
+        let related = QueryRevisions {
+            queue_structure: 1,
+            ..content
         };
         assert!(tracker.impact(&query, related).coordinates_changed);
         let filtered = Query::QueuePage {

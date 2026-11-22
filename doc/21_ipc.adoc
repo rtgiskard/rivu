@@ -587,13 +587,17 @@ drops the receiver immediately. The closed registration is pruned on the next
 subscription or state-changing publication.
 
 The Queue state section is constant-size: `{total, current_id, current_position,
-revision}`. It never embeds all occurrence IDs or track metadata. Queue content
-and queued display-metadata edits advance its content revision; changing only the
-current occurrence updates the Queue state-section token without invalidating
-content pages. Unrelated track edits advance Library only. Last-played activity
-does not invalidate Queue unless a displayed field, such as play count, changes.
-Reapplying identical metadata or favorites, including a forced scan that keeps
-the same displayed values, does not advance the queue content revision.
+revision, structure_revision}`. It never embeds all occurrence IDs or track
+metadata. `structure_revision` changes only when occurrences are inserted,
+removed or reordered; every such change also advances the content `revision`.
+Queued display-metadata edits, favorites and play counts advance `revision`
+alone, so positional commands and unfiltered occurrence lookups stay valid while
+displayed rows refresh. Changing only the current occurrence updates the Queue
+state-section token without invalidating content pages. Unrelated track edits
+advance Library only. Last-played activity does not invalidate Queue unless a
+displayed field, such as play count, changes. Reapplying identical metadata or
+favorites, including a forced scan that keeps the same displayed values, does not
+advance the queue content revision.
 Scan publication distinguishes display changes, structure, duplicate groups and
 duplicate-member verification facts. Size/mtime-only changes need not invalidate
 display pages. No-op metadata edits do not advance display revisions. Playlist reference
@@ -688,9 +692,13 @@ Playlist summaries use the summary catalog only; full entry rows use
 `playlist_metadata = {playlist_id, revision}` plus their scoped content/lifetime
 token. Unfiltered compact entry locations use only their content token; filtered
 locations also use scoped metadata, with the same library fallback as full rows.
-Queue queries use queue content, including while filtered; unrelated Library
-changes do not invalidate them. Duplicate groups use `duplicate_groups`; members
-use library, `duplicate_members`, and queue content. Playlist reference changes
+Queue display rows use queue content (`revisions.queue`); unfiltered rows also
+select queue structure (`revisions.queue_structure`, `QueueState.structure_revision`
+in snapshots), so content-only changes refresh row values without invalidating
+positions. Unfiltered compact identity and location reads use `revisions.queue_structure`
+only (see below). Unrelated Library changes do not invalidate queue
+queries. Duplicate groups use `duplicate_groups`; members
+use library, `duplicate_members`, and `revisions.queue`. Playlist reference changes
 advance member facts, while playlist names and order do not.
 
 `QueryImpact` separates query identity changes, changes to payload-only
@@ -808,9 +816,11 @@ display metadata. Duplicate track occurrences keep distinct IDs.
 most 256 requested occurrence IDs. It deduplicates repeated IDs, omits missing,
 filtered-out, and non-queue entries, and returns matches in queue order.
 For both projections, `position` is absolute and `offset` is the zero-based rank
-among all matches, not among the requested IDs. Both select the queue-content
-revision, not the bitrate revision; discard late results when the filter, request
-generation, or captured queue revision is no longer current.
+among all matches, not among the requested IDs. Unfiltered requests select the
+queue `structure_revision`; filtered requests select the content `revision`,
+because queued title, artist, album or file-name edits can change match ranks.
+Neither selects the bitrate revision. Discard late results when the filter,
+request generation, or captured revision is no longer current.
 
 `PlaylistEntryLocations {playlist_id, query, entry_ids}` resolves at most 256 stable
 entry IDs to compact `{id, playlist_id, track_id, position, offset, total}` records
@@ -950,18 +960,18 @@ selection. Storage work is scoped to affected collections and position ranges,
 but widely scattered moves can touch a list-length span. Business owners retain
 validation, playback effects, and revision publication.
 
-`MoveQueue` and `MoveQueueEntries` carry the queue `expected_revision` observed
-when choosing their target index. The index is an insertion slot after removing
-the distinct selection, in `0..=total-selected_count`; larger values are rejected.
-For `MoveQueueEntries`, an empty selection succeeds after the revision check,
-without checking the insertion index.
-Core rejects stale revisions before changing positions; clients must refresh and
-choose a new target rather than replaying the old index. A successful move advances
-the queue revision only if order changes.
+`MoveQueue` and `MoveQueueEntries` carry the queue `structure_revision` observed,
+as `expected_revision`, when choosing their target index. The index is an
+insertion slot after removing the distinct selection, in
+`0..=total-selected_count`; larger values are rejected. For `MoveQueueEntries`,
+an empty selection succeeds after the revision check, without checking the
+insertion index. Core rejects stale revisions before changing positions; clients
+must refresh and choose a new target rather than replaying the old index. A
+successful move advances both queue revisions only if order changes.
 
-After a confirmed structural queue commit, Core advances its in-memory content
-revision once, before refreshing projections. Store transactions do not persist
-or issue that token; rollback and no-op mutations leave it unchanged. Metadata
+After a confirmed structural queue commit, Core advances both in-memory queue
+revisions once, before refreshing projections. Store transactions do not persist
+or issue these tokens; rollback and no-op mutations leave them unchanged. Metadata
 invalidation remains field-sensitive. A post-commit refresh failure reports that
 the queue modification is saved; refresh the view rather than repeat the mutation.
 
@@ -1026,7 +1036,8 @@ link:04_playback.adoc#adding-local-files[Adding local files].
 at an original-list boundary in `0..=total`. The corresponding
 `InsertQueueSources` and `InsertPlaylistSources` also accept `directories` and
 use stable track-ID union order for source expansion. Core checks the destination's
-order revision even for empty requests; stale revisions, invalid boundaries, or
+order revision (the queue `structure_revision` or the playlist entry token) even for
+empty requests; stale revisions, invalid boundaries, or
 unknown tracks fail without partial writes. Explicit occurrences preserve input
 order and duplicates without changing existing entries or the playing occurrence.
 Gap creation and insertion commit in one transaction. Explicit `Enqueue` and
@@ -1053,7 +1064,7 @@ source and a queue destination. Neither path collects paged track IDs.
 without client-side page collection. Album sources carry their key and `album`
 revision; Playlist sources carry ID and content/lifetime token. Queue destinations
 may omit `insertion` to append atomically at the execution-time end. A specified
-insertion carries an index and queue revision, which Core validates. Playlist
+insertion carries an index and the queue `structure_revision`, which Core validates. Playlist
 destinations carry ID, entry token, and optional index (omitted means append).
 Core validates source and applicable destination tokens before the transaction
 resolves and inserts members; staleness rejects the whole operation. Every

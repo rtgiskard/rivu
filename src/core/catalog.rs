@@ -351,7 +351,9 @@ impl Core {
         }
         let dependencies = impacts.dependencies(false);
         self.projections.track_total |= dependencies.refresh_track_total;
-        if dependencies.queue_revision {
+        if dependencies.queue_structure_revision {
+            self.advance_queue_structure();
+        } else if dependencies.queue_revision {
             self.advance_queue_revision();
         }
         if dependencies.album_revision {
@@ -1205,7 +1207,7 @@ mod tests {
                         changed: edit.changed,
                         library: edit.library,
                         counts: edit.counts,
-                        queue: edit.queue,
+                        queue_row_values: edit.queue,
                         albums: edit.albums,
                         ..Default::default()
                     }),

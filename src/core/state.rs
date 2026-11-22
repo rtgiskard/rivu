@@ -35,17 +35,16 @@ impl CoreState {
         self.current_track.as_deref()
     }
     pub(crate) fn query_revisions(&self) -> QueryRevisions {
-        self.library.query_revisions(self.queue.revision, None)
+        self.library.query_revisions(&self.queue, None)
     }
 
     #[cfg(test)]
     pub(crate) fn playlist_query_revisions(&self, playlist_id: i64) -> QueryRevisions {
-        self.library
-            .query_revisions(self.queue.revision, Some(playlist_id))
+        self.library.query_revisions(&self.queue, Some(playlist_id))
     }
 
     pub(crate) fn query_revisions_for(&self, query: &Query) -> QueryRevisions {
-        self.library.query_revisions_for(query, self.queue.revision)
+        self.library.query_revisions_for(query, &self.queue)
     }
 
     /// Queue state is constant-size; Arc identity avoids traversing history/config.

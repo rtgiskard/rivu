@@ -13,9 +13,9 @@ enum Target {
 }
 
 impl Target {
-    fn revision(self, state: &TuiSnapshot) -> Option<u64> {
+    fn order_revision(self, state: &TuiSnapshot) -> Option<u64> {
         match self {
-            Self::Queue(_) => Some(state.queue.revision),
+            Self::Queue(_) => Some(state.queue.structure_revision),
             Self::Playlist(_) => Some(state.library.playlist_revision),
             Self::Entry { playlist_id, .. } => state
                 .library
@@ -82,7 +82,7 @@ impl UiState {
         if let Some(target) = target {
             self.reorder = Some(Reorder {
                 target,
-                revision: target.revision(state).expect("loaded reorder target"),
+                revision: target.order_revision(state).expect("loaded reorder target"),
                 phase: Phase::Preview,
             });
             self.startup_hint_deadline = None;
@@ -125,7 +125,7 @@ impl UiState {
         if matches!(
             reorder.phase,
             Phase::Changed | Phase::SavingAfterChange | Phase::Unknown
-        ) || reorder.target.revision(next) == Some(reorder.revision)
+        ) || reorder.target.order_revision(next) == Some(reorder.revision)
         {
             return;
         }
@@ -354,6 +354,7 @@ mod tests {
         let mut snapshot = TuiSnapshot::default();
         snapshot.queue.total = 3;
         snapshot.queue.revision = 23;
+        snapshot.queue.structure_revision = 23;
         let mut tui = TuiState::new(snapshot, Arc::new(Localizer::for_terminal("en-US")));
         tui.ui.queue.set_viewport(3);
         tui.ui.queue.insert(
@@ -406,6 +407,17 @@ mod tests {
     }
 
     #[test]
+    fn queue_preview_keeps_destination_when_only_row_values_change() {
+        let mut tui = preview();
+        let mut next = tui.snapshot.clone();
+        // A play count edit advances queue content, not occurrence order.
+        next.queue.revision += 1;
+        tui.apply_snapshot(next);
+        assert_eq!(tui.ui.queue.locator, None);
+        assert_save(&mut tui);
+    }
+
+    #[test]
     fn conflicting_insert_cannot_turn_enter_into_playback_or_a_second_save() {
         for submitted in [false, true] {
             let mut tui = preview();
@@ -415,6 +427,7 @@ mod tests {
             let mut next = tui.snapshot.clone();
             next.queue.total += 1;
             next.queue.revision += 1;
+            next.queue.structure_revision += 1;
             tui.apply_snapshot(next);
             if submitted {
                 tui.ui.complete_reorder(Err("stale".into()));
@@ -448,6 +461,7 @@ mod tests {
             }
             let mut next = tui.snapshot.clone();
             next.queue.revision += 1;
+            next.queue.structure_revision += 1;
             tui.apply_snapshot(next);
             if !ack_first {
                 tui.ui.complete_reorder(Ok(()));
@@ -477,6 +491,7 @@ mod tests {
                 assert_save(&mut tui);
                 let mut next = tui.snapshot.clone();
                 next.queue.revision += 1;
+                next.queue.structure_revision += 1;
                 if !ack_first {
                     tui.apply_snapshot(next.clone());
                 }

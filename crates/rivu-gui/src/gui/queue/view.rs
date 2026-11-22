@@ -42,15 +42,29 @@ impl QueueDrag {
     }
 }
 
+/// Retained and loading rows do not authorize positions, but a drop aimed at them
+/// must not fall through to the list's append target.
+fn absorb_drops(row: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+    fn absorb<T: 'static>(row: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+        row.on_drop(|_: &T, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+    }
+    absorb::<ContentDrag>(absorb::<LibraryDrag>(absorb::<ListDrag>(absorb::<
+        ExternalPaths,
+    >(row))))
+}
+
 impl Queue {
     fn send_queue_position_action(
         &mut self,
-        revision: u64,
+        structure_revision: u64,
         command: Command,
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if self.state.queue.revision == revision {
+        if self.state.queue.structure_revision == structure_revision {
             self.send(command, cx);
         } else {
             cx.emit(QueueEvent::Error(
@@ -66,38 +80,27 @@ impl Queue {
     fn queue_drop_index(
         &self,
         drag: &QueueDrag,
-        target_id: Option<(u64, bool)>,
+        target: Option<(QueueIdentity, bool)>,
         owner: gpui::EntityId,
     ) -> Option<usize> {
         if self.model.query.is_some()
             || drag.owner != owner
-            || drag.revision != self.state.queue.revision
+            || drag.structure_revision != self.state.queue.structure_revision
         {
             return None;
         }
-        let target = match target_id {
-            Some((id, after)) => Some((
-                self.model
-                    .rows
-                    .iter()
-                    .find(|row| row.id == id)
-                    .map(QueueIdentity::from)?,
-                after,
-            )),
-            None => None,
-        };
         drag.insertion_index(target, self.state.queue.total)
     }
 
     fn move_queue_entry(
         &mut self,
         drag: &QueueDrag,
-        target_id: Option<(u64, bool)>,
+        target: Option<(QueueIdentity, bool)>,
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        let Some(index) = self.queue_drop_index(drag, target_id, cx.entity().entity_id()) else {
-            if drag.revision != self.state.queue.revision {
+        let Some(index) = self.queue_drop_index(drag, target, cx.entity().entity_id()) else {
+            if drag.structure_revision != self.state.queue.structure_revision {
                 cx.emit(QueueEvent::Error(
                     self.context.i18n.text("li-source-changed").to_owned(),
                 ));
@@ -114,7 +117,7 @@ impl Queue {
                     .map(|row| row.id)
                     .collect(),
                 index,
-                expected_revision: self.state.queue.revision,
+                expected_revision: self.state.queue.structure_revision,
             },
             cx,
         );
@@ -129,10 +132,11 @@ impl Queue {
         self.refresh(cx);
         let (index, expected_revision) = match destination {
             DragDestination::Queue => (None, None),
-            DragDestination::QueueAt { index, revision }
-                if self.model.query.is_none() && destination.current(&self.state) =>
-            {
-                (Some(index), Some(revision))
+            DragDestination::QueueAt {
+                index,
+                structure_revision,
+            } if self.model.query.is_none() && destination.current(&self.state) => {
+                (Some(index), Some(structure_revision))
             }
             _ => {
                 cx.emit(QueueEvent::Error(
@@ -394,7 +398,7 @@ impl Queue {
                                     if this.model.rows.get(index).is_none()
                                         && let Some(entry) = this.model.rows.display(index, now)
                                     {
-                                        return track_list_row(
+                                        let row = track_list_row(
                                             theme,
                                             rivu_ui::list_row(
                                                 theme,
@@ -408,26 +412,44 @@ impl Queue {
                                             this.state.queue.current_id == Some(entry.id),
                                             &this.context.i18n,
                                         );
+                                        // Row-value refreshes keep occurrence positions, so
+                                        // those retained rows stay boundaries for an
+                                        // in-flight drop; older-structure rows absorb it.
+                                        let Some(source) = this
+                                            .model
+                                            .positioned(index, now)
+                                            .map(QueueIdentity::from)
+                                        else {
+                                            return absorb_drops(row);
+                                        };
+                                        return this.with_queue_row_drop_zones(
+                                            row,
+                                            source,
+                                            this.state.queue.structure_revision,
+                                            theme,
+                                            cx,
+                                        );
                                     }
                                     let Some(entry) = this.model.rows.get(index) else {
-                                        return this.paged_loading_row(index, row_height, cx);
+                                        return absorb_drops(
+                                            this.paged_loading_row(index, row_height, cx),
+                                        );
                                     };
                                     let id = entry.id;
                                     let track_id = entry.track.id;
                                     let favorite = entry.track.favorite;
                                     let position = entry.position;
                                     let can_move_down = position + 1 < this.state.queue.total;
-                                    let revision = this.state.queue.revision;
+                                    let structure_revision = this.state.queue.structure_revision;
                                     let playing = this.state.queue.current_id == Some(id);
                                     let source = QueueIdentity::from(entry);
-                                    let generation = this.model.page_projection.generation();
                                     let drag_owner = cx.entity().downgrade();
                                     let drag_i18n = std::sync::Arc::clone(&this.context.i18n);
                                     let drag = QueueDrag {
                                         owner: cx.entity().entity_id(),
                                         source,
                                         entries: Default::default(),
-                                        revision,
+                                        structure_revision,
                                     };
                                     track_list_row(
                                         theme,
@@ -548,11 +570,12 @@ impl Queue {
                                                 move |this, _, cx| {
                                                     if position > 0 {
                                                         this.send_queue_position_action(
-                                                            revision,
+                                                            structure_revision,
                                                             Command::MoveQueue {
                                                                 queue_id: id,
                                                                 index: position - 1,
-                                                                expected_revision: revision,
+                                                                expected_revision:
+                                                                    structure_revision,
                                                             },
                                                             cx,
                                                         );
@@ -574,11 +597,12 @@ impl Queue {
                                                 move |this, _, cx| {
                                                     if can_move_down {
                                                         this.send_queue_position_action(
-                                                            revision,
+                                                            structure_revision,
                                                             Command::MoveQueue {
                                                                 queue_id: id,
                                                                 index: position + 1,
-                                                                expected_revision: revision,
+                                                                expected_revision:
+                                                                    structure_revision,
                                                             },
                                                             cx,
                                                         );
@@ -594,9 +618,12 @@ impl Queue {
                                             move |this, event: &gpui::MouseDownEvent, _, cx| {
                                                 cx.emit(QueueEvent::FocusRequested);
                                                 this.refresh(cx);
-                                                let rows =
-                                                    this.model.operation_rows(source, generation);
-                                                if revision != this.state.queue.revision
+                                                let rows = this.model.operation_rows(
+                                                    source,
+                                                    cx.background_executor().now(),
+                                                );
+                                                if structure_revision
+                                                    != this.state.queue.structure_revision
                                                     || rows.is_empty()
                                                 {
                                                     cx.stop_propagation();
@@ -627,7 +654,7 @@ impl Queue {
                                                             }),
                                                         },
                                                     )),
-                                                    revision,
+                                                    structure_revision,
                                                     remove: std::cell::RefCell::new(Some(
                                                         Command::RemoveQueueEntries { queue_ids },
                                                     )),
@@ -667,8 +694,11 @@ impl Queue {
                                                         drag_owner
                                                             .update(cx, |this, cx| {
                                                                 this.refresh(cx);
-                                                                if drag.revision
-                                                                    != this.state.queue.revision
+                                                                if drag.structure_revision
+                                                                    != this
+                                                                        .state
+                                                                        .queue
+                                                                        .structure_revision
                                                                     || !this.model.ready()
                                                                     || this.model.query.is_some()
                                                                     || this
@@ -680,7 +710,7 @@ impl Queue {
                                                                 }
                                                                 this.model.operation_rows(
                                                                     drag.source,
-                                                                    generation,
+                                                                    cx.background_executor().now(),
                                                                 )
                                                             })
                                                             .unwrap_or_default()
@@ -702,22 +732,15 @@ impl Queue {
                                             )
                                         },
                                     )
-                                    .map(|mut row| {
-                                        row.style().overflow.y = Some(gpui::Overflow::Visible);
-                                        row.style().overflow.x = Some(gpui::Overflow::Visible);
-                                        row
+                                    .map(|row| {
+                                        this.with_queue_row_drop_zones(
+                                            row,
+                                            source,
+                                            structure_revision,
+                                            theme,
+                                            cx,
+                                        )
                                     })
-                                    .children(
-                                        [false, true].map(|after| {
-                                            this.queue_row_drop_zone(
-                                                (id, position),
-                                                revision,
-                                                after,
-                                                theme,
-                                                cx,
-                                            )
-                                        }),
-                                    )
                                 })
                                 .collect::<Vec<_>>()
                         }),
@@ -739,7 +762,7 @@ impl Queue {
     fn queue_row_drop_valid(
         &self,
         value: &dyn std::any::Any,
-        target: u64,
+        target: QueueIdentity,
         after: bool,
         destination: DragDestination,
         owner: EntityId,
@@ -762,17 +785,37 @@ impl Queue {
         }
     }
 
+    fn with_queue_row_drop_zones(
+        &self,
+        mut row: gpui::Stateful<Div>,
+        target: QueueIdentity,
+        structure_revision: u64,
+        theme: &'static rivu_format::palette::Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        row.style().overflow.y = Some(gpui::Overflow::Visible);
+        row.style().overflow.x = Some(gpui::Overflow::Visible);
+        row.relative().children(
+            [false, true].map(|after| {
+                self.queue_row_drop_zone(target, structure_revision, after, theme, cx)
+            }),
+        )
+    }
+
     fn queue_row_drop_zone(
         &self,
-        (id, position): (u64, usize),
-        revision: u64,
+        target: QueueIdentity,
+        structure_revision: u64,
         after: bool,
         theme: &'static rivu_format::palette::Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The occurrence and position were rendered under `structure_revision`;
+        // while that structure is current they authorize the boundary even if
+        // row values refresh before mouse-up.
         let destination = DragDestination::QueueAt {
-            index: position + usize::from(after),
-            revision,
+            index: target.position + usize::from(after),
+            structure_revision,
         };
         let owner = cx.weak_entity();
         macro_rules! indicator {
@@ -782,7 +825,7 @@ impl Queue {
                     if owner.upgrade().is_some_and(|owner| {
                         owner.read(cx).queue_row_drop_valid(
                             drag,
-                            id,
+                            target,
                             after,
                             destination,
                             owner.entity_id(),
@@ -802,7 +845,7 @@ impl Queue {
                 } else {
                     "queue-insert-before"
                 },
-                id,
+                target.id,
             ),
             after,
         )
@@ -822,15 +865,17 @@ impl Queue {
             window.prevent_default();
             cx.stop_propagation();
             this.refresh(cx);
-            if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
-                this.drop_list_drag(drag, Some((id, after)), destination, cx);
+            if this.queue_row_drop_valid(drag, target, after, destination, cx.entity().entity_id())
+            {
+                this.drop_list_drag(drag, Some((target, after)), destination, cx);
             }
         }))
         .on_drop(cx.listener(move |this, drag: &LibraryDrag, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
             this.refresh(cx);
-            if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
+            if this.queue_row_drop_valid(drag, target, after, destination, cx.entity().entity_id())
+            {
                 this.resolve_library_drag(drag, destination, cx);
             }
         }))
@@ -838,7 +883,8 @@ impl Queue {
             window.prevent_default();
             cx.stop_propagation();
             this.refresh(cx);
-            if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
+            if this.queue_row_drop_valid(drag, target, after, destination, cx.entity().entity_id())
+            {
                 this.drop_content(drag, destination, cx);
             }
         }));
@@ -894,12 +940,12 @@ impl Queue {
     fn drop_list_drag(
         &mut self,
         drag: &ListDrag,
-        target_id: Option<(u64, bool)>,
+        target: Option<(QueueIdentity, bool)>,
         destination: DragDestination,
         cx: &mut Context<Self>,
     ) {
         if let Some(source) = drag.queue() {
-            self.move_queue_entry(source, target_id, cx);
+            self.move_queue_entry(source, target, cx);
             return;
         }
         self.refresh(cx);
@@ -964,7 +1010,7 @@ mod queue_drag_tests {
             entries: std::cell::OnceCell::from(
                 positions.iter().copied().map(identity).collect::<Vec<_>>(),
             ),
-            revision: 4,
+            structure_revision: 4,
         }
     }
 
@@ -973,19 +1019,22 @@ mod queue_drag_tests {
         use crate::{gui::list_interaction::ListDrag, projection::GuiSnapshot};
         let selected = ListDrag::Queue(drag(&[1, 3]));
         let mut state = GuiSnapshot::default();
-        state.queue.revision = 4;
+        state.queue.structure_revision = 4;
         std::sync::Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(7, 9);
         assert!(selected.can_transfer(&state, super::DragDestination::Playlist(7)));
         assert!(!selected.can_transfer(&state, super::DragDestination::Queue));
         assert_eq!(selected.track_ids(), vec![7, 7]);
-        state.queue.revision = 5;
+        // Row-value edits such as play counts keep the dragged occurrences current.
+        state.queue.revision += 1;
+        assert!(selected.can_transfer(&state, super::DragDestination::Playlist(7)));
+        state.queue.structure_revision = 5;
         assert!(!selected.can_transfer(&state, super::DragDestination::Playlist(7)));
-        state.queue.revision = 4;
+        state.queue.structure_revision = 4;
         let pending = QueueDrag {
             owner: 1_u64.into(),
             source: identity(1),
             entries: Default::default(),
-            revision: 4,
+            structure_revision: 4,
         };
         let empty = QueueDrag {
             entries: std::cell::OnceCell::from(Vec::new()),

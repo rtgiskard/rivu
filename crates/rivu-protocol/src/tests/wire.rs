@@ -494,6 +494,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             album: 14,
             playlist: 7,
             queue: 8,
+            queue_structure: 17,
             playlist_entries: Some(rivu_protocol::response::PlaylistEntryRevision {
                 playlist_id: 10,
                 revision: 9,

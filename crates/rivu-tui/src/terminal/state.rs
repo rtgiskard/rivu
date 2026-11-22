@@ -127,7 +127,7 @@ pub(super) struct Notice {
 
 pub(super) struct QueueReplaceConfirmation {
     playlist_id: i64,
-    queue_revision: u64,
+    queue_structure_revision: u64,
     playlist_revision: Option<u64>,
     pub(super) prompt: String,
 }
@@ -136,7 +136,7 @@ impl QueueReplaceConfirmation {
     fn valid(&self, ui: &UiState, state: &TuiSnapshot) -> bool {
         state.configuration.confirm_queue_replace
             && state.queue.total != 0
-            && state.queue.revision == self.queue_revision
+            && state.queue.structure_revision == self.queue_structure_revision
             && state
                 .library
                 .playlist_entry_revisions
@@ -2404,7 +2404,7 @@ impl UiState {
                             if state.configuration.confirm_queue_replace && state.queue.total != 0 {
                                 self.queue_replace = Some(QueueReplaceConfirmation {
                                     playlist_id: playlist.id,
-                                    queue_revision: state.queue.revision,
+                                    queue_structure_revision: state.queue.structure_revision,
                                     playlist_revision: state
                                         .library
                                         .playlist_entry_revisions

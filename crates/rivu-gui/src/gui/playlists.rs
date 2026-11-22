@@ -2309,7 +2309,7 @@ mod playlist_drag_tests {
         );
         assert!(!drag.targets_source(crate::gui::DragDestination::QueueAt {
             index: 2,
-            revision: 19,
+            structure_revision: 19,
         }));
         let empty = PlaylistDrag {
             entry_ids: Default::default(),
@@ -2334,7 +2334,8 @@ mod playlist_drag_tests {
             entry_generation: 4,
         };
         let mut state = GuiSnapshot::default();
-        state.queue.revision = 6;
+        state.queue.revision = 5;
+        state.queue.structure_revision = 6;
         std::sync::Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(8, 19);
         std::sync::Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(9, 20);
         let pending = PlaylistDrag {
@@ -2372,7 +2373,14 @@ mod playlist_drag_tests {
             &state,
             DragDestination::QueueAt {
                 index: 1,
-                revision: 5
+                structure_revision: 5
+            }
+        ));
+        assert!(drag.can_transfer(
+            &state,
+            DragDestination::QueueAt {
+                index: 1,
+                structure_revision: 6
             }
         ));
         assert!(!drag.can_transfer(

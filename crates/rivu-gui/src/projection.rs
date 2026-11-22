@@ -116,15 +116,14 @@ impl GuiSnapshot {
         &self,
         playlist_id: Option<i64>,
     ) -> rivu_protocol::response::QueryRevisions {
-        self.library
-            .query_revisions(self.queue.revision, playlist_id)
+        self.library.query_revisions(&self.queue, playlist_id)
     }
 
     pub(crate) fn query_revisions_for(
         &self,
         query: &rivu_protocol::model::Query,
     ) -> rivu_protocol::response::QueryRevisions {
-        self.library.query_revisions_for(query, self.queue.revision)
+        self.library.query_revisions_for(query, &self.queue)
     }
 }
 

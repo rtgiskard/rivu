@@ -117,7 +117,7 @@ fn save_external(
     prepared: library::ExternalAdmission,
     index: Option<usize>,
     current_id: Option<u64>,
-    queue_revision: u64,
+    structure_revision: u64,
     mut completion: SavingCompletion,
 ) {
     let saved = completion.saved.as_mut().unwrap();
@@ -135,8 +135,11 @@ fn save_external(
     // Publish the prepared bundle only after all reads finish. A projection
     // panic leaves every missing view dirty without erasing the commit facts.
     let dependencies = impacts.dependencies(false);
-    let queue =
-        store.queue_projection(queue_revision.wrapping_add(u64::from(dependencies.queue_revision)));
+    let queue = store.queue_projection().map(|projection| QueueState {
+        structure_revision: structure_revision
+            .wrapping_add(u64::from(dependencies.queue_structure_revision)),
+        ..projection
+    });
     let track_total = dependencies
         .refresh_track_total
         .then(|| store.track_count());
@@ -168,7 +171,7 @@ pub(in crate::core) struct ExternalAdmissionTask {
     saving_facts: Option<oneshot::Receiver<Saved>>,
     database_path: PathBuf,
     index: Option<usize>,
-    expected_revision: Option<u64>,
+    expected_structure_revision: Option<u64>,
     cancellation: library::ScanCancellation,
     worker: Option<async_executor::Task<()>>,
 }
@@ -280,7 +283,7 @@ impl Core {
         &mut self,
         paths: Vec<PathBuf>,
         index: Option<usize>,
-        expected_revision: Option<u64>,
+        expected_structure_revision: Option<u64>,
     ) -> Result<u64> {
         ensure!(!paths.is_empty(), "No external audio files supplied");
         ensure!(
@@ -299,13 +302,13 @@ impl Core {
         if let Some(index) = index {
             self.check_queue_insertion(
                 index,
-                expected_revision
-                    .context("Positional external admission requires a queue revision")?,
+                expected_structure_revision
+                    .context("Positional external admission requires a queue structure revision")?,
             )?;
-        } else if let Some(expected) = expected_revision {
+        } else if let Some(expected) = expected_structure_revision {
             ensure!(
-                self.state.queue.revision == expected,
-                "Queue revision changed"
+                self.state.queue.structure_revision == expected,
+                "Queue structure revision changed"
             );
         }
         let database_path = self.store.database_path()?;
@@ -373,7 +376,7 @@ impl Core {
             saving_facts: None,
             database_path,
             index,
-            expected_revision,
+            expected_structure_revision,
             cancellation,
             worker: Some(worker),
         });
@@ -434,15 +437,13 @@ impl Core {
         }
         // Preparation can outlive a committed mutation whose projection failed.
         // Recover before validating insertion or capturing Saving's baseline.
-        let baseline =
-            self.ensure_queue_control_ready()
-                .and_then(|()| match task.expected_revision {
-                    Some(expected) => self.check_queue_insertion(
-                        task.index.unwrap_or(self.state.queue.total),
-                        expected,
-                    ),
-                    None => Ok(()),
-                });
+        let baseline = self.ensure_queue_control_ready().and_then(|()| {
+            match task.expected_structure_revision {
+                Some(expected) => self
+                    .check_queue_insertion(task.index.unwrap_or(self.state.queue.total), expected),
+                None => Ok(()),
+            }
+        });
         if let Err(error) = baseline {
             task.status.progress.phase = ScanPhase::Failed;
             task.status.message = error.to_string();
@@ -458,7 +459,7 @@ impl Core {
         let path = std::mem::take(&mut task.database_path);
         let index = task.index;
         let current_id = self.state.queue.current_id;
-        let queue_revision = self.state.queue.revision;
+        let structure_revision = self.state.queue.structure_revision;
         let workers = self.workers.clone();
         // Own completion before scheduling: even an unpolled supervisor or an
         // unexecuted blocking job reports NotAttempted when its closure drops.
@@ -478,7 +479,7 @@ impl Core {
                         prepared,
                         index,
                         current_id,
-                        queue_revision,
+                        structure_revision,
                         completion,
                     )
                 })
@@ -694,7 +695,7 @@ mod tests {
             saving_facts: Some(saving_facts),
             database_path: PathBuf::new(),
             index: None,
-            expected_revision: None,
+            expected_structure_revision: None,
             cancellation: library::ScanCancellation::default(),
             worker: Some(worker),
         });
@@ -825,7 +826,7 @@ mod tests {
                     .admit(|| store.admit_external_queue(&prepared, None, None))
                     .unwrap();
                 // A successful early read is only part of a prepared bundle.
-                let _partial_queue = store.queue_projection(0).unwrap();
+                let _partial_queue = store.queue_projection().unwrap();
                 panic!("injected projection panic after confirmed commit and partial read");
             });
             complete_test_saving(&mut core, shutdown);
@@ -906,7 +907,7 @@ mod tests {
             saving_facts: None,
             database_path: PathBuf::new(),
             index: None,
-            expected_revision: None,
+            expected_structure_revision: None,
             cancellation,
             worker: Some(worker),
         };
@@ -936,7 +937,7 @@ mod tests {
             saving_facts: Some(saving_facts),
             database_path: directory.path().join("library.db"),
             index: None,
-            expected_revision: None,
+            expected_structure_revision: None,
             cancellation: library::ScanCancellation::default(),
             worker: Some(worker),
         });

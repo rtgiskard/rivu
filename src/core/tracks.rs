@@ -223,7 +223,7 @@ impl Core {
             changed: impact.changed,
             library: impact.library,
             counts: impact.counts,
-            queue: impact.queue,
+            queue_row_values: impact.queue,
             albums: impact.albums,
             duplicate_members: impact.member_facts,
             history: impact.history,
@@ -416,7 +416,7 @@ impl Core {
             structure: true,
             history: impact.history,
             duplicate_groups: impact.duplicate_groups,
-            queue: impact.queue,
+            queue_structure: impact.queue,
             albums: impact.albums,
             ..crate::store::CatalogChanges::default()
         };

@@ -242,12 +242,11 @@ impl Shared {
 
     fn query_error(&self, scope: QueryRevisionScope, error: QueryError) -> QueryResponse {
         let published = self.published.read();
+        let snapshot = published.observed.snapshot();
         QueryResponse {
-            revisions: published
-                .observed
-                .snapshot()
+            revisions: snapshot
                 .library
-                .query_revisions_for_scope(scope, published.observed.snapshot().queue.revision),
+                .query_revisions_for_scope(scope, &snapshot.queue),
             result: Err(error),
         }
     }

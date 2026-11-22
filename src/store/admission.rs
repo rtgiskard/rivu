@@ -117,7 +117,7 @@ impl Store {
         impacts.current_track = Some(observed()? != current_before);
         tx.commit()?;
         impacts.changed = changed != 0 || added != 0;
-        impacts.queue |= count != 0;
+        impacts.queue_structure = count != 0;
         if impacts.changed {
             self.invalidate_caches();
         }

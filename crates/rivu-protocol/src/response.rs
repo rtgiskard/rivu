@@ -162,6 +162,8 @@ pub struct QueryRevisions {
     pub album: u64,
     pub playlist: u64,
     pub queue: u64,
+    /// Queue membership/order token, selected by unfiltered occurrence lookups.
+    pub queue_structure: u64,
     pub playlist_entries: Option<PlaylistEntryRevision>,
     pub track: Option<TrackRevision>,
     pub playlist_metadata: Option<PlaylistEntryRevision>,
@@ -190,7 +192,7 @@ impl QueryRevisions {
         library: u64,
         structure: u64,
         playlist: u64,
-        queue: u64,
+        queue: &crate::model::QueueState,
         duplicate_groups: u64,
         duplicate_members: u64,
     ) -> Self {
@@ -198,7 +200,8 @@ impl QueryRevisions {
             library,
             structure,
             playlist,
-            queue,
+            queue: queue.revision,
+            queue_structure: queue.structure_revision,
             duplicate_groups,
             duplicate_members,
             ..Self::default()

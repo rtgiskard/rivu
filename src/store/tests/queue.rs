@@ -134,7 +134,6 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     assert_eq!(second.rows[0].position, 256);
     let current = last.rows[63].id;
     store.set_queue_current(Some(current)).unwrap();
-    assert_eq!(store.queue_projection(123).unwrap().revision, 123);
     let (playlist, has_members) = store.create_playlist_from_queue("All").unwrap();
     assert!(has_members);
     assert_eq!(

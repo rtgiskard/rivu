@@ -526,13 +526,16 @@ impl Library {
                 },
                 cx,
             ),
-            super::DragDestination::QueueAt { index, revision } => self.send(
+            super::DragDestination::QueueAt {
+                index,
+                structure_revision,
+            } => self.send(
                 Command::InsertQueueSources {
                     other_tracks,
                     directories,
                     track_ids,
                     index,
-                    expected_revision: revision,
+                    expected_revision: structure_revision,
                 },
                 cx,
             ),

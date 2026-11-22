@@ -21,15 +21,30 @@ impl std::fmt::Display for QueueSyncError {
 impl std::error::Error for QueueSyncError {}
 
 impl Core {
+    /// Displayed queued row values changed; occurrence positions are unchanged.
     pub(in crate::core) fn advance_queue_revision(&mut self) {
         self.state.queue.revision = self.state.queue.revision.wrapping_add(1);
+    }
+
+    /// Occurrence membership or order changed, which also changes queue content.
+    pub(in crate::core) fn advance_queue_structure(&mut self) {
+        self.state.queue.structure_revision = self.state.queue.structure_revision.wrapping_add(1);
+        self.advance_queue_revision();
+    }
+
+    /// Committed queue facts stamped with the structure they were read at.
+    pub(in crate::core) fn read_queue_projection(&self) -> Result<QueueState> {
+        Ok(QueueState {
+            structure_revision: self.state.queue.structure_revision,
+            ..self.store.queue_projection()?
+        })
     }
 
     pub(in crate::core) fn queue_mutation_committed(
         &mut self,
         refresh: QueueRefresh,
     ) -> Result<()> {
-        self.advance_queue_revision();
+        self.advance_queue_structure();
         match refresh {
             QueueRefresh::Projection => self.refresh_queue_projection(),
             QueueRefresh::ProjectionAndHistory => {
@@ -178,9 +193,9 @@ impl Core {
         let mut projection = projection?;
         if self.transport.selection_pending {
             self.persist_queue_current()?;
-            projection = self.store.queue_projection(self.state.queue.revision)?;
-        } else if projection.revision != self.state.queue.revision {
-            projection = self.store.queue_projection(self.state.queue.revision)?;
+            projection = self.read_queue_projection()?;
+        } else if projection.structure_revision != self.state.queue.structure_revision {
+            projection = self.read_queue_projection()?;
         }
         // Projections carry committed queue structure, not a new selection intent.
         // Even a formerly pending selection may have been saved since this read
@@ -196,8 +211,10 @@ impl Core {
                 projection.current_position = Some(position);
             }
         }
-        projection.revision = self.state.queue.revision;
-        self.state.queue = projection;
+        self.state.queue = QueueState {
+            revision: self.state.queue.revision,
+            ..projection
+        };
         self.transport.projection_stale = false;
         Ok(())
     }
@@ -205,7 +222,7 @@ impl Core {
     pub(in crate::core) fn refresh_queue_projection(&mut self) -> Result<()> {
         self.transport.projection_stale = true;
         self.persist_queue_current()?;
-        let projection = self.store.queue_projection(self.state.queue.revision);
+        let projection = self.read_queue_projection();
         self.accept_queue_projection(projection)
     }
 
@@ -226,11 +243,11 @@ impl Core {
     pub(in crate::core) fn check_queue_insertion(
         &self,
         index: usize,
-        expected_revision: u64,
+        expected_structure_revision: u64,
     ) -> Result<()> {
         ensure!(
-            self.state.queue.revision == expected_revision,
-            "Queue revision changed"
+            self.state.queue.structure_revision == expected_structure_revision,
+            "Queue structure revision changed"
         );
         ensure!(
             index <= self.state.queue.total,
@@ -266,11 +283,11 @@ impl Core {
         &mut self,
         queue_ids: &[u64],
         index: usize,
-        expected_revision: u64,
+        expected_structure_revision: u64,
     ) -> Result<()> {
         ensure!(
-            self.state.queue.revision == expected_revision,
-            "Queue revision changed"
+            self.state.queue.structure_revision == expected_structure_revision,
+            "Queue structure revision changed"
         );
         if queue_ids.is_empty() {
             return Ok(());

@@ -111,7 +111,7 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
         .store
         .edit_track(1, Some("Committed queued title"), None, None, None, None)
         .unwrap();
-    impacts.queue |= edit.queue;
+    impacts.queue_row_values |= edit.queue;
     impacts.albums |= edit.albums;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     // Remove the count's source after the insertion commits.

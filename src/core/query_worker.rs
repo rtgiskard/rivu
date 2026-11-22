@@ -785,7 +785,7 @@ impl ReadQueries {
                         crate::store::CatalogChanges {
                             library: connection.library_revision != revisions.library,
                             counts: connection.scalar_revisions.0 != scalar_revisions.0,
-                            queue: connection.scalar_revisions.1 != scalar_revisions.1,
+                            queue_row_values: connection.scalar_revisions.1 != scalar_revisions.1,
                             duplicate_groups: connection.duplicate_groups_revision
                                 != revisions.duplicate_groups,
                             ..Default::default()

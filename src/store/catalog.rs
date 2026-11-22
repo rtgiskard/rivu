@@ -8,8 +8,10 @@ pub struct CatalogChanges {
     pub library: bool,
     /// Count membership/search facts, independent of row values and ordering.
     pub counts: bool,
-    /// Effective queue-row values changed for an already queued identity.
-    pub queue: bool,
+    /// Effective values of already-queued rows changed.
+    pub queue_row_values: bool,
+    /// Queue occurrences were inserted or removed; implies a queue content change.
+    pub queue_structure: bool,
     /// History membership or effective entry values changed.
     pub history: bool,
     /// Album membership, ordering, member rows, or representative values changed.
@@ -35,6 +37,7 @@ pub(crate) struct CatalogDependencies {
     pub count_revision: bool,
     pub structure_revision: bool,
     pub queue_revision: bool,
+    pub queue_structure_revision: bool,
     pub album_revision: bool,
     pub duplicate_group_revision: bool,
     pub duplicate_member_revision: bool,
@@ -49,11 +52,13 @@ pub(crate) struct CatalogDependencies {
 
 impl CatalogChanges {
     pub(crate) fn dependencies(self, playlist_created: bool) -> CatalogDependencies {
+        let queue_content = self.queue_row_values || self.queue_structure;
         CatalogDependencies {
             library_revision: self.library,
             count_revision: self.counts || self.structure,
             structure_revision: self.structure,
-            queue_revision: self.queue,
+            queue_revision: queue_content,
+            queue_structure_revision: self.queue_structure,
             album_revision: self.albums,
             duplicate_group_revision: self.duplicate_groups,
             duplicate_member_revision: self.duplicate_members,
@@ -61,7 +66,7 @@ impl CatalogChanges {
             refresh_track_total: self.structure,
             clear_track_cache: self.library,
             clear_catalog_counts: self.counts || self.structure,
-            clear_queue_count: self.queue,
+            clear_queue_count: queue_content,
             clear_playlist_count: self.library || playlist_created,
             clear_duplicate_group_count: self.duplicate_groups,
         }

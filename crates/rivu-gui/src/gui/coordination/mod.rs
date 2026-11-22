@@ -209,13 +209,15 @@ impl WindowView {
                     }
                     QueueEvent::ContentMenu {
                         request,
-                        revision,
+                        structure_revision,
                         remove,
                     } => {
                         if let Some(request) = request.borrow_mut().take() {
                             this.open_object_menu(
                                 request,
-                                list_interaction::ContentGuard::Queue(*revision),
+                                list_interaction::ContentGuard::Queue {
+                                    structure_revision: *structure_revision,
+                                },
                                 remove.borrow_mut().take(),
                                 None,
                                 None,

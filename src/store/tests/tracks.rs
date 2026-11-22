@@ -651,7 +651,7 @@ fn release_date_patch_sets_clears_and_omits_without_queue_or_user_state_changes(
     assert_eq!(persisted, None);
     record.media.release_date = Some("1999".into());
     let impact = store.apply_scan(&scan(vec![record])).unwrap();
-    assert!(impact.library && impact.albums && !impact.queue);
+    assert!(impact.library && impact.albums && !impact.queue_row_values);
     assert_eq!(
         store.track(id).unwrap().unwrap().release_date.as_deref(),
         Some("1999")

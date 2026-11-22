@@ -94,8 +94,7 @@ impl TuiSnapshot {
         &self,
         playlist_id: Option<i64>,
     ) -> rivu_protocol::response::QueryRevisions {
-        self.library
-            .query_revisions(self.queue.revision, playlist_id)
+        self.library.query_revisions(&self.queue, playlist_id)
     }
 }
 

@@ -204,7 +204,7 @@ fn core_source_changes_reject_collection_transfers_without_destination_changes()
             CollectionDestination::Queue {
                 insertion: Some(CollectionInsertion {
                     index: 1,
-                    revision: queue_state.revision,
+                    revision: queue_state.structure_revision,
                 }),
             },
             CollectionDestination::Playlist {
@@ -364,12 +364,12 @@ fn core_queue_change_rejects_positional_collection_transfer() {
     let (_directory, mut core) = fixture();
     prepare(&mut core);
     let source_revision = core.state.library.playlist_entry_revisions[&1];
-    let expected_queue = core.state.queue.revision;
+    let expected_queue = core.state.queue.structure_revision;
     core.command(Command::Enqueue { track_ids: vec![3] })
         .unwrap();
     let queue = core.store.queue_page(None, 0, 20).unwrap();
     let state = core.state.queue.clone();
-    assert_ne!(state.revision, expected_queue);
+    assert_ne!(state.structure_revision, expected_queue);
     assert!(
         core.command(Command::TransferCollection {
             source: CollectionSource::Playlist {

@@ -270,10 +270,13 @@ impl WindowView {
         }
         let destination = match destination {
             DragDestination::Queue => CollectionDestination::Queue { insertion: None },
-            DragDestination::QueueAt { index, revision } => CollectionDestination::Queue {
+            DragDestination::QueueAt {
+                index,
+                structure_revision,
+            } => CollectionDestination::Queue {
                 insertion: Some(CollectionInsertion {
                     index: index as u64,
-                    revision,
+                    revision: structure_revision,
                 }),
             },
             DragDestination::Playlist(playlist_id) => {
@@ -335,10 +338,13 @@ impl WindowView {
                     track_ids,
                 }
             }
-            DragDestination::QueueAt { index, revision } => Command::InsertQueue {
+            DragDestination::QueueAt {
+                index,
+                structure_revision,
+            } => Command::InsertQueue {
                 track_ids,
                 index,
-                expected_revision: revision,
+                expected_revision: structure_revision,
             },
             DragDestination::PlaylistAt {
                 playlist_id,

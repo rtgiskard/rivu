@@ -330,7 +330,7 @@ impl Store {
             counts: true,
             structure: true,
             duplicate_groups: true,
-            queue,
+            queue_row_values: queue,
             albums,
             ..Default::default()
         })

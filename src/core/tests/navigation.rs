@@ -86,10 +86,7 @@ fn navigation_commands_preserve_execution_status_and_occurrence_selection() {
             control.request_shutdown().unwrap();
             let core = worker.join().unwrap();
             assert_eq!(
-                core.store
-                    .queue_projection(core.state.queue.revision)
-                    .unwrap()
-                    .current_id,
+                core.read_queue_projection().unwrap().current_id,
                 Some(expected)
             );
             assert!(core.store.history(MAX_QUERY_ROWS).unwrap().is_empty());
@@ -1265,7 +1262,7 @@ fn accepted_load_survives_selection_save_failure_and_late_projection() {
     let (directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
     let old_source = core.transport.generation;
     let old_selection = core.store.queue_state().unwrap().current_id;
-    let delayed = core.store.queue_projection(core.state.queue.revision);
+    let delayed = core.read_queue_projection();
     let commands = recording_audio(&mut core);
     let port = audio_port(&mut core);
     let connection = reject_queue_selection(directory.path());
@@ -1685,13 +1682,13 @@ fn autoplay_follows_queue_reorder_without_retrying_failed_occurrences() {
     core.command(Command::MoveQueue {
         queue_id: 2,
         index: 2,
-        expected_revision: core.state.queue.revision,
+        expected_revision: core.state.queue.structure_revision,
     })
     .unwrap();
     core.command(Command::MoveQueue {
         queue_id: 5,
         index: 3,
-        expected_revision: core.state.queue.revision,
+        expected_revision: core.state.queue.structure_revision,
     })
     .unwrap();
     fail_current_source(&mut core, audio::AudioFailureKind::Source);

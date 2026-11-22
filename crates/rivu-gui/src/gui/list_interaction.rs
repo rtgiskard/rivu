@@ -11,7 +11,7 @@ pub(super) enum DragDestination {
     Playlist(i64),
     QueueAt {
         index: usize,
-        revision: u64,
+        structure_revision: u64,
     },
     PlaylistAt {
         playlist_id: i64,
@@ -34,7 +34,9 @@ impl DragDestination {
     pub(super) fn current(self, state: &GuiSnapshot) -> bool {
         match self {
             Self::Queue => true,
-            Self::QueueAt { revision, .. } => state.queue.revision == revision,
+            Self::QueueAt {
+                structure_revision, ..
+            } => state.queue.structure_revision == structure_revision,
             Self::Playlist(id) => state.library.playlist_entry_revisions.contains_key(&id),
             Self::PlaylistAt {
                 playlist_id,
@@ -102,7 +104,7 @@ impl ListDrag {
             && match self {
                 Self::Queue(drag) => {
                     destination.playlist_id().is_some()
-                        && drag.revision == state.queue.revision
+                        && drag.structure_revision == state.queue.structure_revision
                         && drag.entries.get().is_some_and(|rows| !rows.is_empty())
                 }
                 Self::Playlist(drag) => {
@@ -181,7 +183,7 @@ pub(super) struct ContentMenuRequest {
 pub(super) enum ContentGuard {
     None,
     Library(u64, u64),
-    Queue(u64),
+    Queue { structure_revision: u64 },
     Playlist(i64, u64),
 }
 
@@ -192,7 +194,9 @@ impl ContentGuard {
             Self::Library(library, structure) => {
                 state.library.revision == library && state.library.structure_revision == structure
             }
-            Self::Queue(revision) => state.queue.revision == revision,
+            Self::Queue { structure_revision } => {
+                state.queue.structure_revision == structure_revision
+            }
             Self::Playlist(id, revision) => {
                 state.library.playlist_entry_revisions.get(&id) == Some(&revision)
             }
@@ -256,7 +260,7 @@ mod tests {
             &state,
             DragDestination::QueueAt {
                 index: 0,
-                revision: 1
+                structure_revision: 1
             },
             false,
         ));

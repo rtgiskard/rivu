@@ -366,10 +366,11 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
     core.transport.record_history(3);
     let audio = recording_audio(&mut core);
     let revision = core.state.queue.revision;
+    let structure = core.state.queue.structure_revision;
     core.command(Command::InsertQueue {
         track_ids: vec![4, 1, 4],
         index: 1,
-        expected_revision: revision,
+        expected_revision: structure,
     })
     .unwrap();
     assert_eq!(
@@ -391,31 +392,31 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
         Command::InsertQueue {
             track_ids: vec![],
             index: 0,
-            expected_revision: revision,
+            expected_revision: structure,
         },
         Command::InsertQueueSources {
             other_tracks: false,
             directories: vec![],
             track_ids: vec![],
             index: 0,
-            expected_revision: revision,
+            expected_revision: structure,
         },
         Command::InsertQueue {
             track_ids: vec![],
             index: state.total + 1,
-            expected_revision: state.revision,
+            expected_revision: state.structure_revision,
         },
         Command::InsertQueueSources {
             other_tracks: false,
             directories: vec![],
             track_ids: vec![],
             index: state.total + 1,
-            expected_revision: state.revision,
+            expected_revision: state.structure_revision,
         },
         Command::InsertQueue {
             track_ids: vec![1, 999],
             index: 0,
-            expected_revision: state.revision,
+            expected_revision: state.structure_revision,
         },
     ] {
         assert!(core.command(command).is_err());
@@ -427,7 +428,7 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
         directories: vec![],
         track_ids: vec![4, 1, 4],
         index: state.total,
-        expected_revision: state.revision,
+        expected_revision: state.structure_revision,
     })
     .unwrap();
     assert_eq!(
@@ -1763,7 +1764,7 @@ fn interval_queue_moves_match_stable_selection_order_and_preserve_current() {
             let result = core.command(Command::MoveQueueEntries {
                 queue_ids: requested,
                 index: target,
-                expected_revision: revision,
+                expected_revision: core.state.queue.structure_revision,
             });
             assert_eq!(result.is_err(), invalid, "mask={mask} target={target}");
             assert_eq!(
@@ -1828,12 +1829,12 @@ fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
         Command::MoveQueue {
             queue_id: 3,
             index: 0,
-            expected_revision: core.state.queue.revision,
+            expected_revision: core.state.queue.structure_revision,
         },
         Command::MoveQueueEntries {
             queue_ids: vec![5, 1, 3, 1],
             index: 1,
-            expected_revision: core.state.queue.revision,
+            expected_revision: core.state.queue.structure_revision,
         },
     ] {
         assert!(core.command(command).is_err());
@@ -1860,7 +1861,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
         Command::MoveQueueEntries {
             queue_ids: vec![3, 99],
             index: 0,
-            expected_revision: core.state.queue.revision,
+            expected_revision: core.state.queue.structure_revision,
         },
         Command::RemoveQueueEntries {
             queue_ids: vec![3, 99],
@@ -1868,7 +1869,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
         Command::MoveQueue {
             queue_id: 3,
             index: usize::MAX,
-            expected_revision: core.state.queue.revision,
+            expected_revision: core.state.queue.structure_revision,
         },
     ] {
         assert!(core.command(command).is_err());
@@ -1879,7 +1880,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![5, 1, 3, 1],
         index: 1,
-        expected_revision: core.state.queue.revision,
+        expected_revision: core.state.queue.structure_revision,
     })
     .unwrap();
     assert_eq!(
@@ -1893,7 +1894,7 @@ fn bulk_queue_edits_preserve_current_order_history_and_reject_invalid_ids_atomic
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![1, 3, 5],
         index: core.state.queue.total - 3,
-        expected_revision: core.state.queue.revision,
+        expected_revision: core.state.queue.structure_revision,
     })
     .unwrap();
     assert_eq!(
@@ -1923,7 +1924,7 @@ fn dedup_preserves_playing_duplicate_identity_at_first_position_and_prunes_histo
     core.command(Command::MoveQueue {
         queue_id: 3,
         index: 4,
-        expected_revision: core.state.queue.revision,
+        expected_revision: core.state.queue.structure_revision,
     })
     .unwrap();
     playing(&mut core, 3);
@@ -1973,7 +1974,7 @@ fn empty_and_singleton_queue_edits_are_valid_and_empty_bulk_requests_are_no_ops(
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![],
         index: usize::MAX,
-        expected_revision: core.state.queue.revision,
+        expected_revision: core.state.queue.structure_revision,
     })
     .unwrap();
     assert_eq!(core.state.queue, before);
@@ -2168,7 +2169,7 @@ fn collection_transfers_keep_source_order_and_existing_occurrences() {
         destination: CollectionDestination::Queue {
             insertion: Some(CollectionInsertion {
                 index: 1,
-                revision: core.state.queue.revision,
+                revision: core.state.queue.structure_revision,
             }),
         },
     })
@@ -2490,7 +2491,7 @@ fn incremental_queue_commits_recover_projection_before_previous() {
         core.state.queue.current_id = Some(5);
         core.save_queue().unwrap();
         core.refresh_queue_tracks().unwrap();
-        let command = command(core.state.queue.revision);
+        let command = command(core.state.queue.structure_revision);
         let append = matches!(command, Command::Enqueue { .. });
         let connection = fail_queue_projection_after(directory.path(), event);
         let commands = recording_audio(&mut core);
@@ -2567,7 +2568,7 @@ fn delayed_queue_projection_preserves_pending_selection_at_its_committed_positio
     let (directory, mut core) = fixture();
     core.state.queue.current_id = Some(1);
     core.save_queue().unwrap();
-    let delayed = core.store.queue_projection(core.state.queue.revision);
+    let delayed = core.read_queue_projection();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection.execute_batch(
         "CREATE TRIGGER reject_queue_selection BEFORE UPDATE OF current_queue_entry_id ON rivu_meta
@@ -2593,7 +2594,7 @@ fn delayed_projection_cannot_replace_a_selection_already_saved_after_its_read() 
     let (_directory, mut core) = fixture();
     core.state.queue.current_id = Some(1);
     core.save_queue().unwrap();
-    let delayed = core.store.queue_projection(core.state.queue.revision);
+    let delayed = core.read_queue_projection();
     core.start_with_status(3, QueueHistory::Record, PlaybackStatus::Stopped)
         .unwrap();
     assert!(!core.transport.selection_pending);
@@ -2607,7 +2608,7 @@ fn delayed_projection_cannot_replace_a_selection_already_saved_after_its_read() 
 #[test]
 fn stale_queue_move_indices_are_rejected_without_changing_order() {
     let (_directory, mut core) = fixture();
-    let observed = core.state.queue.revision;
+    let observed = core.state.queue.structure_revision;
     core.command(Command::MoveQueue {
         queue_id: 3,
         index: 0,
@@ -2615,7 +2616,7 @@ fn stale_queue_move_indices_are_rejected_without_changing_order() {
     })
     .unwrap();
     let order = core.store.queue_ids().unwrap();
-    let revision = core.state.queue.revision;
+    let revision = core.state.queue.structure_revision;
     assert_ne!(revision, observed);
     for command in [
         Command::MoveQueue {
@@ -2633,10 +2634,10 @@ fn stale_queue_move_indices_are_rejected_without_changing_order() {
             core.command(command)
                 .unwrap_err()
                 .to_string()
-                .contains("Queue revision changed")
+                .contains("Queue structure revision changed")
         );
         assert_eq!(core.store.queue_ids().unwrap(), order);
-        assert_eq!(core.state.queue.revision, revision);
+        assert_eq!(core.state.queue.structure_revision, revision);
     }
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![3],
@@ -2652,7 +2653,7 @@ fn single_and_batch_queue_moves_share_post_removal_bounds() {
     for batch in [false, true] {
         let (_directory, mut core) = fixture();
         let before = core.store.queue_ids().unwrap();
-        let revision = core.state.queue.revision;
+        let revision = core.state.queue.structure_revision;
         let command = |index| {
             if batch {
                 Command::MoveQueueEntries {
@@ -2671,7 +2672,7 @@ fn single_and_batch_queue_moves_share_post_removal_bounds() {
         for index in [before.len(), usize::MAX] {
             assert!(core.command(command(index)).is_err());
             assert_eq!(core.store.queue_ids().unwrap(), before);
-            assert_eq!(core.state.queue.revision, revision);
+            assert_eq!(core.state.queue.structure_revision, revision);
         }
         core.command(command(before.len() - 1)).unwrap();
         let mut expected = before[1..].to_vec();

@@ -118,15 +118,16 @@ fn queue_identity(row: &rusqlite::Row<'_>, rank: Option<usize>) -> rusqlite::Res
 impl Store {
     #[cfg(test)]
     pub fn queue_state(&self) -> Result<QueueState> {
-        self.queue_projection(0)
+        self.queue_projection()
     }
 
-    pub(crate) fn queue_projection(&self, revision: u64) -> Result<QueueState> {
+    /// Committed queue facts; Core owns and attaches the revision tokens.
+    pub(crate) fn queue_projection(&self) -> Result<QueueState> {
         Ok(self.conn.prepare_cached("SELECT current_queue_entry_id,(SELECT position FROM playlist_entries WHERE playlist_id=0 AND id=current_queue_entry_id),(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0) FROM rivu_meta WHERE singleton=1")?.query_row([], |row| Ok(QueueState {
             total: integer(row, 2)?,
             current_id: row.get::<_, Option<i64>>(0)?.map(|value| u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))).transpose()?,
             current_position: row.get::<_, Option<i64>>(1)?.map(|value| usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, value))).transpose()?,
-            revision,
+            ..QueueState::default()
         }),)?)
     }
 
@@ -723,7 +724,7 @@ mod tests {
         let prepared = store.prepare_queue_removal(&[ids[2], ids[2], ids[1]])?;
         assert!(store.remove_prepared_queue_entries(prepared)?);
         assert_eq!(store.queue_ids()?, [ids[3], ids[0]]);
-        assert_eq!(store.queue_projection(17)?.total, 2);
+        assert_eq!(store.queue_projection()?.total, 2);
         assert_compact(&store)
     }
 
@@ -1060,7 +1061,7 @@ mod tests {
         assert_eq!(store.queue_state()?.current_id, Some(ids[3]));
         assert_eq!(store.queue_state()?.current_position, Some(1));
         assert_eq!(store.queue_location(ids[3])?, Some((3, 1)));
-        assert_eq!(store.queue_projection(0)?.total, 3);
+        assert_eq!(store.queue_projection()?.total, 3);
         store
             .conn
             .execute("UPDATE tracks SET missing=1 WHERE id=3", [])?;

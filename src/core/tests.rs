@@ -601,10 +601,7 @@ fn queue_entries(core: &Core) -> Vec<(u64, i64)> {
 }
 
 fn assert_queue_saved(core: &Core) {
-    let projection = core
-        .store
-        .queue_projection(core.state.queue.revision)
-        .unwrap();
+    let projection = core.read_queue_projection().unwrap();
     assert_eq!(projection.current_id, core.state.queue.current_id);
     assert_eq!(
         projection.current_position,

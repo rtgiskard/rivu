@@ -189,6 +189,8 @@ enum QueryStampKind {
     #[default]
     Rows,
     AlbumTracks,
+    /// Unfiltered queue rows: occurrence order follows the structure token.
+    QueueRows,
 }
 
 /// Independent reasons a projection loses authority, not a refresh policy.
@@ -227,6 +229,12 @@ impl QueryStamp {
             payload_changed |= previous_coordinates.library != next_coordinates.library;
             previous_coordinates.library = 0;
             next_coordinates.library = 0;
+        }
+        if self.kind == QueryStampKind::QueueRows && next.kind == QueryStampKind::QueueRows {
+            // Content-only queue edits refresh row values at unchanged positions.
+            payload_changed |= previous_coordinates.queue != next_coordinates.queue;
+            previous_coordinates.queue = 0;
+            next_coordinates.queue = 0;
         }
         QueryImpact {
             identity_changed: false,
@@ -397,11 +405,20 @@ impl Query {
                 }
             }
             Self::PlaylistEntry { .. } => stamp.playlist_entries = revisions.playlist_entries,
-            Self::QueuePage { .. }
-            | Self::QueueBatch { .. }
-            | Self::QueueIdentityPage { .. }
-            | Self::QueueEntryLocations { .. } => {
+            Self::QueuePage { query, .. } | Self::QueueBatch { query, .. } => {
                 stamp.queue = revisions.queue;
+                if !filters_queue(query) {
+                    stamp.queue_structure = revisions.queue_structure;
+                }
+            }
+            // Unfiltered occurrence identities and positions change only with
+            // membership/order; filtered ranks also follow queued match values.
+            Self::QueueIdentityPage { query, .. } | Self::QueueEntryLocations { query, .. } => {
+                if filters_queue(query) {
+                    stamp.queue = revisions.queue;
+                } else {
+                    stamp.queue_structure = revisions.queue_structure;
+                }
             }
             Self::DuplicateGroups { .. } => stamp.duplicate_groups = revisions.duplicate_groups,
             Self::DuplicateMembers { .. } | Self::DuplicateReviewMembers { .. } => {
@@ -431,10 +448,14 @@ impl Query {
         }
         QueryStamp {
             revisions: stamp,
-            kind: if matches!(self, Self::AlbumTracks { .. }) {
-                QueryStampKind::AlbumTracks
-            } else {
-                QueryStampKind::Rows
+            kind: match self {
+                Self::AlbumTracks { .. } => QueryStampKind::AlbumTracks,
+                Self::QueuePage { query, .. } | Self::QueueBatch { query, .. }
+                    if !filters_queue(query) =>
+                {
+                    QueryStampKind::QueueRows
+                }
+                _ => QueryStampKind::Rows,
             },
         }
     }
@@ -544,6 +565,11 @@ impl Query {
             }
         }
     }
+}
+
+/// Storage treats an empty search as unfiltered.
+fn filters_queue(query: &Option<String>) -> bool {
+    query.as_deref().is_some_and(|query| !query.is_empty())
 }
 
 #[cfg(test)]
@@ -885,20 +911,25 @@ mod tests {
     }
 
     #[test]
-    fn queue_identity_queries_select_queue_coordinates_not_bitrate_payloads() {
+    fn queue_queries_follow_structure_unless_filtered_by_row_values() {
         let baseline = QueryRevisions::default();
         let unrelated = QueryRevisions {
             library: 1,
             structure: 2,
             playlist: 3,
-            bitrate: 4,
             ..baseline
         };
-        let changed_queue = QueryRevisions {
+        // Displayed row values such as play counts advance only the content token.
+        let content = QueryRevisions {
             queue: 1,
             ..unrelated
         };
-        for filter in [None, Some("needle".to_owned())] {
+        let structural = QueryRevisions {
+            queue_structure: 1,
+            ..content
+        };
+        for filter in [None, Some(String::new()), Some("needle".to_owned())] {
+            let filtered = filter.as_deref().is_some_and(|filter| !filter.is_empty());
             let page = Query::QueueIdentityPage {
                 query: filter.clone(),
                 offset: 1,
@@ -919,12 +950,32 @@ mod tests {
             for query in [
                 page,
                 Query::QueueEntryLocations {
-                    query: filter,
+                    query: filter.clone(),
                     queue_ids: vec![9],
                 },
             ] {
                 assert_eq!(query.stamp(baseline), query.stamp(unrelated));
-                assert!(impact(&query, baseline, changed_queue).coordinates_changed);
+                assert!(impact(&query, baseline, structural).coordinates_changed);
+                assert_eq!(impact(&query, baseline, content).rows_changed(), filtered);
+            }
+            for query in [
+                Query::QueuePage {
+                    query: filter.clone(),
+                    offset: 0,
+                    limit: 2,
+                },
+                Query::QueueBatch {
+                    query: filter.clone(),
+                    after: None,
+                    limit: 2,
+                    expected: None,
+                },
+            ] {
+                assert_eq!(query.stamp(baseline), query.stamp(unrelated));
+                let change = impact(&query, baseline, content);
+                assert!(change.rows_changed());
+                assert_eq!(change.coordinates_changed, filtered, "{query:?}");
+                assert!(impact(&query, baseline, structural).coordinates_changed);
             }
         }
     }

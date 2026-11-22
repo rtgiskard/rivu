@@ -671,6 +671,23 @@ fn manual_play_count_updates_projections_without_consuming_playback_count() {
     assert_eq!(core.state.library.history[0].play_count, 7);
     assert_eq!(core.state.library.revision, before.library + 1);
     assert_eq!(core.state.queue.revision, before.queue + 1);
+    // Play counts are row values: commands pinned to queue positions stay valid.
+    assert_eq!(core.state.queue.structure_revision, before.queue_structure);
+    core.command(Command::InsertQueue {
+        track_ids: vec![2],
+        index: 0,
+        expected_revision: before.queue_structure,
+    })
+    .unwrap();
+    assert_ne!(core.state.queue.structure_revision, before.queue_structure);
+    assert!(
+        core.command(Command::MoveQueue {
+            queue_id: 1,
+            index: 0,
+            expected_revision: before.queue_structure,
+        })
+        .is_err()
+    );
     let unchanged = core.state.query_revisions();
     core.command(Command::SetPlayCount {
         track_id: 1,

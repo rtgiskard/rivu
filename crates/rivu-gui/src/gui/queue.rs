@@ -38,7 +38,7 @@ pub(in crate::gui) struct QueueDrag {
     source: QueueIdentity,
     // GPUI retains this payload; the drag constructor only creates its preview.
     pub(super) entries: std::cell::OnceCell<Vec<QueueIdentity>>,
-    pub(super) revision: u64,
+    pub(super) structure_revision: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -61,7 +61,7 @@ pub(in crate::gui) enum QueueEvent {
     FocusRequested,
     ContentMenu {
         request: RefCell<Option<ContentMenuRequest>>,
-        revision: u64,
+        structure_revision: u64,
         remove: RefCell<Option<Command>>,
     },
     DropLibrary(RefCell<Option<Vec<LibraryNode>>>, super::DragDestination),

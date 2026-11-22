@@ -96,9 +96,11 @@ impl PlaylistBrowser {
             offset: 0,
             limit: 1,
         };
+        // Playlist stamps do not select queue tokens.
+        let queue = rivu_protocol::model::QueueState::default();
         let summaries = summaries_query
-            .stamp(previous.query_revisions(0, None))
-            .impact(summaries_query.stamp(next.query_revisions(0, None)))
+            .stamp(previous.query_revisions(&queue, None))
+            .impact(summaries_query.stamp(next.query_revisions(&queue, None)))
             .rows_changed();
         let (entries, entry_payload_only) =
             self.entries
@@ -111,8 +113,8 @@ impl PlaylistBrowser {
                         limit: 1,
                     };
                     let impact = query
-                        .stamp(previous.query_revisions(0, Some(playlist_id)))
-                        .impact(query.stamp(next.query_revisions(0, Some(playlist_id))));
+                        .stamp(previous.query_revisions(&queue, Some(playlist_id)))
+                        .impact(query.stamp(next.query_revisions(&queue, Some(playlist_id))));
                     (
                         impact.rows_changed(),
                         impact.payload_changed && !impact.coordinates_changed,

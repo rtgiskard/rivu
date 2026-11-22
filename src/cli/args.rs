@@ -489,7 +489,7 @@ pub(super) enum QueueAction {
         /// Insert before this queue index instead of appending.
         #[arg(long, requires = "expected_revision")]
         index: Option<usize>,
-        /// Queue revision observed when choosing the insertion index.
+        /// Queue `structure_revision` observed when choosing the insertion index.
         #[arg(long, requires = "index")]
         expected_revision: Option<u64>,
         /// Wait for admission to finish using the shared media task lifecycle.
@@ -502,7 +502,7 @@ pub(super) enum QueueAction {
     Move {
         queue_id: u64,
         index: usize,
-        /// Queue revision observed when choosing the target index.
+        /// Queue `structure_revision` observed when choosing the target index.
         #[arg(long)]
         expected_revision: u64,
     },

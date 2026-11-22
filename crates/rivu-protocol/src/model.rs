@@ -418,7 +418,11 @@ pub struct QueueState {
     pub total: usize,
     pub current_id: Option<u64>,
     pub current_position: Option<usize>,
+    /// Content token: occurrence membership, order or displayed row values changed.
     pub revision: u64,
+    /// Occurrence membership and order only; positional commands are pinned to it.
+    /// Every change also advances `revision`.
+    pub structure_revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -659,14 +663,14 @@ pub enum LibraryLocateResult {
 impl LibrarySnapshot {
     pub fn query_revisions(
         &self,
-        queue_revision: u64,
+        queue: &QueueState,
         playlist_id: Option<i64>,
     ) -> crate::response::QueryRevisions {
         crate::response::QueryRevisions::from_library(
             self.revision,
             self.structure_revision,
             self.playlist_revision,
-            queue_revision,
+            queue,
             self.duplicate_groups_revision,
             self.duplicate_members_revision,
         )
@@ -694,20 +698,17 @@ impl LibrarySnapshot {
     pub fn query_revisions_for(
         &self,
         query: &Query,
-        queue_revision: u64,
+        queue: &QueueState,
     ) -> crate::response::QueryRevisions {
-        self.query_revisions_for_scope(
-            crate::response::QueryRevisionScope::for_query(query),
-            queue_revision,
-        )
+        self.query_revisions_for_scope(crate::response::QueryRevisionScope::for_query(query), queue)
     }
 
     pub fn query_revisions_for_scope(
         &self,
         scope: crate::response::QueryRevisionScope,
-        queue_revision: u64,
+        queue: &QueueState,
     ) -> crate::response::QueryRevisions {
-        self.query_revisions(queue_revision, None).for_scope(
+        self.query_revisions(queue, None).for_scope(
             scope,
             &self.playlist_entry_revisions,
             &self.metadata_revisions,
@@ -1329,6 +1330,7 @@ mod tests {
                     queue.stamp(before),
                     queue.stamp(crate::response::QueryRevisions {
                         queue: before.queue + 1,
+                        queue_structure: before.queue_structure + 1,
                         ..before
                     })
                 );
@@ -1350,24 +1352,28 @@ mod tests {
             query: None,
             entry_ids: vec![1],
         };
-        let present = library.query_revisions_for(&query, 9);
+        let queue = QueueState {
+            revision: 9,
+            ..QueueState::default()
+        };
+        let present = library.query_revisions_for(&query, &queue);
         assert_eq!(present.playlist_entries.unwrap().revision, 12);
         assert_eq!(present.playlist_metadata.unwrap().revision, 1);
         assert_eq!(present.queue, 9);
         assert_eq!(present.track, None);
 
         Arc::make_mut(&mut library.playlist_entry_revisions).remove(&7);
-        let deleted = library.query_revisions_for(&query, 9);
+        let deleted = library.query_revisions_for(&query, &queue);
         assert_eq!(deleted.playlist_entries, None);
         assert_eq!(deleted.playlist_metadata, None);
 
         Arc::make_mut(&mut library.playlist_entry_revisions).insert(7, 13);
         // A snapshot without matching metadata history uses the global revision.
         library.revision = 20;
-        let restored = library.query_revisions_for(&query, 9);
+        let restored = library.query_revisions_for(&query, &queue);
         assert_eq!(restored.playlist_entries.unwrap().revision, 13);
         assert_eq!(restored.playlist_metadata.unwrap().revision, 20);
-        let track = library.query_revisions_for(&Query::Track { track_id: 3 }, 9);
+        let track = library.query_revisions_for(&Query::Track { track_id: 3 }, &queue);
         assert_eq!(track.track.unwrap().revision, 20);
         assert_eq!(track.playlist_entries, None);
         assert_eq!(track.playlist_metadata, None);
@@ -1377,22 +1383,26 @@ mod tests {
     fn metadata_scope_overflow_and_unknown_batches_invalidate_all_prior_scopes() {
         let mut library = LibrarySnapshot::default();
         let query = Query::Track { track_id: 10_000 };
-        let initial = query.stamp(library.query_revisions_for(&query, 0));
+        let queue = QueueState::default();
+        let initial = query.stamp(library.query_revisions_for(&query, &queue));
         for id in 0..MAX_METADATA_SCOPES as i64 {
             library.change_metadata(Some(&[id]), Some(&[]));
         }
-        assert_eq!(query.stamp(library.query_revisions_for(&query, 0)), initial);
+        assert_eq!(
+            query.stamp(library.query_revisions_for(&query, &queue)),
+            initial
+        );
         library.change_metadata(Some(&[MAX_METADATA_SCOPES as i64]), Some(&[]));
-        let overflow = query.stamp(library.query_revisions_for(&query, 0));
+        let overflow = query.stamp(library.query_revisions_for(&query, &queue));
         assert_ne!(overflow, initial);
         library.change_metadata(Some(&[1]), Some(&[]));
         assert_eq!(
-            query.stamp(library.query_revisions_for(&query, 0)),
+            query.stamp(library.query_revisions_for(&query, &queue)),
             overflow
         );
         library.change_metadata(None, None);
         assert_ne!(
-            query.stamp(library.query_revisions_for(&query, 0)),
+            query.stamp(library.query_revisions_for(&query, &queue)),
             overflow
         );
     }
@@ -1439,11 +1449,12 @@ mod tests {
             ..LibrarySnapshot::default()
         };
         let detail = Query::Track { track_id: 1 };
-        let before = detail.stamp(library.query_revisions_for(&detail, 0));
+        let queue = QueueState::default();
+        let before = detail.stamp(library.query_revisions_for(&detail, &queue));
         library.change_metadata(Some(&[1]), Some(&[]));
         assert_ne!(
             before,
-            detail.stamp(library.query_revisions_for(&detail, 0))
+            detail.stamp(library.query_revisions_for(&detail, &queue))
         );
         assert_eq!(library.bitrate_revision, 7);
     }

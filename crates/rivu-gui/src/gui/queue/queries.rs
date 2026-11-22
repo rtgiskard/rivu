@@ -214,7 +214,9 @@ impl Queue {
             return false;
         }
         self.schedule_refresh_wake(cx);
-        if let Some(intent) = intent {
+        if let Some(intent) = intent
+            && self.model.manual != Some(intent)
+        {
             cx.emit(QueueEvent::SelectionFailed(intent));
         }
         self.dispatch_queue_selection(cx);

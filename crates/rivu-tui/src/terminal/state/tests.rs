@@ -284,7 +284,10 @@ fn playlist_replacement_retires_stale_queue_target_and_configuration_intents() {
         let target = tui.ui.queue_replace.as_ref().unwrap().playlist_id;
         let mut next = tui.snapshot.clone();
         match change {
-            0 => next.queue.revision += 1,
+            0 => {
+                next.queue.revision += 1;
+                next.queue.structure_revision += 1;
+            }
             1 => {
                 Arc::make_mut(&mut next.library.playlist_entry_revisions).remove(&target);
             }
@@ -1237,8 +1240,13 @@ fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
     );
     load_queue(&mut tui.ui, &state);
     state.queue.revision = 1;
+    state.queue.structure_revision = 1;
     tui.apply_snapshot(state.clone());
     let relocation = tui.ui.query_request(&state).unwrap();
+    assert!(matches!(
+        relocation.demand.query(),
+        Query::QueueEntryLocations { .. }
+    ));
     tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
     assert!(!tui.ui.apply_query(
         &state,
@@ -1246,6 +1254,7 @@ fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
         Ok(QueryResult {
             revisions: QueryRevisions {
                 queue: 1,
+                queue_structure: 1,
                 ..QueryRevisions::default()
             },
             view: ViewResponse::QueueEntryLocations(vec![QueueIdentity::from(&queue_row(0, 1008))]),
@@ -1312,6 +1321,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     load_queue(&mut tui.ui, &state);
     state.queue.total = 11;
     state.queue.revision = 1;
+    state.queue.structure_revision = 1;
     tui.apply_snapshot(state.clone());
     assert!(tui.ui.queue.pages.is_empty());
     let request = tui.ui.query_request(&state).unwrap();
@@ -1335,6 +1345,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     tui.ui.apply_query(&state, &request, Ok(page));
     state.queue.total = 2;
     state.queue.revision = 2;
+    state.queue.structure_revision = 2;
     tui.apply_snapshot(state.clone());
     let request = tui.ui.query_request(&state).unwrap();
     assert_eq!(request.demand.kind(), ReadKind::QueueSelection(1008));
@@ -1350,6 +1361,7 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     load_queue(&mut tui.ui, &state);
     state.queue.total = 0;
     state.queue.revision = 3;
+    state.queue.structure_revision = 3;
     tui.apply_snapshot(state.clone());
     assert_eq!(tui.ui.queue.selection.selected(), None);
     assert!(tui.ui.query_request(&state).is_none());
@@ -1366,6 +1378,7 @@ fn empty_queue_changes_wait_for_occurrence_rows_before_actions() {
     assert!(tui.ui.query_request(&state).is_none());
     state.queue.total = 2;
     state.queue.revision = 1;
+    state.queue.structure_revision = 1;
     tui.apply_snapshot(state.clone());
     assert_eq!(tui.ui.queue.selection.selected(), Some(0));
     assert!(matches!(
@@ -1379,8 +1392,11 @@ fn empty_queue_changes_wait_for_occurrence_rows_before_actions() {
     ));
     state.queue.total = 0;
     state.queue.revision = 2;
+    state.queue.structure_revision = 2;
     tui.apply_snapshot(state);
     assert!(tui.ui.queue.pages.is_empty());
+    assert_eq!(tui.ui.queue.total, 0);
+    assert_eq!(tui.ui.queue.selection.selected(), None);
 }
 
 pub(in crate::terminal) fn track(index: usize) -> LibraryRow {
@@ -3914,7 +3930,10 @@ fn iteration_change_details_source(next: &mut TuiSnapshot, source: usize, page_s
         Arc::make_mut(&mut next.configuration).query_batch_size += 1;
     } else {
         match source {
-            0 => next.queue.revision += 1,
+            0 => {
+                next.queue.revision += 1;
+                next.queue.structure_revision += 1;
+            }
             1 => {
                 *Arc::make_mut(&mut next.library.playlist_entry_revisions)
                     .get_mut(&1)
@@ -4124,6 +4143,7 @@ fn help_hides_page_demand_and_skips_stale_rows_without_losing_queue_identity() {
     tui.ui.show_help = true;
     let mut next = state.clone();
     next.queue.revision += 1;
+    next.queue.structure_revision += 1;
     tui.apply_snapshot(next.clone());
     assert!(tui.ui.queue.pages.is_empty());
     assert!(tui.ui.queue.retained.is_none());
