@@ -239,9 +239,9 @@ async fn serve_client(
             };
             revision = next_revision;
             let mut state = state.borrow_mut();
+            minimum_position = state.handle.pcm.frontier();
             state.clients.get_mut(&id).unwrap().0 = enabled;
             state.aggregate();
-            minimum_position = state.handle.pcm.frontier();
         }
         let snapshot = state.borrow().handle.pcm.state();
         write_status(&mut writer, snapshot, revision, minimum_position).await?;

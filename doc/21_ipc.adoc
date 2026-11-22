@@ -42,9 +42,10 @@ The window serves at most 16 clients and has no private Core capture queue or
 per-client PCM queue. For allocation and retention bounds, see
 link:22_cache.adoc#visualization-caching[Visualization caching].
 
-PCM publications and cursor progress wake enabled receivers. Each subscription
-request acknowledges its own revision and current sequence/frame-offset frontier;
-new subscribers skip only the existing prefix, including within a growing tail.
+PCM publications and cursor progress wake enabled receivers. The server samples
+the sequence/frame-offset frontier before applying subscription demand and
+acknowledges it with the request revision. Receivers start at that frontier,
+including within a growing tail, subject to the window's retention limit.
 Unchanged aggregate capture state does not wake other clients. Capture demand is owned by
 the aggregate of live subscriptions, subject to visualization enablement; command
 clients cannot override it through a global analysis setter. Shared control changes,

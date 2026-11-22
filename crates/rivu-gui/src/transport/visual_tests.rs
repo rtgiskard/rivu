@@ -481,10 +481,9 @@ fn shared_native_channels_follow_cursor_and_reject_retired_capture() {
 }
 
 #[test]
-fn subscription_frontier_excludes_pre_subscription_pcm_with_current_identity() {
+fn subscription_uses_acknowledged_frontier_for_the_first_fft_window() {
     async_io::block_on(async {
         let mut f = fixture();
-        subscribe(&mut f).await;
         let state = PcmState {
             epoch: 4,
             active: true,
@@ -492,12 +491,22 @@ fn subscription_frontier_excludes_pre_subscription_pcm_with_current_identity() {
             heard_frame: u64::MAX,
             ..PcmState::default()
         };
-        // Local retirement is complete, but the server's newer frontier must
-        // still exclude this otherwise-valid prefix from the first FFT window.
+        // The server frontier splits a growing block. The receiver may first
+        // observe it after the producer has already appended fresh samples.
         stereo(&f.window, header(state, 0), 0.9, 512);
         let minimum = f.window.frontier();
         stereo(&f.window, header(state, 512), 0.25, 256);
-        write_status(&mut f.server, state, 1, minimum)
+        f.client.set_display_demand(DisplayDemand {
+            enabled: true,
+            spectrum: true,
+            visualizer: VisualizerDemand {
+                pcm: true,
+                ..VisualizerDemand::default()
+            },
+        });
+        let (enabled, revision) = next_subscription(&mut f.server).await;
+        assert!(enabled);
+        write_status(&mut f.server, state, revision, minimum)
             .await
             .unwrap();
         rivu_protocol::transport::timeout(Duration::from_secs(5), async {
@@ -509,7 +518,7 @@ fn subscription_frontier_excludes_pre_subscription_pcm_with_current_identity() {
         .unwrap();
         assert!(f.client.analysis.read().settings.is_none());
         stereo(&f.window, header(state, 768), 0.25, 256);
-        write_status(&mut f.server, state, 1, minimum)
+        write_status(&mut f.server, state, revision, minimum)
             .await
             .unwrap();
         let fresh = current_after(&f, 0).await;

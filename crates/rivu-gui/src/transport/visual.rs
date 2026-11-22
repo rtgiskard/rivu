@@ -422,7 +422,6 @@ async fn run_client(
     let mut sent_revision = 0;
     let mut acknowledged = None;
     let mut pcm_state = PcmState::default();
-    let mut minimum_position = PcmPosition::default();
     let mut position = PcmPosition::default();
     let mut status_reader = ControlReader::<STATUS_SIZE>::new();
     let (mut reader, mut writer) = stream.split();
@@ -505,7 +504,9 @@ async fn run_client(
             let (next, revision, minimum) = decode_status(&result?)?;
             if revision == sent_revision {
                 pcm_state = next;
-                minimum_position = minimum;
+                if acknowledged != Some(revision) {
+                    position = minimum;
+                }
                 acknowledged = Some(revision);
             }
         }
@@ -514,9 +515,6 @@ async fn run_client(
         engine.configure(settings, demand, pcm_state, display_token, &mut frame);
         if revision != capture_revision {
             engine.restart_capture(&mut frame);
-            // Local subscriptions start after the currently published prefix,
-            // even when another GUI keeps global capture enabled.
-            position = window.frontier();
             capture_revision = revision;
             waveform_key = None;
         }
@@ -524,7 +522,7 @@ async fn run_client(
         let mut waveform_generation = None;
         if admitted && pcm_enabled && pcm_state.active {
             let latest = window.sequence();
-            position = position.max(minimum_position).max(PcmPosition {
+            position = position.max(PcmPosition {
                 sequence: latest
                     .saturating_sub(window.retained_blocks() as u64 - 1)
                     .max(1),
