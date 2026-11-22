@@ -414,6 +414,22 @@ impl Core {
                     }
                     self.publish();
                 }
+                if let Query::Track { track_id } = &query
+                    && self
+                        .state
+                        .current_track()
+                        .is_some_and(|track| track.id == *track_id)
+                    && ticket.as_ref().is_none_or(QueryTicket::is_current)
+                    && let Err(error) = self.recover_current_track_on_demand()
+                {
+                    if let Some(reply) = request.reply {
+                        let _ = reply.send(CoreResponse::Query(QueryResponse {
+                            revisions: self.state.query_revisions_for(&query),
+                            result: Err(error.context("Refreshing playback details").into()),
+                        }));
+                    }
+                    return;
+                }
                 if let Some(reads) = &self.read_queries
                     && !matches!(
                         &query,

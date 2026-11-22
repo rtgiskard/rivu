@@ -2,7 +2,9 @@
 //! Unsubmitted inline text belongs to the view, never to selection arbitration.
 //! Epochs reject late reads and acknowledgements after leaving and reopening a track.
 
-use super::source::{SourceAction, SourceTags, SourceToken, database_tags};
+use super::source::{
+    SourceAction, SourceTags, SourceToken, database_tags, same_track_tags, track_has_tags,
+};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_format::tags::TagValues;
 use rivu_presentation::refresh::RefreshDeadline;
@@ -151,6 +153,10 @@ pub(in crate::gui) struct MetadataSession {
     epoch: u64,
     request_serial: u64,
     database_serial: u64,
+    // The command committed, but playback may still expose its old tag baseline.
+    playback_tag_commit: Option<(i64, TagValues)>,
+    // A new commit can block the same baseline while a confirmation is in flight.
+    playback_tag_commit_serial: u64,
     saves: HashMap<Field, SaveToken>,
     pub(super) source: SourceTags,
 }
@@ -185,6 +191,9 @@ impl MetadataSession {
         }
     }
     pub(super) fn authoritative_track(&self) -> Option<&Track> {
+        if self.selected.is_none() && self.playback_tag_commit.is_some() {
+            return None;
+        }
         self.retention
             .deadline()
             .is_none()
@@ -240,15 +249,7 @@ impl MetadataSession {
 
     fn advance_database_serial(&mut self, next: Option<&Track>) {
         let unchanged = match (self.source_track(), next) {
-            (Some(previous), Some(next)) => {
-                previous.title == next.title
-                    && previous.artist == next.artist
-                    && previous.album == next.album
-                    && previous.release_date == next.release_date
-                    && previous.track_number == next.track_number
-                    && previous.disc_number == next.disc_number
-                    && previous.replaygain_track_gain == next.replaygain_track_gain
-            }
+            (Some(previous), Some(next)) => same_track_tags(previous, next),
             (None, None) => true,
             _ => false,
         };
@@ -307,20 +308,13 @@ impl MetadataSession {
         Some((token, command))
     }
 
-    /// Rebase only source tag fields, never playback bookkeeping or preferences.
+    /// Rebase explicit selection tag fields, never Core's playback projection.
     pub(super) fn commit_tags(&mut self, token: SourceToken, tags: &TagValues) {
-        if self.database_serial != token.database_serial {
+        if self.selected.is_none() || self.database_serial != token.database_serial {
             return;
         }
         if let MetadataAvailability::Present(track) = &mut self.availability {
-            if track.title == tags.title
-                && track.artist == tags.artist
-                && track.album == tags.album
-                && track.release_date == tags.release_date
-                && track.track_number == tags.track_number
-                && track.disc_number == tags.disc_number
-                && track.replaygain_track_gain == tags.replaygain_track_gain
-            {
+            if track_has_tags(track, tags) {
                 return;
             }
             self.database_serial = self.database_serial.wrapping_add(1);
@@ -361,7 +355,7 @@ impl MetadataSession {
     }
 
     pub(in crate::gui) fn begin_load(&mut self, id: i64) -> LoadToken {
-        debug_assert_eq!(self.identity, Some(id));
+        debug_assert_eq!(self.selected, Some(id));
         self.request_serial = self.request_serial.wrapping_add(1);
         let token = LoadToken {
             epoch: self.epoch,
@@ -375,7 +369,7 @@ impl MetadataSession {
     pub(in crate::gui) fn accepts_load(&self, token: LoadToken) -> bool {
         self.read_state == MetadataReadState::Pending(token)
             && self.epoch == token.epoch
-            && self.identity == Some(token.track_id)
+            && self.selected == Some(token.track_id)
     }
 
     pub(in crate::gui) fn retire_load(&mut self, token: LoadToken) -> bool {
@@ -419,25 +413,73 @@ impl MetadataSession {
         true
     }
 
-    pub(in crate::gui) fn sync_playback(&mut self, track: Option<&Track>) -> bool {
-        if self.selected.is_some() {
+    /// Track only the current playback projection. Explicit selection obtains
+    /// its own database baseline through the existing selected-track read.
+    pub(super) fn observe_tag_commit(
+        &mut self,
+        track_id: i64,
+        tags: &TagValues,
+        refresh_failed: bool,
+        playback: Option<&Track>,
+    ) -> bool {
+        let was_waiting = self.playback_tag_commit.is_some();
+        if !refresh_failed && !was_waiting {
             return false;
+        }
+        let Some(playback) = playback.filter(|track| track.id == track_id) else {
+            return false;
+        };
+        // A later successful write may supersede the one we were waiting for.
+        let waiting = !track_has_tags(playback, tags);
+        self.playback_tag_commit = waiting.then(|| (track_id, database_tags(playback)));
+        if waiting {
+            self.playback_tag_commit_serial = self.playback_tag_commit_serial.wrapping_add(1);
+        }
+        waiting != was_waiting
+    }
+
+    pub(super) fn playback_tag_commit_serial(&self) -> Option<u64> {
+        self.playback_tag_commit
+            .as_ref()
+            .map(|_| self.playback_tag_commit_serial)
+    }
+
+    pub(super) fn confirm_playback_tags(&mut self, serial: u64, track: &Track) -> bool {
+        if self.playback_tag_commit_serial == serial
+            && self
+                .playback_tag_commit
+                .as_ref()
+                .is_some_and(|(id, stale)| *id == track.id && track_has_tags(track, stale))
+        {
+            self.playback_tag_commit = None;
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn sync_playback(&mut self, track: Option<&Arc<Track>>) {
+        if self
+            .playback_tag_commit
+            .as_ref()
+            .is_some_and(|(id, stale)| {
+                track.is_none_or(|track| track.id != *id || !track_has_tags(track, stale))
+            })
+        {
+            self.playback_tag_commit = None;
+        }
+        if self.selected.is_some() {
+            return;
         }
         let id = track.map(|track| track.id);
         if self.identity != id {
             self.change_identity(id);
-        } else if matches!(self.availability, MetadataAvailability::Unavailable)
-            || self.source_track() == track
-        {
-            return false;
         }
-        self.advance_database_serial(track);
+        self.advance_database_serial(track.map(Arc::as_ref));
         self.retention.clear();
         self.details_expired = false;
         self.availability = track.map_or(MetadataAvailability::Unknown, |track| {
-            MetadataAvailability::Present(Arc::new(track.clone()))
+            MetadataAvailability::Present(Arc::clone(track))
         });
-        true
     }
 
     pub(super) fn begin_save(&mut self, value: &SavedValue) -> Option<(SaveToken, Command)> {
@@ -559,15 +601,14 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_row_cannot_be_restored_by_playback_or_ack() {
+    fn unavailable_explicit_row_cannot_be_restored_by_playback_or_ack() {
         let mut session = loaded();
-        session.selected = None;
         let (save, _) = session
             .begin_save(&SavedValue::Title("new".into()))
             .unwrap();
         let read = session.begin_load(1);
         assert!(session.accept_load(read, None));
-        assert!(!session.sync_playback(Some(&track(1, "stale"))));
+        session.sync_playback(Some(&Arc::new(track(1, "stale"))));
         assert!(session.complete_save(save));
         assert!(session.track().is_none());
     }

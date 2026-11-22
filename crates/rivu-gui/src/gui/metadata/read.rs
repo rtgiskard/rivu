@@ -1,4 +1,4 @@
-//! Coordinates details demand, projection validity, and the single physical reader.
+//! Coordinates explicit-selection demand, query validity, and the single physical reader.
 //!
 //! The session token protects track identity; projection generation independently
 //! protects query freshness. Neither identity substitutes for the other.
@@ -109,13 +109,13 @@ impl MetadataReadCoordinator {
         visible: bool,
         now: Instant,
     ) -> Option<MetadataReadTask> {
+        let track_id = self.selected.filter(|&id| session.selected() == Some(id))?;
         if self.needs_refresh {
             session.invalidate_at(now);
         }
         if !visible || !self.needs_refresh || self.worker.is_some() {
             return None;
         }
-        let track_id = self.selected?;
         let read = MetadataRead {
             token: session.begin_load(track_id),
             track_id,

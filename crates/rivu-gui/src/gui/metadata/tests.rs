@@ -1,6 +1,8 @@
 use super::*;
 use crate::test_support::CoreRuntime;
 use gpui::{EntityInputHandler, TestAppContext};
+use rivu::test_support::catalog::CatalogFixture;
+use rivu_protocol::response::QueryError;
 use rivu_protocol::wire::{
     CommandOutcome, CommandOutput, CommandReceipt, CommandReply, SourceTagOutput,
 };
@@ -37,6 +39,7 @@ pub(super) fn track(id: i64, title: &str) -> Track {
 fn source_peak_rejects_changed_selection_file_and_explicit_reload(cx: &mut TestAppContext) {
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
+        this.metadata.select(1);
         let original = this.metadata.track().unwrap().clone();
         let peak = SourcePeak {
             track_id: original.id,
@@ -108,15 +111,27 @@ fn decoder_choice_does_not_close_or_submit_while_source_is_busy(cx: &mut TestApp
 }
 
 fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<Metadata>) {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = CoreRuntime::start_quiet(directory.path());
+    let metadata = metadata_owner(&directory, &runtime, cx);
+    metadata.update(cx, |this, cx| {
+        playback(this, track(1, "A"), cx);
+    });
+    (directory, runtime, metadata)
+}
+
+fn metadata_owner(
+    directory: &tempfile::TempDir,
+    runtime: &CoreRuntime,
+    cx: &mut TestAppContext,
+) -> Entity<Metadata> {
     cx.update(|cx| {
         crate::gui::appearance::theme::set_theme(rivu_presentation::theme::Theme::default(), cx);
         crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
     });
-    let directory = tempfile::tempdir().unwrap();
-    let runtime = CoreRuntime::start_quiet(directory.path());
     let context = FeatureContext::for_test(runtime.handle.clone());
     let default_artwork = cx.new(|cx| DefaultArtwork::new(&context.i18n, cx));
-    let metadata = cx.new(|cx| {
+    cx.new(|cx| {
         Metadata::new(
             context,
             gpui::font("sans-serif"),
@@ -125,10 +140,29 @@ fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, CoreRuntime, Entity<M
             default_artwork,
             cx,
         )
-    });
-    metadata.update(cx, |this, cx| {
-        playback(this, track(1, "A"), cx);
-    });
+    })
+}
+
+fn stopped_playback_fixture(
+    cx: &mut TestAppContext,
+) -> (tempfile::TempDir, CoreRuntime, Entity<Metadata>) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let path = root.join("unavailable.wav");
+    let catalog = CatalogFixture::open(&root.join("library.db")).unwrap();
+    catalog
+        .seed_tracks(root.to_path_buf(), vec![(path.clone(), "playback".into())])
+        .unwrap();
+    let track_id = catalog.track_id(&path).unwrap().unwrap();
+    drop(catalog);
+    let runtime = CoreRuntime::start_quiet(root);
+    // Selecting a missing queue item publishes its stopped track without starting audio.
+    let delivery =
+        futures::executor::block_on(runtime.handle.request_command(Command::Play { track_id }));
+    assert!(delivery.error().unwrap().contains("Missing audio file"));
+    let state = runtime.handle.gui_snapshot();
+    assert_eq!(state.current_track().unwrap().id, track_id);
+    let metadata = metadata_owner(&directory, &runtime, cx);
     (directory, runtime, metadata)
 }
 
@@ -180,7 +214,7 @@ fn bitrate_revision_retains_inline_text_and_queues_hidden_reload(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn hidden_playback_advance_with_bitrate_change_prepares_current_identity(cx: &mut TestAppContext) {
+fn hidden_playback_advances_without_a_track_query(cx: &mut TestAppContext) {
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
         assert_eq!(this.metadata.selected(), None);
@@ -191,54 +225,75 @@ fn hidden_playback_advance_with_bitrate_change_prepares_current_identity(cx: &mu
         state.current_track = Some(Arc::new(track(2, "B")));
         this.reconcile(Rc::new(state), cx);
         assert_eq!(this.metadata.identity(), Some(2));
-        assert_eq!(this.metadata.track().unwrap().title, "B");
-        assert!(this.edit.is_none());
-        // Exercise reveal's demand preparation without a real Core read or timer.
-        let task = this
-            .metadata_read
-            .prepare(&mut this.metadata, true, Instant::now())
-            .unwrap();
-        assert_eq!(task.read.query(), Query::Track { track_id: 2 });
-        assert!(this.metadata_read.submit(
-            task.read,
-            &this.metadata,
-            ReadEnvironment {
-                visible: true,
-                revisions: this.state.query_revisions_for(&task.read.query()),
-            },
-        ));
+        let projected = this.state.current_track.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), projected));
+        this.demand_metadata(cx);
+        assert!(
+            this.metadata_read
+                .prepare(&mut this.metadata, true, Instant::now())
+                .is_none()
+        );
+        assert_eq!(this.metadata.read_state(), &MetadataReadState::Idle);
+        assert!(this.metadata.deadline().is_none());
+        assert!(this.metadata.editable());
     });
 }
 
 #[gpui::test]
 fn playback_and_explicit_selection_own_target_not_read_completion(cx: &mut TestAppContext) {
+    use rivu_protocol::response::{QueryResponse, ViewResponse};
+
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
-        let old_follow = this.metadata.begin_load(1);
         playback(this, track(2, "B"), cx);
         assert_eq!(this.metadata.identity(), Some(2));
-        assert!(
-            !this
-                .metadata
-                .accept_load(old_follow, Some(track(1, "late A")))
-        );
+
+        this.request_track(2, cx);
+        let task = this
+            .metadata_read
+            .prepare(&mut this.metadata, true, Instant::now())
+            .unwrap();
+        assert_eq!(task.read.query(), Query::Track { track_id: 2 });
+        let revisions = this.state.query_revisions_for(&task.read.query());
+        assert!(this.metadata_read.submit(
+            task.read,
+            &this.metadata,
+            ReadEnvironment {
+                visible: true,
+                revisions,
+            },
+        ));
+        playback(this, track(3, "C"), cx);
+        assert_eq!(this.metadata.selected(), Some(2));
         assert_eq!(this.metadata.track().unwrap().title, "B");
 
-        artwork_selection(this, track(3, "selected C"), cx);
-        let old_selection = this.metadata.begin_load(3);
-        playback(this, track(4, "D"), cx);
-        assert_eq!(this.metadata.selected(), Some(3));
-        assert_eq!(this.metadata.track().unwrap().title, "selected C");
-
+        playback(this, track(2, "new projected B"), cx);
+        assert_eq!(this.metadata.track().unwrap().title, "B");
         this.clear_selection(cx);
-        assert_eq!(this.metadata.identity(), Some(4));
-        assert_eq!(this.metadata.track().unwrap().title, "D");
+        assert_eq!(this.metadata.identity(), Some(2));
+        assert_eq!(this.metadata.track().unwrap().title, "new projected B");
+        assert!(matches!(
+            this.metadata_read.finish(
+                task.read,
+                &mut this.metadata,
+                ReadEnvironment {
+                    visible: true,
+                    revisions,
+                },
+                QueryResponse {
+                    revisions,
+                    result: Ok(ViewResponse::Track(Some(track(2, "late B")))),
+                },
+                || unreachable!(),
+            ),
+            ReadCompletion::Retired
+        ));
+        assert_eq!(this.metadata.track().unwrap().title, "new projected B");
         assert!(
-            !this
-                .metadata
-                .accept_load(old_selection, Some(track(3, "late C")))
+            this.metadata_read
+                .prepare(&mut this.metadata, true, Instant::now())
+                .is_none()
         );
-        assert_eq!(this.metadata.identity(), Some(4));
 
         let mut state = (*this.state).clone();
         state.current_track = None;
@@ -328,9 +383,10 @@ fn bulk_source_commands_include_seven_staged_values_and_database_expectation() {
     original.play_count = 42;
     original.favorite = true;
     original.decoder_hint = DecoderHint::Native;
+    let original = Arc::new(original);
     session.sync_playback(Some(&original));
     session.source.stage(file_tags());
-    assert_eq!(session.track(), Some(&original));
+    assert_eq!(session.track(), Some(original.as_ref()));
     for action in [SourceAction::Sync, SourceAction::Save] {
         let (token, command) = session.begin_source(action).unwrap();
         match command {
@@ -359,7 +415,7 @@ fn bulk_source_commands_include_seven_staged_values_and_database_expectation() {
         .unwrap();
     assert!(session.begin_source(SourceAction::Sync).is_none());
     assert!(session.complete_save(save));
-    assert_eq!(session.track(), Some(&original));
+    assert_eq!(session.track(), Some(original.as_ref()));
 }
 
 #[test]
@@ -560,8 +616,7 @@ fn successful_inline_save_releases_only_its_staged_field_after_refresh(cx: &mut 
         let mut refreshed = track(1, "edited title");
         refreshed.artist = "database artist changed".into();
         refreshed.track_number = Some(99);
-        let read = this.metadata.begin_load(1);
-        assert!(this.metadata.accept_load(read, Some(refreshed)));
+        playback(this, refreshed, cx);
         let mut expected = file_tags();
         expected.title = "edited title".into();
         assert_eq!(this.metadata.source.values(this.metadata.track().unwrap()), expected);
@@ -771,16 +826,20 @@ fn source_save_acknowledges_all_tags_without_touching_user_state(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn committed_save_with_projection_warning_does_not_enter_recovery(cx: &mut TestAppContext) {
+fn committed_save_with_projection_warning_waits_for_playback_tags(cx: &mut TestAppContext) {
     use source::SourceAction;
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
+        let mut refreshed = track(1, "saved title");
+        refreshed.album = "saved album".into();
+        let committed = source::database_tags(&refreshed);
+        this.metadata.source.stage(committed.clone());
         let (save, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
         let warning = "File and database saved; refresh failed";
         let delivery = command_delivery(
             true,
             Some(SourceTagOutput {
-                tags: Some(file_tags()),
+                tags: Some(committed.clone()),
                 file_saved: true,
                 refresh_error: Some(warning.into()),
             }),
@@ -790,13 +849,372 @@ fn committed_save_with_projection_warning_does_not_enter_recovery(cx: &mut TestA
             this.metadata.source.status,
             Some(source::SourceStatus::Saved)
         );
-        assert_eq!(
-            source::database_tags(this.metadata.track().unwrap()),
-            file_tags()
-        );
+        assert_eq!(this.metadata.track().unwrap().title, "A");
         assert_eq!(this.error.as_deref(), Some(warning));
         assert!(this.metadata.source.recovery(1).is_none());
-        assert!(this.metadata.source.allows(1, SourceAction::Save));
+        assert!(!this.metadata.source.busy());
+        assert!(this.metadata.begin_source(SourceAction::Save).is_none());
+        assert!(this.metadata.begin_source(SourceAction::Sync).is_none());
+        assert!(
+            this.metadata
+                .begin_save(&SavedValue::PlayCount(2))
+                .is_none()
+        );
+
+        // An unrelated change to the same playback snapshot is not a tag refresh.
+        let mut stale = (*this.metadata.track().unwrap()).clone();
+        stale.favorite = true;
+        playback(this, stale, cx);
+        assert!(!this.metadata.editable());
+        assert!(
+            this.metadata_read
+                .prepare(&mut this.metadata, true, Instant::now())
+                .is_none()
+        );
+
+        // An explicit selection has its own read authority, but clearing it
+        // must not make the still-stale playback baseline writable.
+        artwork_selection(this, refreshed.clone(), cx);
+        assert!(this.metadata.editable());
+        this.clear_selection(cx);
+        assert!(!this.metadata.editable());
+
+        playback(this, refreshed, cx);
+        assert!(this.metadata.editable());
+        let (_, command) = this.metadata.begin_source(SourceAction::Save).unwrap();
+        assert!(
+            matches!(command, Command::SaveSourceTags { expected, .. } if *expected == committed)
+        );
+        assert!(
+            this.metadata_read
+                .prepare(&mut this.metadata, true, Instant::now())
+                .is_none()
+        );
+    });
+}
+
+#[gpui::test]
+fn explicit_reload_requests_core_even_without_a_playback_tag_block(cx: &mut TestAppContext) {
+    let (_directory, mut runtime, metadata) = stopped_playback_fixture(cx);
+    runtime.disconnect_frontend();
+    let errors = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscription = cx.update(|cx| {
+        let errors = errors.clone();
+        cx.subscribe(&metadata, move |_, event, _| {
+            if let MetadataEvent::Error(error) = event {
+                errors.borrow_mut().push(error.clone());
+            }
+        })
+    });
+    metadata.update(cx, |this, cx| {
+        let playback_id = this.metadata.track().unwrap().id;
+        artwork_selection(this, track(2, "selected"), cx);
+        this.reload_playback(cx);
+        assert_eq!(this.metadata.selected(), None);
+        assert_eq!(this.metadata.track().unwrap().id, playback_id);
+    });
+    cx.run_until_parked();
+    assert_eq!(&*errors.borrow(), &["GUI query queue is busy or stopped"]);
+    metadata.read_with(cx, |this, _| {
+        assert_eq!(this.metadata.track().unwrap().title, "playback");
+        assert!(this.metadata.editable());
+    });
+}
+
+#[gpui::test]
+async fn explicit_reload_observes_playback_tags_committed_by_another_client(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (directory, _runtime, metadata) = stopped_playback_fixture(cx);
+    let track_id = metadata.read_with(cx, |this, _| this.metadata.track().unwrap().id);
+    let ack = rivu_client::request_command(
+        directory.path(),
+        Command::EditTrack {
+            track_id,
+            title: Some("edited by another client".into()),
+            artist: None,
+            album: None,
+            release_date: None,
+            decoder_hint: None,
+        },
+    )
+    .unwrap();
+    assert!(ack.is_success(), "{ack:?}");
+    metadata.update(cx, |this, cx| {
+        assert_eq!(this.metadata.track().unwrap().title, "playback");
+        this.reload_playback(cx);
+    });
+    cx.condition(&metadata, |this, _| this.playback_reload.is_none())
+        .await;
+    metadata.read_with(cx, |this, _| {
+        assert_eq!(
+            this.metadata.track().unwrap().title,
+            "edited by another client"
+        );
+        assert_eq!(this.error, None);
+    });
+}
+
+fn playback_reload_failure(error: &str) -> QueryResponse {
+    QueryResponse {
+        revisions: Default::default(),
+        result: Err(QueryError::Message(error.into())),
+    }
+}
+
+#[gpui::test]
+fn only_the_current_playback_reload_can_report_a_failure(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let superseded = this.begin_playback_reload(cx).unwrap();
+        let current = this.begin_playback_reload(cx).unwrap();
+        this.finish_playback_reload(superseded, playback_reload_failure("old reload"), cx);
+        assert_eq!(this.error, None);
+        // Timeout notice and final reply can both arrive for the same request.
+        this.finish_playback_reload(current, playback_reload_failure("timed out"), cx);
+        this.finish_playback_reload(current, playback_reload_failure("late reply"), cx);
+        assert_eq!(this.error.as_deref(), Some("timed out"));
+
+        let same_track_selection = this.begin_playback_reload(cx).unwrap();
+        this.request_track(1, cx);
+        this.finish_playback_reload(
+            same_track_selection,
+            playback_reload_failure("selection changed"),
+            cx,
+        );
+        assert_eq!(this.metadata.selected(), Some(1));
+        assert_eq!(this.error, None);
+
+        let old_source = this.begin_playback_reload(cx).unwrap();
+        let mut next = (*this.state).clone();
+        next.source_generation = next.source_generation.wrapping_add(1);
+        this.reconcile(Rc::new(next), cx);
+        this.finish_playback_reload(old_source, playback_reload_failure("source changed"), cx);
+        assert_eq!(this.error, None);
+    });
+}
+
+#[gpui::test]
+fn obsolete_playback_query_results_do_not_report_a_failure(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
+            let reload = this.begin_playback_reload(cx).unwrap();
+            this.finish_playback_reload(
+                reload,
+                QueryResponse {
+                    revisions: Default::default(),
+                    result: Err(error),
+                },
+                cx,
+            );
+            assert_eq!(this.error, None);
+            assert_eq!(this.metadata.track().unwrap().title, "A");
+        }
+    });
+}
+
+#[gpui::test]
+fn playback_reload_failure_does_not_touch_a_newer_inline_editor(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    let window = cx
+        .add_empty_window()
+        .update(|window, _| window.window_handle());
+    cx.update_window(window, |_, window, cx| {
+        metadata.update(cx, |this, cx| {
+            let reload = this.begin_playback_reload(cx).unwrap();
+            this.begin_edit(Field::Title, window, cx);
+            let input = this.edit.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_text("draft", cx));
+            this.finish_playback_reload(reload, playback_reload_failure("old failure"), cx);
+            let edit = this.edit.as_ref().unwrap();
+            assert_eq!(edit.input.read(cx).text(), "draft");
+            assert_eq!(edit.error, None);
+            assert_eq!(this.error, None);
+        });
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn playback_reload_reports_tag_disagreement_without_replacing_core_details(
+    cx: &mut TestAppContext,
+) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let reload = this.begin_playback_reload(cx).unwrap();
+        assert_eq!(reload.query(), Query::Track { track_id: 1 });
+        let revisions = this.state.query_revisions_for(&reload.query());
+        let mut database = track(1, "A");
+        database.replaygain_track_gain = Some(-6.0);
+        this.finish_playback_reload(
+            reload,
+            QueryResponse {
+                revisions,
+                result: Ok(ViewResponse::Track(Some(database))),
+            },
+            cx,
+        );
+        assert_eq!(this.metadata.track().unwrap().replaygain_track_gain, None);
+        assert!(this.metadata.editable());
+        assert_eq!(
+            this.error.as_deref(),
+            Some(this.context.i18n.text("gl-reload-playback-stale"))
+        );
+    });
+}
+
+#[gpui::test]
+fn playback_reload_accepts_different_decoder_source_facts(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let reload = this.begin_playback_reload(cx).unwrap();
+        let revisions = this.state.query_revisions_for(&reload.query());
+        let mut database = track(1, "A");
+        database.path = "new-source.wav".into();
+        database.duration = Some(1.0);
+        this.finish_playback_reload(
+            reload,
+            QueryResponse {
+                revisions,
+                result: Ok(ViewResponse::Track(Some(database))),
+            },
+            cx,
+        );
+        assert!(this.metadata.track().unwrap().path.as_os_str().is_empty());
+        assert_eq!(this.metadata.track().unwrap().duration, None);
+        assert_eq!(this.error, None);
+    });
+}
+
+#[gpui::test]
+fn old_playback_reload_cannot_confirm_a_newer_tag_block(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let projected = Arc::clone(this.state.current_track.as_ref().unwrap());
+        this.metadata.observe_tag_commit(
+            1,
+            &source::database_tags(&track(1, "first commit")),
+            true,
+            Some(&projected),
+        );
+        let retired = this.begin_playback_reload(cx).unwrap();
+        let reload = this.begin_playback_reload(cx).unwrap();
+        let revisions = this.state.query_revisions_for(&reload.query());
+        let matching_reply = || QueryResponse {
+            revisions,
+            result: Ok(ViewResponse::Track(Some((*projected).clone()))),
+        };
+        this.finish_playback_reload(retired, matching_reply(), cx);
+        assert!(!this.metadata.editable());
+
+        // A newer write can block the same baseline under the same editor identity.
+        this.metadata.observe_tag_commit(
+            1,
+            &source::database_tags(&track(1, "newer commit")),
+            true,
+            Some(&projected),
+        );
+        this.finish_playback_reload(reload, matching_reply(), cx);
+        assert!(!this.metadata.editable());
+
+        let retry = this.begin_playback_reload(cx).unwrap();
+        this.finish_playback_reload(retry, playback_reload_failure("refresh unavailable"), cx);
+        assert_eq!(this.error.as_deref(), Some("refresh unavailable"));
+        assert!(!this.metadata.editable());
+        this.finish_playback_reload(retry, matching_reply(), cx);
+        assert!(!this.metadata.editable());
+    });
+}
+
+#[gpui::test]
+fn playback_reload_can_confirm_restored_tags_without_a_new_snapshot(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let projected = Arc::clone(this.state.current_track.as_ref().unwrap());
+        let track_id = projected.id;
+        let query = Query::Track { track_id };
+        let revisions = this.state.query_revisions_for(&query);
+        let mut older = revisions;
+        if let Some(scope) = &mut older.track {
+            scope.revision = scope.revision.wrapping_sub(1);
+        } else {
+            older.library = older.library.wrapping_sub(1);
+        }
+        let committed = track(projected.id, "saved title");
+        assert!(this.metadata.observe_tag_commit(
+            track_id,
+            &source::database_tags(&committed),
+            true,
+            Some(&projected),
+        ));
+        for (revisions, track) in [(revisions, committed), (older, (*projected).clone())] {
+            let reload = this.begin_playback_reload(cx).unwrap();
+            this.finish_playback_reload(
+                reload,
+                QueryResponse {
+                    revisions,
+                    result: Ok(ViewResponse::Track(Some(track))),
+                },
+                cx,
+            );
+            assert!(
+                this.metadata
+                    .begin_source(source::SourceAction::Save)
+                    .is_none()
+            );
+        }
+
+        let reload = this.begin_playback_reload(cx).unwrap();
+        this.finish_playback_reload(
+            reload,
+            QueryResponse {
+                revisions,
+                result: Ok(ViewResponse::Track(Some((*projected).clone()))),
+            },
+            cx,
+        );
+        let (_, command) = this
+            .metadata
+            .begin_source(source::SourceAction::Save)
+            .unwrap();
+        assert!(matches!(command, Command::SaveSourceTags { expected, .. }
+                if *expected == source::database_tags(&projected)));
+    });
+}
+
+#[gpui::test]
+fn selected_tag_write_warning_queues_an_authoritative_read(cx: &mut TestAppContext) {
+    use source::SourceAction;
+
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        artwork_selection(this, track(2, "selected"), cx);
+        this.metadata.source.stage(file_tags());
+        let (sync, _) = this.metadata.begin_source(SourceAction::Sync).unwrap();
+        let mut delivery = command_delivery(
+            true,
+            Some(SourceTagOutput {
+                tags: Some(file_tags()),
+                file_saved: false,
+                refresh_error: Some("Database tags saved; refresh failed".into()),
+            }),
+        );
+        delivery.observation =
+            crate::frontend::CommandObservation::Unavailable("refresh unavailable".into());
+        this.finish_source_action(sync, delivery, cx);
+
+        assert_eq!(this.metadata.track().unwrap().title, "selected");
+        assert!(!this.metadata.editable());
+        let task = this
+            .metadata_read
+            .prepare(&mut this.metadata, true, Instant::now())
+            .unwrap();
+        assert_eq!(task.read.query(), Query::Track { track_id: 2 });
+        this.clear_selection(cx);
+        assert_eq!(this.metadata.track().unwrap().title, "A");
+        assert!(this.metadata.editable());
     });
 }
 
@@ -809,6 +1227,7 @@ fn newer_database_read_and_inline_input_survive_old_bulk_completion(cx: &mut Tes
         .update(|window, _| window.window_handle());
     cx.update_window(window, |_, window, cx| {
         metadata.update(cx, |this, cx| {
+            this.metadata.select(1);
             this.metadata.source.stage(file_tags());
             let (token, _) = this.metadata.begin_source(SourceAction::Sync).unwrap();
             let read = this.metadata.begin_load(1);
@@ -1043,10 +1462,21 @@ fn fresh_success_rebases_only_the_submitted_editor_and_keeps_later_text(cx: &mut
                 .unwrap()
                 .input
                 .update(cx, |input, cx| input.set_text("later", cx));
+            playback(this, track(1, "observed title"), cx);
+            let mut state = (*this.state).clone();
+            state.library.bitrate_revision += 1;
+            this.reconcile(Rc::new(state), cx);
+            assert_eq!(this.metadata.track().unwrap().title, "observed title");
+            assert_eq!(this.edit.as_ref().unwrap().input.read(cx).text(), "later");
             this.finish_save(save, Some((serial, "submitted".into())), ack(true), cx);
             let edit = this.edit.as_ref().unwrap();
             assert_eq!(edit.input.read(cx).text(), "later");
             assert_eq!(edit.baseline, "submitted");
+            assert!(
+                this.metadata_read
+                    .prepare(&mut this.metadata, true, Instant::now())
+                    .is_none()
+            );
         })
     })
     .unwrap();
@@ -1395,6 +1825,7 @@ fn stale_inline_submission_preserves_the_dirty_draft(cx: &mut TestAppContext) {
         .update(|window, _| window.window_handle());
     cx.update_window(window, |_, window, cx| {
         metadata.update(cx, |this, cx| {
+            this.metadata.select(1);
             this.begin_edit(Field::Title, window, cx);
             let input = this.edit.as_ref().unwrap().input.clone();
             input.update(cx, |input, cx| input.set_text("draft title", cx));
@@ -1424,6 +1855,7 @@ fn metadata_retention_wake_expires_without_another_read_or_frame(cx: &mut TestAp
 
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
+        this.metadata.select(1);
         let now = Instant::now() + Duration::from_secs(60);
         let query = Query::Track { track_id: 1 };
         this.metadata_read
@@ -1464,6 +1896,7 @@ fn same_track_detail_expiry_preserves_the_source_until_identity_replacement(
 
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
+        this.metadata.select(1);
         let original = this.track_snapshot().unwrap();
         let start = Instant::now();
         let query = Query::Track {

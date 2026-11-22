@@ -375,7 +375,41 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
     connection
         .execute_batch("DROP TRIGGER fail_edit_refresh; UPDATE tracks SET channels=2 WHERE id=1;")
         .unwrap();
-    core.recover_projections_on_demand();
+
+    struct OnReply(Box<dyn Fn() + Send + Sync>);
+    impl std::task::Wake for OnReply {
+        fn wake(self: Arc<Self>) {
+            (self.0)();
+        }
+    }
+
+    // Read the published projection synchronously as the Track reply becomes
+    // ready: a later recovery in the same request must not satisfy this check.
+    let (observed_tx, observed_rx) = bounded(1);
+    let shared = Arc::clone(&core.shared);
+    let waker = std::task::Waker::from(Arc::new(OnReply(Box::new(move || {
+        observed_tx
+            .try_send(shared.read().current_track().unwrap().title.clone())
+            .unwrap();
+    }))));
+    let (reply, response) = oneshot::channel();
+    let mut response = std::pin::pin!(response);
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(response.as_mut().poll(&mut cx).is_pending());
+    core.dispatch_request(Request {
+        operation: Operation::Query {
+            query: Query::Track { track_id: 1 },
+            ticket: None,
+        },
+        reply: Some(reply),
+    });
+    assert_eq!(observed_rx.try_recv().unwrap(), "Committed title");
+    let CoreResponse::Query(response) = futures::executor::block_on(response).unwrap() else {
+        panic!("expected a Track reply");
+    };
+    assert!(
+        matches!(response.result, Ok(ViewResponse::Track(Some(track))) if track.title == "Committed title")
+    );
     assert!(!core.projections.current_track);
     assert_eq!(core.state.current_track().unwrap().title, "Committed title");
     assert_eq!(core.state.query_revisions(), committed);

@@ -26,6 +26,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use rivu_metadata::artwork::ArtworkManager;
 use rivu_presentation::track::{AudioDetails, CueDetails, track_kind_key};
 use rivu_protocol::model::{Command, PlaybackStatus, Query, Track};
+use rivu_protocol::response::{QueryError, QueryResponse, ViewResponse};
 use rivu_ui::{
     ChoiceItem, ChoicePopup, ChoiceSelect, ChoiceState, IconButton, IconButtonDensity,
     IconButtonStyle, caption, column, disabled_control,
@@ -34,7 +35,9 @@ use rivu_ui::{
     refresh::RefreshWake,
     row, section_group,
 };
-use session::{Field, MetadataAvailability, MetadataReadState, MetadataSession, SavedValue};
+use session::{
+    EditorIdentity, Field, MetadataAvailability, MetadataReadState, MetadataSession, SavedValue,
+};
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 
 struct InlineEdit {
@@ -55,6 +58,21 @@ struct SourcePeak {
     value: Option<f64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlaybackReload {
+    editor: EditorIdentity,
+    source_generation: u64,
+    tag_commit_serial: Option<u64>,
+}
+
+impl PlaybackReload {
+    fn query(self) -> Query {
+        Query::Track {
+            track_id: self.editor.track_id,
+        }
+    }
+}
+
 pub(in crate::gui) enum MetadataEvent {
     ReloadPlaybackRequested,
     TrackChanged,
@@ -67,6 +85,7 @@ pub(in crate::gui) struct Metadata {
     state: Rc<GuiSnapshot>,
     metadata: MetadataSession,
     metadata_read: MetadataReadCoordinator,
+    playback_reload: Option<PlaybackReload>,
     source_peak: Option<SourcePeak>,
     source_peak_reading: bool,
     source_peak_reload: u64,
@@ -107,6 +126,7 @@ impl Metadata {
             state,
             metadata,
             metadata_read: MetadataReadCoordinator::default(),
+            playback_reload: None,
             source_peak: None,
             source_peak_reading: false,
             source_peak_reload: 0,
@@ -144,7 +164,7 @@ impl Metadata {
             (None, None) => false,
             _ => true,
         };
-        let query_changed = self.metadata.identity().is_some_and(|track_id| {
+        let query_changed = self.metadata.selected().is_some_and(|track_id| {
             let query = Query::Track { track_id };
             query.stamp(self.state.query_revisions_for(&query))
                 != query.stamp(state.query_revisions_for(&query))
@@ -273,6 +293,7 @@ impl Metadata {
         if self.metadata.saving(field) {
             return;
         }
+        self.playback_reload = None;
         let baseline = self.metadata.source.field_text(field, track);
         self.cancel_edit(cx);
         self.metadata.source.edited();
@@ -386,6 +407,7 @@ impl Metadata {
     }
 
     pub(in crate::gui) fn request_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.playback_reload = None;
         self.source_peak = None;
         self.source_peak_reload = self.source_peak_reload.wrapping_add(1);
         if self.metadata.select(id) {
@@ -394,10 +416,7 @@ impl Metadata {
             self.source_menu.close();
             self.error = None;
         }
-        let query = Query::Track { track_id: id };
-        self.metadata_read
-            .request(id, self.state.query_revisions_for(&query), Instant::now());
-        self.demand_metadata(cx);
+        self.request_selected_metadata(id, cx);
         cx.notify();
     }
 
@@ -405,8 +424,21 @@ impl Metadata {
         cx.emit(MetadataEvent::ReloadPlaybackRequested);
     }
 
+    fn request_selected_metadata(&mut self, track_id: i64, cx: &mut Context<Self>) {
+        if self.metadata.selected() != Some(track_id) {
+            return;
+        }
+        let query = Query::Track { track_id };
+        self.metadata_read.request(
+            track_id,
+            self.state.query_revisions_for(&query),
+            Instant::now(),
+        );
+        self.demand_metadata(cx);
+    }
+
     fn sync_metadata_query(&mut self) {
-        let selected = self.metadata.identity();
+        let selected = self.metadata.selected();
         let revisions = selected.map_or_else(Default::default, |track_id| {
             self.state.query_revisions_for(&Query::Track { track_id })
         });
@@ -415,6 +447,7 @@ impl Metadata {
 
     /// Called on window hide, not on ordinary panel demand changes.
     pub(in crate::gui) fn cancel_read(&mut self) {
+        self.playback_reload = None;
         self.metadata_read.cancel();
     }
 
@@ -592,6 +625,7 @@ impl Metadata {
     }
 
     pub(in crate::gui) fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.playback_reload = None;
         self.metadata.clear_selection();
         self.cancel_edit(cx);
         self.close_hint(cx);
@@ -604,9 +638,103 @@ impl Metadata {
         cx.notify();
     }
 
+    fn begin_playback_reload(&mut self, cx: &mut Context<Self>) -> Option<PlaybackReload> {
+        self.clear_selection(cx);
+        let reload = PlaybackReload {
+            editor: self.metadata.editor_identity()?,
+            source_generation: self.state.source_generation,
+            tag_commit_serial: self.metadata.playback_tag_commit_serial(),
+        };
+        self.playback_reload = Some(reload);
+        Some(reload)
+    }
+
+    pub(in crate::gui) fn reload_playback(&mut self, cx: &mut Context<Self>) {
+        let Some(reload) = self.begin_playback_reload(cx) else {
+            return;
+        };
+        // Demand a Core retry even when this window did not observe a failed write.
+        let handle = self.context.handle().clone();
+        cx.spawn(async move |this, cx| {
+            let mut finish = |response, cx: &mut gpui::AsyncApp| {
+                let _ = this.update(cx, |this, cx| {
+                    this.refresh(cx);
+                    this.finish_playback_reload(reload, response, cx);
+                });
+            };
+            let response = super::query::run(
+                handle,
+                cx,
+                move |handle| async move { handle.query_and_refresh_state(reload.query()).await },
+                &mut finish,
+            )
+            .await;
+            finish(response, cx);
+        })
+        .detach();
+    }
+
+    fn finish_playback_reload(
+        &mut self,
+        reload: PlaybackReload,
+        response: QueryResponse,
+        cx: &mut Context<Self>,
+    ) {
+        if self.playback_reload != Some(reload) {
+            return;
+        }
+        // Consume logical completion once, including the early timeout notice.
+        self.playback_reload = None;
+        if self.metadata.editor_identity() != Some(reload.editor)
+            || self.state.source_generation != reload.source_generation
+        {
+            return;
+        }
+        let error = match response.result {
+            Err(QueryError::RevisionChanged | QueryError::Cancelled) => return,
+            // Errors have no data payload to validate against the track stamp.
+            Err(error) => error.to_string(),
+            Ok(result) => {
+                let query = reload.query();
+                if query.stamp(response.revisions)
+                    != query.stamp(self.state.query_revisions_for(&query))
+                {
+                    return;
+                }
+                match result {
+                    ViewResponse::Track(Some(track)) if track.id != reload.editor.track_id => {
+                        self.tr("gl-metadata-wrong-track").to_string()
+                    }
+                    // The database read and the projection refresh can succeed independently.
+                    // Compare only tags: Core can retain the active decoder's source facts.
+                    ViewResponse::Track(Some(track))
+                        if self.state.current_track().is_some_and(|projected| {
+                            source::same_track_tags(projected, &track)
+                        }) =>
+                    {
+                        // An unchanged projection may already match restored database tags.
+                        // Confirm only the original block; never install query data here.
+                        if let Some(serial) = reload.tag_commit_serial
+                            && self.metadata.confirm_playback_tags(serial, &track)
+                        {
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    ViewResponse::Track(Some(_)) => self.tr("gl-reload-playback-stale").to_string(),
+                    ViewResponse::Track(None) => self.tr("gl-track-unavailable").to_string(),
+                    _ => self.tr("gl-metadata-load-failed").to_string(),
+                }
+            }
+        };
+        self.report_error(error, cx);
+        cx.notify();
+    }
+
     fn sync_metadata_default(&mut self, cx: &mut Context<Self>) {
         let previous = self.metadata.editor_identity();
-        self.metadata.sync_playback(self.state.current_track());
+        self.metadata
+            .sync_playback(self.state.current_track.as_ref());
         if self.metadata.editor_identity() != previous {
             self.cancel_edit(cx);
             self.close_hint(cx);
@@ -680,15 +808,7 @@ impl Metadata {
                     edit.baseline = text;
                 }
             }
-            let query = Query::Track {
-                track_id: token.track_id,
-            };
-            self.metadata_read.request(
-                token.track_id,
-                self.state.query_revisions_for(&query),
-                Instant::now(),
-            );
-            self.demand_metadata(cx);
+            self.request_selected_metadata(token.track_id, cx);
             cx.emit(MetadataEvent::TrackChanged);
         } else {
             let error = result.expect_err("unsuccessful metadata observation");

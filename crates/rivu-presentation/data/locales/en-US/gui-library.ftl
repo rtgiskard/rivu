@@ -256,6 +256,7 @@ gl-play-count = Plays
 gl-last-played = Last played
 
 gl-reload-playback = Refresh details for the current playback track
+gl-reload-playback-stale = Playback details still differ from the library tags.
 
 gl-file = File
 

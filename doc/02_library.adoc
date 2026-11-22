@@ -547,9 +547,12 @@ old ready details only briefly; query failure does not extend that display perio
 See link:22_cache.adoc#demand-cancellation-and-physical-retirement[Details retention and refresh].
 
 Reload leaves manual selection and follows the current Playback track without
-changing list selections; with no current track, it clears details. A confirmed
-unavailable record clears details and cancels editing until a successful read
-restores that record.
+changing list selections; with no current track, it clears details. For a
+current track, Reload asks Core to refresh the playback details even if this
+window has not seen a save warning. If verification fails, Details keeps the
+last playback projection and reports the failure. For a manually selected
+track, a read confirming the record is unavailable clears its details and
+cancels editing until a successful read restores it.
 
 Decoder routing and DTS-WAV safety:
 link:04_playback.adoc#optional-ffmpeg-decoder[Playback].

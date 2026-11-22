@@ -123,6 +123,20 @@ impl Core {
         }
     }
 
+    pub(super) fn recover_current_track_on_demand(&mut self) -> Result<()> {
+        // Never replay the catalog command that dirtied this snapshot.
+        let attempted = self.projections.request_attempts.unwrap_or_default();
+        if self.projections.current_track
+            && !attempted.current_track
+            && !self.database_maintenance_active()
+            && !self.database_unavailable
+        {
+            self.refresh_current_track()?;
+            self.publish();
+        }
+        Ok(())
+    }
+
     pub(super) fn recover_projections_on_demand(&mut self) {
         if self.database_maintenance_active() || self.database_unavailable {
             return;
@@ -134,14 +148,7 @@ impl Core {
         {
             self.publish();
         }
-        // Metadata recovery reuses the queue control gate, without rereading its
-        // structure. Never replay the catalog command that dirtied this snapshot.
-        if self.projections.current_track
-            && !attempted.current_track
-            && self.refresh_current_track().is_ok()
-        {
-            self.publish();
-        }
+        let _ = self.recover_current_track_on_demand();
         let mut demand = self.projection_demand();
         demand.track_total &= !attempted.track_total;
         demand.playlist_total &= !attempted.playlist_total;

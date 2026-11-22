@@ -6,12 +6,12 @@ use super::{
 };
 use gpui::{prelude::*, *};
 use rivu_format::tags::{TagEncoding, TagValues};
-use rivu_protocol::model::{Query, SourceTagRecovery, Track};
+use rivu_protocol::model::{SourceTagRecovery, Track};
 use rivu_ui::{
     FocusScope, IconButton, IconButtonDensity, IconButtonStyle, Popover, caption, column,
     disabled_control, menu_item,
 };
-use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
+use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SourceAction {
@@ -75,6 +75,26 @@ pub(super) fn database_tags(track: &Track) -> TagValues {
         disc_number: track.disc_number,
         replaygain_track_gain: track.replaygain_track_gain,
     }
+}
+
+pub(super) fn track_has_tags(track: &Track, tags: &TagValues) -> bool {
+    track.title == tags.title
+        && track.artist == tags.artist
+        && track.album == tags.album
+        && track.release_date == tags.release_date
+        && track.track_number == tags.track_number
+        && track.disc_number == tags.disc_number
+        && track.replaygain_track_gain == tags.replaygain_track_gain
+}
+
+pub(super) fn same_track_tags(previous: &Track, next: &Track) -> bool {
+    previous.title == next.title
+        && previous.artist == next.artist
+        && previous.album == next.album
+        && previous.release_date == next.release_date
+        && previous.track_number == next.track_number
+        && previous.disc_number == next.disc_number
+        && previous.replaygain_track_gain == next.replaygain_track_gain
 }
 
 impl SourceTags {
@@ -655,13 +675,32 @@ impl Metadata {
     ) {
         let same_editor = self.metadata.editor_identity() == Some(token.identity);
         let track_id = token.identity.track_id;
-        let Some(current) = self.metadata.source.finish(token) else {
-            return;
-        };
+        let current = self.metadata.source.finish(token);
         let source = delivery
             .reply()
             .and_then(|reply| reply.receipt())
             .and_then(|receipt| receipt.outcome.source_tags());
+        let tags = source.and_then(|source| source.tags.as_ref());
+        let projection_warning = source.and_then(|source| source.refresh_error.as_ref());
+        if delivery.is_success()
+            && !matches!(token.action, SourceAction::Load(_))
+            && let Some(tags) = tags
+        {
+            // A retired editor cannot publish status or staging, but its write
+            // may still have invalidated the current playback baseline.
+            let baseline_changed = self.metadata.observe_tag_commit(
+                track_id,
+                tags,
+                projection_warning.is_some(),
+                self.state.current_track(),
+            );
+            if current.is_none() && baseline_changed {
+                cx.notify();
+            }
+        }
+        let Some(current) = current else {
+            return;
+        };
         if !delivery.is_success() {
             let error = delivery
                 .observed_result()
@@ -681,7 +720,7 @@ impl Metadata {
         let observed = observation.is_ok();
         if let Err(error) = observation {
             self.report_error(error, cx);
-        } else if let Some(error) = source.and_then(|source| source.refresh_error.as_ref()) {
+        } else if let Some(error) = projection_warning {
             self.report_error(error.clone(), cx);
         }
         if self.metadata.identity() != Some(track_id) {
@@ -689,7 +728,7 @@ impl Metadata {
             cx.notify();
             return;
         }
-        if let Some(tags) = source.and_then(|source| source.tags.as_ref()) {
+        if let Some(tags) = tags {
             match token.action {
                 SourceAction::Load(_) if same_editor && current => {
                     self.metadata.source.stage(tags.clone());
@@ -712,17 +751,11 @@ impl Metadata {
                                 SourceStatus::Synced
                             });
                     }
-                    if !observed {
+                    if !observed && projection_warning.is_none() {
                         cx.notify();
                         return;
                     }
-                    let query = Query::Track { track_id };
-                    self.metadata_read.request(
-                        track_id,
-                        self.state.query_revisions_for(&query),
-                        Instant::now(),
-                    );
-                    self.demand_metadata(cx);
+                    self.request_selected_metadata(track_id, cx);
                     cx.emit(MetadataEvent::TrackChanged);
                 }
             }

@@ -256,6 +256,7 @@ gl-play-count = 播放次数
 gl-last-played = 上次播放
 
 gl-reload-playback = 刷新当前播放曲目的详情
+gl-reload-playback-stale = 播放详情仍与媒体库标签不一致。
 
 gl-file = 文件
 
