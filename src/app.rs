@@ -165,13 +165,20 @@ pub struct App {
     tasks: TaskRuntime,
     _socket_owner: ipc::SocketOwner,
 }
+pub const VERSION_SUMMARY: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("RIVU_GIT_VERSION"),
+    ")"
+);
+
 #[cfg(feature = "gui")]
 pub(crate) fn build_info() -> rivu_gui::BuildInfo {
     rivu_gui::BuildInfo {
         timestamp: env!("RIVU_BUILD_TIMESTAMP")
             .parse()
             .expect("build timestamp is an integer"),
-        git_version: env!("RIVU_GIT_VERSION"),
+        version: VERSION_SUMMARY,
         features: env!("RIVU_BUILD_FEATURES"),
     }
 }

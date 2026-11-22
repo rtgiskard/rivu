@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "rivu",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RIVU_GIT_VERSION"), ")"),
+    version = rivu::app::VERSION_SUMMARY,
     about = "A lightweight, local-first music player",
 )]
 pub(super) struct Args {

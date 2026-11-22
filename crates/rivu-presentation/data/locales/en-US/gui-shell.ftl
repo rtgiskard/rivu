@@ -38,6 +38,7 @@ shell-clear-stops-playback = This also stops playback
 action-cancel = Cancel
 shell-tagline = A lightweight music player for Linux.
 shell-version = Version
+shell-features = Features
 shell-built = Built
 shell-license = License
 shell-close-about = Close About
@@ -250,10 +251,6 @@ shell-dock-place = Place panel
 shell-style-menu = Style: { $style }  ›
 shell-back = Back
 shell-clear-queue-confirm = Clear all { $count } queued entries?
-shell-version-features = { $features ->
-    [none] { $version }
-   *[other] { $version } ({ $features })
-    }
 processing-routing-graph = Processing graph
 processing-graph-undo = Undo
 processing-graph-redo = Redo

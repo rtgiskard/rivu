@@ -655,28 +655,19 @@ impl Render for WindowView {
                                                             [
                                                                 (
                                                                     self.tr("shell-version"),
-                                                                    self.i18n.format(
-                                                                        "shell-version-features",
-                                                                        &[
-                                                                            (
-                                                                                "version",
-                                                                                build_info
-                                                                                    .git_version
-                                                                                    .into(),
-                                                                            ),
-                                                                            (
-                                                                                "features",
-                                                                                build_info
-                                                                                    .features
-                                                                                    .into(),
-                                                                            ),
-                                                                        ],
-                                                                    ),
+                                                                    build_info.version.into(),
                                                                 ),
-                                                                (self.tr("shell-built"), built),
+                                                                (
+                                                                    self.tr("shell-features"),
+                                                                    build_info.features.into(),
+                                                                ),
+                                                                (
+                                                                    self.tr("shell-built"),
+                                                                    gpui::SharedString::from(built),
+                                                                ),
                                                                 (
                                                                     self.tr("shell-license"),
-                                                                    "GPL-3.0-or-later".to_owned(),
+                                                                    "GPL-3.0-or-later".into(),
                                                                 ),
                                                             ]
                                                             .into_iter()

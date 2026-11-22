@@ -13,7 +13,7 @@ pub use desktop::{ActivationOutcome, raise_async};
 #[derive(Clone, Copy, Debug)]
 pub struct BuildInfo {
     pub timestamp: i64,
-    pub git_version: &'static str,
+    pub version: &'static str,
     pub features: &'static str,
 }
 impl gpui::Global for BuildInfo {}

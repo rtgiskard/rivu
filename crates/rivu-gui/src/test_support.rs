@@ -46,7 +46,7 @@ impl CoreRuntime {
 pub(crate) fn build_info() -> crate::BuildInfo {
     crate::BuildInfo {
         timestamp: 0,
-        git_version: "test",
+        version: "test",
         features: "test-support",
     }
 }

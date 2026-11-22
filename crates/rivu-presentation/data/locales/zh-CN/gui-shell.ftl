@@ -38,6 +38,7 @@ shell-clear-stops-playback = 同时停止播放
 action-cancel = 取消
 shell-tagline = 一个轻巧的 Linux 音乐播放器
 shell-version = 版本
+shell-features = 构建功能
 shell-built = 构建时间
 shell-license = 许可证
 shell-close-about = 关闭关于
@@ -250,10 +251,6 @@ shell-dock-place = 放置面板
 shell-style-menu = 样式：{ $style }  ›
 shell-back = 返回
 shell-clear-queue-confirm = 清空队列中的全部 { $count } 项？
-shell-version-features = { $features ->
-    [none] { $version }
-   *[other] { $version }（{ $features }）
-    }
 processing-routing-graph = 音频处理图
 processing-graph-undo = 撤销
 processing-graph-redo = 重做
