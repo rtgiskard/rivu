@@ -366,9 +366,9 @@ impl PlaylistModel {
 
     pub(in crate::gui::playlists) fn accept_playlist_entry_locations(
         &mut self,
-        rows: Vec<rivu_protocol::model::PlaylistEntryLocation>,
+        page: Option<Page<rivu_protocol::model::PlaylistEntryLocationRow>>,
     ) {
-        self.playlists.accept_entry_locations(rows);
+        self.playlists.accept_entry_locations(page);
     }
 
     pub(in crate::gui::playlists) fn focus(&self) -> Option<crate::gui::BrowserFocus> {
@@ -858,9 +858,8 @@ mod tests {
         });
         browser.playlists.select_entry(10, 0);
         let generation = browser.playlists.entry_generation();
-        let source = crate::gui::playlists::selection::EntryIdentity::row(
+        let source = crate::gui::playlists::selection::entry_identity(
             browser.playlists.entries().rows.get(0).unwrap(),
-            0,
         );
         let now = Instant::now();
         browser.playlists.summaries.rows.refresh_at(now);

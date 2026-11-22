@@ -2,7 +2,7 @@
 //! Request lifetimes are owned by the playlist feature's paired request state.
 use crate::gui::{paged::PagedRows, playlists::selection};
 use gpui::ScrollStrategy;
-use rivu_protocol::model::{Page, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, Query};
+use rivu_protocol::model::{Page, PlaylistEntryRow, PlaylistSummary, Query};
 use std::{ops::Range, time::Instant};
 
 #[path = "requests.rs"]
@@ -249,7 +249,7 @@ impl PlaylistBrowser {
                 .entries
                 .rows
                 .get(source.offset)
-                .map(|row| selection::EntryIdentity::row(row, source.offset))
+                .map(selection::entry_identity)
                 != Some(source)
         {
             return Vec::new();
@@ -373,13 +373,15 @@ impl PlaylistBrowser {
         }
     }
 
-    pub(super) fn accept_entry_locations(&mut self, mut rows: Vec<PlaylistEntryLocation>) {
-        rows.retain(|row| Some(row.playlist_id) == self.entries.playlist_id);
-        if let Some(row) = rows.first() {
-            self.entries.rows.set_total(row.total);
-        }
-        self.track_selection
-            .reconcile(rows.iter().map(selection::EntryIdentity::from).collect());
+    pub(super) fn accept_entry_locations(&mut self, page: Option<Page<selection::EntryIdentity>>) {
+        let identities = match page {
+            Some(page) => {
+                self.entries.rows.set_total(page.total);
+                page.rows
+            }
+            None => Vec::new(),
+        };
+        self.track_selection.reconcile(identities);
         self.sync_active_entry();
     }
 
@@ -393,6 +395,7 @@ impl PlaylistBrowser {
 mod tests {
     use super::*;
     use crate::gui::playlists::selection::test_rows::{entry, summary};
+    use rivu_protocol::model::PlaylistEntryLocationRow;
     use std::sync::Arc;
     #[test]
     fn operation_snapshot_uses_one_ordered_occurrence_group_and_projection() {
@@ -672,14 +675,15 @@ mod tests {
         assert_eq!(playlists.selected_entry(), Some(41));
         assert!(!playlists.entry_ready());
         // The one identity result restores actions without restoring offscreen payload.
-        playlists.accept_entry_locations(vec![PlaylistEntryLocation {
-            id: 41,
-            playlist_id: 1,
-            position: 7_000,
-            offset: 7_000,
-            track_id: 99,
+        playlists.accept_entry_locations(Some(Page {
             total: 10_000,
-        }]);
+            rows: vec![PlaylistEntryLocationRow {
+                id: 41,
+                track_id: 99,
+                position: 7_000,
+                offset: 7_000,
+            }],
+        }));
         assert!(playlists.entry_ready());
         assert_eq!(
             playlists.track_selection.active.map(|entry| entry.track_id),
@@ -694,14 +698,15 @@ mod tests {
         playlists.prepare_entries(1, Instant::now());
         playlists.track_selection.invalidate();
         assert!(!playlists.entry_ready());
-        playlists.accept_entry_locations(vec![PlaylistEntryLocation {
-            id: 41,
-            playlist_id: 1,
-            position: 6_000,
-            offset: 6_000,
-            track_id: 99,
+        playlists.accept_entry_locations(Some(Page {
             total: 10_000,
-        }]);
+            rows: vec![PlaylistEntryLocationRow {
+                id: 41,
+                track_id: 99,
+                position: 6_000,
+                offset: 6_000,
+            }],
+        }));
         assert_eq!(
             playlists.track_selection.active.map(|entry| entry.position),
             Some(6_000)
@@ -721,38 +726,9 @@ mod tests {
         playlists.track_selection.invalidate();
         assert!(!playlists.entry_ready());
         assert_eq!(playlists.selected_entry(), Some(41));
-        playlists.accept_entry_locations(Vec::new());
+        playlists.accept_entry_locations(None);
         assert_eq!(playlists.selected_entry(), None);
         assert!(!playlists.entry_ready());
         assert_eq!(playlists.selected(), Some(1));
-    }
-
-    #[test]
-    fn changed_membership_rejects_stale_entry_identity() {
-        let mut playlists = PlaylistBrowser::default();
-        playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1, Instant::now());
-        playlists.select_entry(41, 0);
-        playlists.accept_entry_locations(vec![PlaylistEntryLocation {
-            id: 41,
-            playlist_id: 1,
-            position: 0,
-            offset: 0,
-            track_id: 99,
-            total: 1,
-        }]);
-        assert!(playlists.entry_ready());
-        playlists.prepare_entries(1, Instant::now());
-        playlists.track_selection.invalidate();
-        assert!(!playlists.entry_ready());
-        playlists.accept_entry_locations(vec![PlaylistEntryLocation {
-            id: 41,
-            playlist_id: 2,
-            position: 0,
-            offset: 0,
-            track_id: 99,
-            total: 1,
-        }]);
-        assert_eq!(playlists.selected_entry(), None);
     }
 }

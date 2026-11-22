@@ -529,16 +529,26 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             }),
         },
         result: Ok(
-            rivu_protocol::response::ViewResponse::PlaylistEntryLocations(vec![
-                rivu_protocol::model::PlaylistEntryLocation {
-                    id: 42,
+            rivu_protocol::response::ViewResponse::PlaylistEntryLocations(Some(
+                rivu_protocol::model::PlaylistEntryLocationBatch {
                     playlist_id: 10,
-                    track_id: 11,
-                    position: 1000,
-                    offset: 1000,
                     total: 2000,
+                    rows: vec![
+                        rivu_protocol::model::PlaylistEntryLocationRow {
+                            id: 42,
+                            track_id: 11,
+                            position: 1000,
+                            offset: 1000,
+                        },
+                        rivu_protocol::model::PlaylistEntryLocationRow {
+                            id: 43,
+                            track_id: 11,
+                            position: 1010,
+                            offset: 1010,
+                        },
+                    ],
                 },
-            ]),
+            )),
         ),
     };
     let expected = serde_json::to_value(&response).unwrap();

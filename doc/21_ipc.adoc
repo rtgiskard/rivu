@@ -829,12 +829,15 @@ Neither selects the bitrate revision. Discard late results when the filter,
 request generation, or captured revision is no longer current.
 
 `PlaylistEntryLocations {playlist_id, query, entry_ids}` resolves at most 256 stable
-entry IDs to compact `{id, playlist_id, track_id, position, offset, total}` records
-in current playlist order, without projecting full track metadata. Repeated IDs are deduplicated;
-missing IDs and IDs belonging to other playlists are omitted. Empty requests
-return no rows, while a nonexistent playlist or oversized input returns a query
-error. Split larger selections into bounded requests and discard completions when
-the playlist, request generation, or captured revision baseline changes.
+entry IDs in current playlist order. A match returns a batch with `playlist_id`,
+the filtered `total`, and rows of `{id, track_id, position, offset}`. No matches
+return `None`. Repeated IDs are deduplicated and foreign or missing IDs are omitted.
+An empty ID list checks playlist existence only. A nonexistent playlist or
+oversized input returns a query error. Split larger selections into bounded
+requests and discard completions when the playlist, request generation, or
+captured revision baseline changes. For a current request, a batch identifying
+another playlist fails the entire lookup. Preserve the selection until all
+chunks have supplied valid results.
 
 `DirectoryPage {path, query, favorite, missing, offset, limit}` returns immediate
 directory children and tracks as `Page<DirectoryRow>`. Search, favorite, and missing

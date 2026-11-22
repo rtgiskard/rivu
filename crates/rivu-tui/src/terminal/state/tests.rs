@@ -1498,16 +1498,18 @@ pub(in crate::terminal) fn response(request: &QueryRequest, total: usize) -> Que
         ReadKind::PlaylistSelection {
             playlist_id,
             entry_id,
-        } => ViewResponse::PlaylistEntryLocations(vec![
-            rivu_protocol::model::PlaylistEntryLocation {
-                id: *entry_id,
+        } => ViewResponse::PlaylistEntryLocations(Some(
+            rivu_protocol::model::PlaylistEntryLocationBatch {
                 playlist_id: *playlist_id,
-                position: *entry_id as usize,
-                offset: *entry_id as usize,
-                track_id: *entry_id,
                 total,
+                rows: vec![rivu_protocol::model::PlaylistEntryLocationRow {
+                    id: *entry_id,
+                    track_id: *entry_id,
+                    position: *entry_id as usize,
+                    offset: *entry_id as usize,
+                }],
             },
-        ]),
+        )),
     };
     result(request, view)
 }
@@ -2329,7 +2331,7 @@ fn playlist_metadata_refresh_keeps_occurrence_and_compact_lookup_scope() {
         &removed,
         Ok(QueryResult {
             revisions: next.query_revisions(Some(1)),
-            view: ViewResponse::PlaylistEntryLocations(Vec::new()),
+            view: ViewResponse::PlaylistEntryLocations(None),
         })
     ));
     let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
@@ -2486,18 +2488,23 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
             entry_id: 0
         }
     );
-    let old_lookup = response(&lookup, 12);
+    let mut old_lookup = response(&lookup, 12);
+    let ViewResponse::PlaylistEntryLocations(Some(entries)) = &mut old_lookup.view else {
+        panic!("expected entry locations");
+    };
+    entries.playlist_id = 2;
     let mut next = tui.snapshot.clone();
     Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 2);
     tui.apply_snapshot(next);
     assert!(!tui.ui.apply_query(&tui.snapshot, &lookup, Ok(old_lookup)));
+    assert!(tui.ui.message.is_none());
     let lookup = tui.ui.query_request(&tui.snapshot).unwrap();
     let mut located = response(&lookup, 12);
-    let ViewResponse::PlaylistEntryLocations(entries) = &mut located.view else {
+    let ViewResponse::PlaylistEntryLocations(Some(entries)) = &mut located.view else {
         panic!("expected entry locations");
     };
-    entries[0].position = 9;
-    entries[0].offset = 9;
+    entries.rows[0].position = 9;
+    entries.rows[0].offset = 9;
     assert!(tui.ui.apply_query(&tui.snapshot, &lookup, Ok(located)));
     let page = tui.ui.query_request(&tui.snapshot).unwrap();
     assert_eq!(page.demand.kind(), ReadKind::Playlist(1));
@@ -2514,6 +2521,42 @@ fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
             .key_action(KeyEvent::from(KeyCode::Enter), &tui.snapshot),
         KeyAction::Command(Command::Play { track_id: 0 })
     ));
+}
+
+#[test]
+fn foreign_playlist_location_reports_failure_and_preserves_selection() {
+    let state = query_snapshot();
+    let mut ui = UiState {
+        view: playlist_view(1),
+        ..UiState::default()
+    };
+    let View::PlaylistDetail { detail, .. } = &mut ui.view else {
+        unreachable!()
+    };
+    detail.selected_entry_id = Some(4);
+    detail.entry_anchor = Some(4);
+    detail.entries.selection.select(Some(4));
+    let request = ui.query_request(&state).unwrap();
+    let mut foreign = response(&request, 500);
+    let ViewResponse::PlaylistEntryLocations(Some(batch)) = &mut foreign.view else {
+        panic!("expected entry locations");
+    };
+    batch.playlist_id = 2;
+    batch.rows[0].offset = 499;
+    assert!(ui.apply_query(&state, &request, Ok(foreign)));
+    let View::PlaylistDetail { detail, .. } = &ui.view else {
+        unreachable!()
+    };
+    assert_eq!(detail.selected_entry_id, Some(4));
+    assert_eq!(detail.entry_anchor, Some(4));
+    assert_eq!(detail.entries.selection.selected(), Some(4));
+    assert_ne!(detail.entries.total, 500);
+    assert!(
+        ui.message
+            .as_ref()
+            .is_some_and(|notice| notice.kind == NoticeKind::Error)
+    );
+    assert!(ui.query_request(&state).is_none());
 }
 
 #[test]

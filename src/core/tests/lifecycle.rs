@@ -223,8 +223,8 @@ fn first_playlist_queries_after_partial_startup_capture_recovered_tokens() {
                 ViewResponse::PlaylistEntryBatch(batch) => {
                     batch.rows.into_iter().map(|entry| entry.id).collect()
                 }
-                ViewResponse::PlaylistEntryLocations(locations) => {
-                    locations.into_iter().map(|entry| entry.id).collect()
+                ViewResponse::PlaylistEntryLocations(Some(locations)) => {
+                    locations.rows.into_iter().map(|entry| entry.id).collect()
                 }
                 ViewResponse::PlaylistEntry(Some(entry)) => vec![entry.id],
                 other => panic!("unexpected playlist response: {other:?}"),

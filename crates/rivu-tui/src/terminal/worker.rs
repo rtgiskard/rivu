@@ -585,8 +585,13 @@ impl ReadSpec {
             | (ReadKind::Directory(_), ViewResponse::DirectoryPage(_))
             | (ReadKind::OtherTracksCount, ViewResponse::OtherTracksCount(_))
             | (ReadKind::Playlists, ViewResponse::PlaylistSummaries(_))
-            | (ReadKind::Playlist(_), ViewResponse::PlaylistEntries(_))
-            | (ReadKind::PlaylistSelection { .. }, ViewResponse::PlaylistEntryLocations(_)) => true,
+            | (ReadKind::Playlist(_), ViewResponse::PlaylistEntries(_)) => true,
+            (
+                ReadKind::PlaylistSelection { playlist_id, .. },
+                ViewResponse::PlaylistEntryLocations(batch),
+            ) => batch
+                .as_ref()
+                .is_none_or(|batch| batch.playlist_id == playlist_id),
             (ReadKind::Track(id), ViewResponse::Track(track)) => {
                 track.as_ref().is_none_or(|track| track.id == id)
             }

@@ -1002,17 +1002,13 @@ impl View {
                 View::PlaylistDetail { detail, .. },
                 ViewResponse::PlaylistEntryLocations(entries),
             ) => {
-                if let ReadKind::PlaylistSelection {
-                    playlist_id,
-                    entry_id,
-                } = request.demand.kind()
-                {
-                    let entry = entries
-                        .into_iter()
-                        .find(|entry| entry.id == entry_id && entry.playlist_id == playlist_id);
-                    detail.selected_entry_id = entry.as_ref().map(|entry| entry.id);
-                    if let Some(entry) = entry {
-                        detail.entries.total = entry.total;
+                if let ReadKind::PlaylistSelection { entry_id, .. } = request.demand.kind() {
+                    let located = entries.and_then(|batch| {
+                        batch.rows.into_iter().find(|row| row.id == entry_id).map(|row| (row, batch.total))
+                    });
+                    detail.selected_entry_id = located.as_ref().map(|(row, _)| row.id);
+                    if let Some((entry, total)) = located {
+                        detail.entries.total = total;
                         detail.entries.loaded = true;
                         detail.entries.selection.select(Some(entry.offset));
                         detail.entries.set_viewport(detail.entries.viewport_rows);

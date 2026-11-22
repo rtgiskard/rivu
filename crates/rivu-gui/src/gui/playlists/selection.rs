@@ -5,8 +5,9 @@
 use super::{PlaylistEvent, PlaylistSelectionRequest, Playlists};
 use crate::gui::coordination::manual_actions::ManualIntentId;
 use gpui::Context;
+pub(in crate::gui) use rivu_protocol::model::PlaylistEntryLocationRow as EntryIdentity;
 use rivu_protocol::{
-    model::{Command, Page, PlaylistEntryLocation, PlaylistEntryRow, Query},
+    model::{Command, Page, PlaylistEntryRow, Query},
     response::{PlaylistEntryRevision, QueryError, QueryRevisions, ViewResponse},
 };
 use std::collections::HashMap;
@@ -43,31 +44,12 @@ struct EntryRangeRequest {
     end: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::gui) struct EntryIdentity {
-    pub(in crate::gui) id: i64,
-    pub(in crate::gui) track_id: i64,
-    pub(in crate::gui) position: usize,
-    pub(in crate::gui) offset: usize,
-}
-impl EntryIdentity {
-    pub(in crate::gui) fn row(row: &PlaylistEntryRow, offset: usize) -> Self {
-        Self {
-            id: row.id,
-            track_id: row.track_id,
-            position: row.position,
-            offset,
-        }
-    }
-}
-impl From<&PlaylistEntryLocation> for EntryIdentity {
-    fn from(row: &PlaylistEntryLocation) -> Self {
-        Self {
-            id: row.id,
-            track_id: row.track_id,
-            position: row.position,
-            offset: row.offset,
-        }
+pub(in crate::gui) fn entry_identity(row: &PlaylistEntryRow) -> EntryIdentity {
+    EntryIdentity {
+        id: row.id,
+        track_id: row.track_id,
+        position: row.position,
+        offset: row.offset,
     }
 }
 
@@ -585,7 +567,11 @@ impl EntrySelection {
                 let Some(row) = page.rows.first() else {
                     return EntryNavigationEffect::Reload;
                 };
-                let target = EntryIdentity::row(row, job.offset);
+                if row.offset != job.offset {
+                    self.fail(unexpected_response.into());
+                    return EntryNavigationEffect::Failed(unexpected_response.into());
+                }
+                let target = entry_identity(row);
                 let range = if job.all {
                     Some(EntryNavigationRange {
                         start: 0,
@@ -597,8 +583,8 @@ impl EntrySelection {
                     && let Some(anchor) = self.anchor
                 {
                     Some(EntryNavigationRange {
-                        start: anchor.offset.min(job.offset),
-                        end: anchor.offset.max(job.offset) + 1,
+                        start: anchor.offset.min(target.offset),
+                        end: anchor.offset.max(target.offset) + 1,
                         anchor,
                         additive: job.multi,
                     })
@@ -661,14 +647,49 @@ impl EntryRangePages {
         {
             return false;
         }
-        self.identities.extend(
-            page.rows
-                .iter()
-                .enumerate()
-                .map(|(index, row)| EntryIdentity::row(row, offset + index)),
-        );
+        self.identities.extend(page.rows.iter().map(entry_identity));
         self.offset += page.rows.len();
         true
+    }
+}
+
+/// Publish matches only after every chunk succeeds, including chunks with no hits.
+async fn collect_entry_locations(
+    ids: &[i64],
+    playlist_id: i64,
+    i18n: &rivu_presentation::i18n::Localizer,
+    mut fetch: impl AsyncFnMut(&[i64]) -> Result<ViewResponse, QueryError>,
+) -> Result<Option<Page<EntryIdentity>>, QueryError> {
+    let mut locations = None;
+    for chunk in ids.chunks(rivu_protocol::model::MAX_QUERY_ROWS) {
+        locations = merge_entry_locations(playlist_id, locations, fetch(chunk).await?, i18n)?;
+    }
+    Ok(locations)
+}
+
+fn merge_entry_locations(
+    playlist_id: i64,
+    previous: Option<Page<EntryIdentity>>,
+    response: ViewResponse,
+    i18n: &rivu_presentation::i18n::Localizer,
+) -> Result<Option<Page<EntryIdentity>>, QueryError> {
+    match response {
+        ViewResponse::PlaylistEntryLocations(None) => Ok(previous),
+        ViewResponse::PlaylistEntryLocations(Some(batch)) if batch.playlist_id == playlist_id => {
+            Ok(Some(match previous {
+                Some(mut page) => {
+                    page.rows.extend(batch.rows);
+                    page
+                }
+                None => Page {
+                    total: batch.total,
+                    rows: batch.rows,
+                },
+            }))
+        }
+        _ => Err(QueryError::Message(
+            i18n.text("gl-playlist-selection-response").into(),
+        )),
     }
 }
 
@@ -713,7 +734,7 @@ impl Playlists {
                 .rows
                 .get(index)
                 .filter(|row| row.id == id)
-                .map(|row| EntryIdentity::row(row, index)),
+                .map(entry_identity),
             _ => None,
         };
         self.browser.playlists().track_selection.prepare_request(
@@ -910,8 +931,38 @@ impl Playlists {
         self.dispatch_entry_reconcile(cx);
     }
 
+    fn finish_entry_reconcile(
+        &mut self,
+        scope: EntryNavigationScope,
+        generation: u64,
+        result: Result<Option<Page<EntryIdentity>>, QueryError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.entry_job_current(
+            scope.playlist_id,
+            generation,
+            scope.revision,
+            scope.metadata,
+        ) {
+            return;
+        }
+        match result {
+            Ok(locations) => self.browser.accept_playlist_entry_locations(locations),
+            Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
+                self.browser.playlist_selection_mut().retire();
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.browser.playlist_selection_mut().fail(message.clone());
+                self.report_error(message, cx);
+            }
+        }
+        cx.notify();
+    }
+
     pub(in crate::gui) fn dispatch_entry_reconcile(&mut self, cx: &mut Context<Self>) {
-        let Some(playlist_id) = self.browser.playlists().selected() else {
+        let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
         let Some((ids, generation, ticket)) =
@@ -919,135 +970,65 @@ impl Playlists {
         else {
             return;
         };
-        let revision = self.playlist_revision(playlist_id);
-        let library = self
-            .state
-            .library
-            .metadata_revisions
-            .playlist_revision(playlist_id, self.state.library.revision);
+        let EntryNavigationScope {
+            playlist_id,
+            revision,
+            metadata: library,
+            ..
+        } = scope;
         let handle = self.context.handle().clone();
         let i18n = std::sync::Arc::clone(&self.i18n);
         let filter = self.browser.playlists().entries().query.clone();
         cx.spawn(async move |this, cx| {
-            async {
-                let mut identities = Vec::with_capacity(ids.len());
-                for chunk in ids.chunks(rivu_protocol::model::MAX_QUERY_ROWS) {
-                    if !this
-                        .update(cx, |this, cx| {
-                            this.refresh(cx);
-                            this.entry_job_current(playlist_id, generation, revision, library)
-                        })
-                        .unwrap_or(false)
-                    {
-                        return;
-                    }
-                    let handle = handle.clone();
-                    let entry_ids = chunk.to_vec();
-                    let ticket = ticket.clone();
-                    let query = filter.clone();
-                    let (response, _) = crate::gui::query::run(
-                        handle,
-                        cx,
-                        move |handle| async move {
-                            handle
-                                .query_if_current(
-                                    Query::PlaylistEntryLocations {
-                                        query,
-                                        playlist_id,
-                                        entry_ids,
-                                    },
-                                    ticket,
-                                )
-                                .await
-                        },
-                        |response, cx| {
-                            let _ = this.update(cx, |this, cx| {
-                                this.entry_job_timeout(
-                                    playlist_id,
-                                    generation,
-                                    revision,
-                                    library,
-                                    response,
-                                    cx,
-                                );
-                            });
-                        },
-                    )
-                    .await;
-                    let result = match entry_query_result(
-                        response,
-                        EntryNavigationScope {
-                            playlist_id,
-                            revision,
-                            metadata: library,
-                            bitrate: 0,
-                        },
-                        filter.is_some(),
-                    ) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            let _ = this.update(cx, |this, cx| {
-                                this.refresh(cx);
-                                if this.entry_job_current(
-                                    playlist_id,
-                                    generation,
-                                    revision,
-                                    library,
-                                ) {
-                                    if matches!(
-                                        error,
-                                        QueryError::RevisionChanged | QueryError::Cancelled
-                                    ) {
-                                        this.browser.playlist_selection_mut().retire();
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.entry_job_failed(
-                                        playlist_id,
-                                        generation,
-                                        error.to_string(),
-                                        cx,
-                                    );
-                                }
-                            });
-                            return;
-                        }
-                    };
-                    let Some(result) = result else {
-                        let _ = this.update(cx, |this, cx| {
-                            this.refresh(cx);
-                            if this.entry_job_current(playlist_id, generation, revision, library) {
-                                this.browser.playlist_selection_mut().retire();
-                                cx.notify();
-                            }
-                        });
-                        return;
-                    };
-                    match result {
-                        ViewResponse::PlaylistEntryLocations(rows) => identities.extend(
-                            rows.into_iter()
-                                .filter(|row| row.playlist_id == playlist_id),
-                        ),
-                        _ => {
-                            let message = i18n.text("gl-playlist-selection-response").into();
-                            let _ = this.update(cx, |this, cx| {
-                                this.entry_job_failed(playlist_id, generation, message, cx)
-                            });
-                            return;
-                        }
-                    }
+            let result = collect_entry_locations(&ids, playlist_id, &i18n, async |chunk| {
+                if !this
+                    .update(cx, |this, cx| {
+                        this.refresh(cx);
+                        this.entry_job_current(playlist_id, generation, revision, library)
+                    })
+                    .unwrap_or(false)
+                {
+                    return Err(QueryError::Cancelled);
                 }
-                let _ = this.update(cx, |this, cx| {
-                    this.refresh(cx);
-                    if !this.entry_job_current(playlist_id, generation, revision, library) {
-                        return;
-                    }
-                    this.browser.accept_playlist_entry_locations(identities);
-                    cx.notify();
-                });
-            }
+                let handle = handle.clone();
+                let entry_ids = chunk.to_vec();
+                let ticket = ticket.clone();
+                let query = filter.clone();
+                let (response, _) = crate::gui::query::run(
+                    handle,
+                    cx,
+                    move |handle| async move {
+                        handle
+                            .query_if_current(
+                                Query::PlaylistEntryLocations {
+                                    query,
+                                    playlist_id,
+                                    entry_ids,
+                                },
+                                ticket,
+                            )
+                            .await
+                    },
+                    |response, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.entry_job_timeout(
+                                playlist_id,
+                                generation,
+                                revision,
+                                library,
+                                response,
+                                cx,
+                            );
+                        });
+                    },
+                )
+                .await;
+                entry_query_result(response, scope, filter.is_some())?
+                    .ok_or(QueryError::RevisionChanged)
+            })
             .await;
             let _ = this.update(cx, |this, cx| {
+                this.finish_entry_reconcile(scope, generation, result, cx);
                 if this.browser.playlist_selection_mut().retire_refresh() {
                     this.dispatch_entry_reconcile(cx);
                 }
@@ -1509,12 +1490,86 @@ mod tests {
     use super::{
         EntryIdentity, EntryNavigationEffect, EntryNavigationJob, EntryNavigationRange,
         EntryNavigationScope, EntryRangePages, EntrySelection, EntryTarget,
-        PlaylistSelectionRequest,
+        PlaylistSelectionRequest, entry_identity,
     };
     use rivu_protocol::{
         model::{MAX_QUERY_ROWS, Page, PlaylistEntryRow},
         response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
     };
+
+    #[gpui::test]
+    fn location_refresh_reports_foreign_chunk_and_preserves_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::super::content_menu_keyboard_tests::{fixture, select_source_entry};
+        use rivu_protocol::model::PlaylistEntryLocationBatch;
+
+        let (_dir, runtime, _save, app, _window) = fixture(cx);
+        let entry = select_source_entry(&app, &runtime, cx);
+        let owner = app.read_with(cx, |app, _| app.playlists.clone());
+        let batch = |playlist_id| {
+            ViewResponse::PlaylistEntryLocations(Some(PlaylistEntryLocationBatch {
+                playlist_id,
+                total: 50,
+                rows: vec![identity(entry, 49)],
+            }))
+        };
+        let expected = owner.update(cx, |owner, cx| {
+            let scope = owner.playlist_navigation_scope().unwrap();
+            let selection = owner.browser.playlist_selection_mut();
+            let original = selection.active.unwrap();
+            let stale = selection.generation;
+            selection.invalidate();
+            let current = selection.generation;
+            let expected = owner.i18n.text("gl-playlist-selection-response").to_owned();
+            let foreign = super::merge_entry_locations(1, None, batch(2), &owner.i18n);
+            owner.finish_entry_reconcile(scope, stale, foreign, cx);
+            assert!(owner.browser.playlists().track_selection.error.is_none());
+
+            let partial = super::merge_entry_locations(1, None, batch(1), &owner.i18n).unwrap();
+            let foreign = super::merge_entry_locations(1, partial, batch(2), &owner.i18n);
+            owner.finish_entry_reconcile(scope, current, foreign, cx);
+            let selection = &owner.browser.playlists().track_selection;
+            assert_eq!(selection.active, Some(original));
+            assert!(selection.contains(entry));
+            assert_eq!(selection.error.as_deref(), Some(expected.as_str()));
+            expected
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.error.as_deref(), Some(expected.as_str()))
+        });
+        owner.update(cx, |owner, cx| {
+            let scope = owner.playlist_navigation_scope().unwrap();
+            let selection = owner.browser.playlist_selection_mut();
+            selection.invalidate();
+            let current = selection.generation;
+            let ids = (0..=MAX_QUERY_ROWS as i64).collect::<Vec<_>>();
+            let collect = |first, second| {
+                let mut replies = [first, second].into_iter();
+                futures::executor::block_on(super::collect_entry_locations(
+                    &ids,
+                    1,
+                    &owner.i18n,
+                    async |_| Ok(replies.next().unwrap()),
+                ))
+            };
+            let empty = || ViewResponse::PlaylistEntryLocations(None);
+            assert_eq!(
+                collect(empty(), batch(1)).unwrap().unwrap().rows,
+                [identity(entry, 49)]
+            );
+            assert!(collect(empty(), batch(2)).is_err());
+            let all_empty = collect(empty(), empty());
+            let missing = collect(batch(1), empty());
+            owner.finish_entry_reconcile(scope, current, missing, cx);
+            assert!(owner.browser.playlists().track_selection.contains(entry));
+            owner.browser.playlist_selection_mut().invalidate();
+            let generation = owner.browser.playlists().track_selection.generation;
+            owner.finish_entry_reconcile(scope, generation, all_empty, cx);
+            assert_eq!(owner.browser.playlists().selected_entry(), None);
+            assert!(!owner.browser.playlists().track_selection.contains(entry));
+        });
+    }
 
     #[test]
     fn repeated_tracks_remain_independent_ordered_occurrences() {
@@ -1918,6 +1973,29 @@ mod tests {
     }
 
     #[test]
+    fn shift_navigation_rejects_a_row_at_an_unrequested_offset() {
+        let scope = navigation_scope();
+        let mut selection = EntrySelection::default();
+        let anchor = identity(4, 4);
+        selection.select(anchor, false);
+        assert!(navigate(&mut selection, scope, 10, true, true, false));
+        let job = selection.take_navigation().unwrap();
+        let mut response = navigation_response(job, 10);
+        let Ok(ViewResponse::PlaylistEntries(page)) = &mut response.result else {
+            unreachable!()
+        };
+        page.rows[0].offset = 8;
+        assert!(matches!(
+            selection.finish_navigation(false, "unexpected", job, Some(scope), response),
+            EntryNavigationEffect::Failed(_)
+        ));
+        assert_eq!(selection.active, Some(anchor));
+        assert!(selection.contains(anchor.id));
+        assert_eq!(selection.len(), 1);
+        assert!(selection.ordered_ids().is_empty());
+    }
+
+    #[test]
     fn filtered_navigation_advances_by_matching_offset_not_occurrence_position() {
         let scope = navigation_scope();
         let mut owner = super::super::model::PlaylistBrowser::default();
@@ -1941,7 +2019,7 @@ mod tests {
         let target = match &mut response.result {
             Ok(ViewResponse::PlaylistEntries(page)) => {
                 page.rows[0].position = 900;
-                EntryIdentity::row(&page.rows[0], job.offset)
+                entry_identity(&page.rows[0])
             }
             _ => unreachable!(),
         };
@@ -2940,7 +3018,7 @@ mod tests {
                 super::entry_query_result(
                     QueryResponse {
                         revisions: metadata_only,
-                        result: Ok(ViewResponse::PlaylistEntryLocations(Vec::new())),
+                        result: Ok(ViewResponse::PlaylistEntryLocations(None)),
                     },
                     navigation_scope(),
                     filtered
@@ -3090,10 +3168,13 @@ mod tests {
     }
 
     #[test]
-    fn truncated_or_oversized_range_page_does_not_advance_or_publish() {
+    fn malformed_range_page_does_not_advance_or_publish() {
         let mut pages = EntryRangePages::new(10, 20);
         assert!(!pages.accept(page(10, 5, 19)));
         assert!(!pages.accept(page(10, 11, 30)));
+        let mut shifted = page(10, 5, 30);
+        shifted.rows[3].offset = 14;
+        assert!(!pages.accept(shifted));
         assert_eq!(pages.next(), Some((10, 10)));
         assert!(pages.identities.is_empty());
     }

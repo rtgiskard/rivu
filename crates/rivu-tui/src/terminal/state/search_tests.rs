@@ -1,7 +1,8 @@
 use super::tests::{playlist_view, query_snapshot, queue_row, response, result, track};
 use super::*;
 use rivu_protocol::model::{
-    LibraryLocateResult, LibraryLocation, LibrarySort, Page, PlaylistEntryLocation,
+    LibraryLocateResult, LibraryLocation, LibrarySort, Page, PlaylistEntryLocationBatch,
+    PlaylistEntryLocationRow,
 };
 use std::path::Path;
 
@@ -269,14 +270,16 @@ fn playlist_query_and_occurrence_lookup_keep_playlist_scope_and_filtered_offset(
         &lookup,
         Ok(result(
             &lookup,
-            ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
-                id: 1,
+            ViewResponse::PlaylistEntryLocations(Some(PlaylistEntryLocationBatch {
                 playlist_id: 1,
-                track_id: 7,
-                position: 19,
-                offset: 1,
-                total: 2
-            }])
+                total: 2,
+                rows: vec![PlaylistEntryLocationRow {
+                    id: 1,
+                    track_id: 7,
+                    position: 19,
+                    offset: 1,
+                }],
+            }))
         ))
     ));
     let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
@@ -626,14 +629,16 @@ fn playlist_metadata_filter_changes_relocate_the_selected_occurrence_before_refi
         assert_eq!(lookup.demand.kind(), stale.demand.kind());
         let located = result(
             &lookup,
-            ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
-                id: 1,
+            ViewResponse::PlaylistEntryLocations(Some(PlaylistEntryLocationBatch {
                 playlist_id: 1,
-                track_id: 7,
-                position: 1,
-                offset: 0,
                 total: 2,
-            }]),
+                rows: vec![PlaylistEntryLocationRow {
+                    id: 1,
+                    track_id: 7,
+                    position: 1,
+                    offset: 0,
+                }],
+            })),
         );
         assert!(tui.ui.apply_query(&next, &lookup, Ok(located)));
         if navigate_after_locate {
@@ -853,20 +858,22 @@ fn playlist_search_changes_and_tab_clear_preserve_duplicate_entry() {
     assert!(
         matches!(lookup.demand.query(), Query::PlaylistEntryLocations { entry_ids, .. } if entry_ids == vec![1])
     );
-    let location = PlaylistEntryLocation {
-        id: 1,
+    let location = PlaylistEntryLocationBatch {
         playlist_id: 1,
-        track_id: 7,
-        position: 19,
-        offset: 7,
         total: 8,
+        rows: vec![PlaylistEntryLocationRow {
+            id: 1,
+            track_id: 7,
+            position: 19,
+            offset: 7,
+        }],
     };
     assert!(ui.apply_query(
         &state,
         &lookup,
         Ok(result(
             &lookup,
-            ViewResponse::PlaylistEntryLocations(vec![location])
+            ViewResponse::PlaylistEntryLocations(Some(location))
         ))
     ));
     let page = ui.query_request(&state).unwrap();
@@ -931,7 +938,7 @@ fn missing_search_identity_falls_back_once_without_ghost_targets() {
             let lookup = tui.ui.query_request(&state).unwrap();
             let missing = match kind {
                 0 => ViewResponse::QueueEntryLocations(vec![]),
-                4 => ViewResponse::PlaylistEntryLocations(vec![]),
+                4 => ViewResponse::PlaylistEntryLocations(None),
                 _ => ViewResponse::LibraryLocate(LibraryLocateResult::Filtered),
             };
             assert!(
@@ -1516,14 +1523,16 @@ fn navigation_cancels_pending_track_and_occurrence_search_locates() {
                 row.offset = 7;
                 ViewResponse::QueueEntryLocations(vec![QueueIdentity::from(&row)])
             }
-            4 => ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
-                id: 1,
+            4 => ViewResponse::PlaylistEntryLocations(Some(PlaylistEntryLocationBatch {
                 playlist_id: 1,
-                track_id: 7,
-                position: 7,
-                offset: 7,
                 total: 8,
-            }]),
+                rows: vec![PlaylistEntryLocationRow {
+                    id: 1,
+                    track_id: 7,
+                    position: 7,
+                    offset: 7,
+                }],
+            })),
             _ => located_track(7, 8),
         };
         assert!(!ui.apply_query(&state, &obsolete, Ok(result(&obsolete, late))));

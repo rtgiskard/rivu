@@ -217,18 +217,21 @@ fn unfiltered_occurrence_lookup_work_is_bounded_by_requested_ids() {
     let queue_steps = counter.take();
     let playlist = store
         .playlist_entry_locations(1, None, &[2000, 1001, 1])
+        .unwrap()
         .unwrap();
     let playlist_steps = counter.take();
     assert_eq!(
         queue.iter().map(|r| (r.id, r.offset)).collect::<Vec<_>>(),
         [(1, 0), (1000, 999)]
     );
+    assert_eq!((playlist.playlist_id, playlist.total), (1, 1000));
     assert_eq!(
         playlist
+            .rows
             .iter()
-            .map(|r| (r.id, r.offset, r.total))
+            .map(|r| (r.id, r.offset))
             .collect::<Vec<_>>(),
-        [(1001, 0, 1000), (2000, 999, 1000)]
+        [(1001, 0), (2000, 999)]
     );
     assert!(
         queue_steps < 1000,
@@ -369,26 +372,27 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
                 entry_matches[0].id,
             ],
         )
+        .unwrap()
         .unwrap();
+    assert_eq!((lookup.playlist_id, lookup.total), (playlist, 6));
     assert_eq!(
         lookup
+            .rows
             .iter()
-            .map(|row| (row.id, row.position, row.offset, row.total))
+            .map(|row| (row.id, row.position, row.offset))
             .collect::<Vec<_>>(),
-        [
-            (entry_matches[0].id, 1, 0, 6),
-            (entry_matches[3].id, 5, 3, 6)
-        ]
+        [(entry_matches[0].id, 1, 0), (entry_matches[3].id, 5, 3)]
     );
     for row in &entry_matches {
         let single = store
             .playlist_entry_locations(playlist, Some("needle"), &[row.id])
+            .unwrap()
             .unwrap();
-        let [located] = single.as_slice() else {
+        let [located] = single.rows.as_slice() else {
             panic!("Expected exactly one matching playlist entry");
         };
         assert_eq!(
-            (located.id, located.position, located.offset, located.total),
+            (located.id, located.position, located.offset, single.total),
             (row.id, row.position, row.offset, 6)
         );
     }
@@ -396,7 +400,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
         store
             .playlist_entry_locations(playlist, Some("needle"), &[hidden_entry])
             .unwrap()
-            .is_empty()
+            .is_none()
     );
     assert!(
         store
@@ -415,7 +419,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
                 &[i64::try_from(queue_matches[0].id).unwrap()],
             )
             .unwrap()
-            .is_empty()
+            .is_none()
     );
     assert_eq!(store.queue_page(None, 0, 20).unwrap(), original);
     assert_eq!(
@@ -455,11 +459,13 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
         store.queue_entry_locations(None, &[hidden_queue]).unwrap()[0].offset,
         0
     );
-    let location = store
+    let batch = store
         .playlist_entry_locations(playlist, None, &[hidden_entry])
-        .unwrap()[0];
+        .unwrap()
+        .unwrap();
+    let location = batch.rows[0];
     assert_eq!(
-        (location.position, location.offset, location.total),
+        (location.position, location.offset, batch.total),
         (0, 0, 10)
     );
 }

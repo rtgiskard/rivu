@@ -289,7 +289,7 @@ pub enum ViewResponse {
     PlaylistEntry(Option<PlaylistEntryLocation>),
     DuplicateGroups(Page<crate::model::DuplicateGroup>),
     DuplicateMembers(Page<crate::model::DuplicateMember>),
-    PlaylistEntryLocations(Vec<PlaylistEntryLocation>),
+    PlaylistEntryLocations(Option<crate::model::PlaylistEntryLocationBatch>),
     PlaylistSummary(Option<PlaylistSummary>),
     LibraryMatchCounts {
         roots: Vec<LibraryRootCount>,

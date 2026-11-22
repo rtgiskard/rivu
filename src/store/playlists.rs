@@ -7,7 +7,8 @@ use crate::library::PlaylistExportTrack;
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_protocol::model::{
     AlbumKey, Batch, BatchContinuation, Page, PlaylistEntryCursor, PlaylistEntryLocation,
-    PlaylistEntryRow, PlaylistSummary, QueryStamp,
+    PlaylistEntryLocationBatch, PlaylistEntryLocationRow, PlaylistEntryRow, PlaylistSummary,
+    QueryStamp,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
@@ -63,7 +64,7 @@ impl Store {
         playlist_id: i64,
         query: Option<&str>,
         entry_ids: &[i64],
-    ) -> Result<Vec<PlaylistEntryLocation>> {
+    ) -> Result<Option<PlaylistEntryLocationBatch>> {
         anyhow::ensure!(playlist_id > 0, "Playlist not found");
         anyhow::ensure!(
             entry_ids.len() <= rivu_protocol::model::MAX_QUERY_ROWS,
@@ -76,7 +77,7 @@ impl Store {
                 .prepare_cached("SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)")?
                 .query_row([playlist_id], |row| row.get::<_, bool>(0))?;
             anyhow::ensure!(exists, "Playlist not found");
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let query = search_query(query);
         let total = self.playlist_match_count(playlist_id, query.as_deref())?;
@@ -120,18 +121,21 @@ impl Store {
             (sql, &encoded)
         };
         let mut statement = self.conn.prepare_cached(sql)?;
-        Ok(statement
+        let rows = statement
             .query_map(params![playlist_id, identity, query], |row| {
-                Ok(PlaylistEntryLocation {
+                Ok(PlaylistEntryLocationRow {
                     id: row.get(0)?,
-                    playlist_id,
                     track_id: row.get(1)?,
                     position: row.get::<_, i64>(2)? as usize,
                     offset: row.get::<_, i64>(3)? as usize,
-                    total,
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((!rows.is_empty()).then_some(PlaylistEntryLocationBatch {
+            playlist_id,
+            total,
+            rows,
+        }))
     }
 
     fn playlist_match_count(&self, playlist_id: i64, query: Option<&str>) -> Result<usize> {
@@ -1375,7 +1379,10 @@ mod group_tests {
         for index in 0..=1 {
             let store = fixture()?;
             assert!(store.insert_playlist_tracks(20, &[4, 1, 2, 4, 3], index)?);
-            let entries = store.playlist_entry_locations(20, None, &order(&store, 20)?)?;
+            let entries = store
+                .playlist_entry_locations(20, None, &order(&store, 20)?)?
+                .unwrap()
+                .rows;
             let mut expected = vec![1];
             expected.splice(index..index, [4, 1, 2, 4, 3]);
             assert_eq!(
@@ -1425,7 +1432,10 @@ mod group_tests {
             None,
             0
         )?);
-        let entries = store.playlist_entry_locations(20, None, &order(&store, 20)?)?;
+        let entries = store
+            .playlist_entry_locations(20, None, &order(&store, 20)?)?
+            .unwrap()
+            .rows;
         assert_eq!(
             entries
                 .iter()
@@ -1597,13 +1607,15 @@ mod group_tests {
              INSERT INTO playlist_entries(id,playlist_id,track_id,position) SELECT 1000+n,30,1,n-1 FROM entries;",
         )?;
         let ids: Vec<_> = (1001..=1000 + rivu_protocol::model::MAX_QUERY_ROWS as i64).collect();
-        let locations = store.playlist_entry_locations(30, None, &ids)?;
-        assert_eq!(locations.len(), rivu_protocol::model::MAX_QUERY_ROWS);
+        let locations = store.playlist_entry_locations(30, None, &ids)?.unwrap();
+        assert_eq!(locations.rows.len(), rivu_protocol::model::MAX_QUERY_ROWS);
+        assert_eq!((locations.playlist_id, locations.total), (30, 1000));
         assert!(
             locations
+                .rows
                 .iter()
                 .enumerate()
-                .all(|(index, row)| row.position == index && row.total == 1000)
+                .all(|(index, row)| row.position == index)
         );
         assert!(
             store
@@ -1615,19 +1627,22 @@ mod group_tests {
                 .is_err()
         );
         assert!(store.playlist_entry_locations(999, None, &[]).is_err());
-        assert!(store.playlist_entry_locations(30, None, &[])?.is_empty());
+        assert!(store.playlist_entry_locations(30, None, &[])?.is_none());
         assert_eq!(
             store
                 .playlist_entry_locations(10, None, &[103, 200, 999, 103])?
+                .unwrap()
+                .rows
                 .iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
             [103]
         );
         store.move_playlist_entries(10, &[103], Some(100), false)?;
-        let row = store.playlist_entry_locations(10, None, &[103])?.remove(0);
+        let batch = store.playlist_entry_locations(10, None, &[103])?.unwrap();
+        let row = batch.rows[0];
         assert_eq!(
-            (row.id, row.track_id, row.position, row.total),
+            (row.id, row.track_id, row.position, batch.total),
             (103, 4, 0, 6)
         );
         Ok(())

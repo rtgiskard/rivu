@@ -663,7 +663,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         location_query.stamp(selected.revisions)
     );
     assert!(
-        matches!(locations.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.len() == 1 && rows[0].id == 101 && rows[0].position == 1)
+        matches!(locations.result, Ok(ViewResponse::PlaylistEntryLocations(Some(batch))) if batch.rows.len() == 1 && batch.rows[0].id == 101 && batch.rows[0].position == 1)
     );
     assert_ack(
         &mut session,
@@ -690,9 +690,10 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
             entry_ids: vec![101],
         })
         .unwrap();
-    assert!(
-        matches!(removed.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.is_empty())
-    );
+    assert!(matches!(
+        removed.result,
+        Ok(ViewResponse::PlaylistEntryLocations(None))
+    ));
     assert_ne!(
         removed.revisions.playlist_entries,
         selected.revisions.playlist_entries

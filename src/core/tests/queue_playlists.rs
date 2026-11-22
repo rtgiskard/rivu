@@ -882,7 +882,7 @@ fn playlist_location_batches_publish_scoped_tokens_even_for_empty_results() {
     let before = core.query_response(&query);
     assert_eq!(before.revisions, core.state.playlist_query_revisions(1));
     assert!(
-        matches!(before.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.len() == 1 && rows[0].position == 0)
+        matches!(before.result, Ok(ViewResponse::PlaylistEntryLocations(Some(batch))) if batch.rows.len() == 1 && batch.rows[0].position == 0)
     );
     let empty = core.query_response(&Query::PlaylistEntryLocations {
         query: None,
@@ -890,9 +890,10 @@ fn playlist_location_batches_publish_scoped_tokens_even_for_empty_results() {
         entry_ids: vec![i64::MAX],
     });
     assert_eq!(empty.revisions, before.revisions);
-    assert!(
-        matches!(empty.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows.is_empty())
-    );
+    assert!(matches!(
+        empty.result,
+        Ok(ViewResponse::PlaylistEntryLocations(None))
+    ));
     let oversized = core.query_response(&Query::PlaylistEntryLocations {
         query: None,
         playlist_id: 1,
@@ -922,7 +923,7 @@ fn playlist_location_batches_publish_scoped_tokens_even_for_empty_results() {
         before.revisions.playlist_entries
     );
     assert!(
-        matches!(current.result, Ok(ViewResponse::PlaylistEntryLocations(rows)) if rows[0].total == 3)
+        matches!(current.result, Ok(ViewResponse::PlaylistEntryLocations(Some(batch))) if batch.total == 3)
     );
 }
 

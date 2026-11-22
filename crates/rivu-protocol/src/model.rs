@@ -222,6 +222,21 @@ pub struct PlaylistEntryLocation {
     pub total: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistEntryLocationRow {
+    pub id: i64,
+    pub track_id: i64,
+    pub position: usize,
+    pub offset: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistEntryLocationBatch {
+    pub playlist_id: i64,
+    pub total: usize,
+    pub rows: Vec<PlaylistEntryLocationRow>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryStats {
     pub total: usize,

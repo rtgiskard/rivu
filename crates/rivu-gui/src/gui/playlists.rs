@@ -1670,7 +1670,7 @@ impl Playlists {
                             let revision = this.playlist_revision(playlist_id);
                             let stamp = this.playlist_occurrence_stamp(playlist_id);
                             let entry_generation = this.browser.playlists().entry_generation();
-                            let source = selection::EntryIdentity::row(e, index);
+                            let source = selection::entry_identity(e);
                             let drag_owner = cx.entity().downgrade();
                             let drag = PlaylistDrag {
                                 i18n: std::sync::Arc::clone(&this.i18n),
@@ -2413,7 +2413,7 @@ mod content_menu_keyboard_tests {
     use rivu_protocol::model::{Page, PlaylistSummary, Query};
     use rivu_protocol::response::ViewResponse;
 
-    fn fixture(
+    pub(super) fn fixture(
         cx: &mut TestAppContext,
     ) -> (
         tempfile::TempDir,
@@ -3060,7 +3060,7 @@ mod content_menu_keyboard_tests {
         });
     }
 
-    fn select_source_entry(
+    pub(super) fn select_source_entry(
         app: &Entity<WindowView>,
         runtime: &crate::test_support::CoreRuntime,
         cx: &mut TestAppContext,
