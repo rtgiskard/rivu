@@ -332,6 +332,7 @@ pub(in crate::gui) fn render(
     let anchor = view.shell.material_choice_anchor.clone();
     let measure = anchor.clone();
     let trigger = ChoiceSelect::new("material-preset", preset_label(material, &tr))
+        .surface(super::material::surface(cx))
         .build(
             view,
             |this| Some(&mut this.shell.material_choices),

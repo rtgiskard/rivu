@@ -52,7 +52,7 @@ pub(in crate::gui) trait MaterialAppearance: Sized {
         image: Option<Img>,
         motion: bool,
     ) -> Stateful<Div>;
-    fn floating(self, surface: Stateful<Div>, theme: &'static Palette) -> Stateful<Div>;
+    fn floating(self, surface: Stateful<Div>, theme: &'static Palette, cx: &App) -> Stateful<Div>;
 }
 
 /// Panel interactions expose the scene only while materials are enabled.
@@ -62,6 +62,13 @@ pub(in crate::gui) fn surface(cx: &App) -> rivu_ui::SurfaceStyle {
             rivu_ui::SurfaceStyle::Translucent(session.interaction_background_strength)
         }
         _ => rivu_ui::SurfaceStyle::Opaque,
+    }
+}
+
+pub(in crate::gui) fn plot_background_alpha(cx: &App) -> f32 {
+    match surface(cx) {
+        rivu_ui::SurfaceStyle::Opaque => 1.,
+        rivu_ui::SurfaceStyle::Translucent(strength) => 0.7 + 0.3 * strength,
     }
 }
 
@@ -258,12 +265,13 @@ impl MaterialAppearance for MaterialPreset {
         panel
     }
 
-    fn floating(self, surface: Stateful<Div>, theme: &'static Palette) -> Stateful<Div> {
+    fn floating(self, surface: Stateful<Div>, theme: &'static Palette, cx: &App) -> Stateful<Div> {
+        let alpha = plot_background_alpha(cx);
         surface
             .bg(linear_gradient(
                 155.,
-                linear_color_stop(rgb(theme.control), 0.),
-                linear_color_stop(rgb(theme.panel), 1.),
+                linear_color_stop(rgb(theme.control).alpha(alpha), 0.),
+                linear_color_stop(rgb(theme.panel).alpha(alpha), 1.),
             ))
             .border_color(rgb(theme.border).alpha(if self == Self::Mist { 0.35 } else { 0.65 }))
     }

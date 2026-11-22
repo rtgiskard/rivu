@@ -226,7 +226,8 @@ pub fn paged_loading_row<T: 'static>(
     retry: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
-    list_row(theme, id, false, height, crate::SurfaceStyle::Opaque)
+    let surface = crate::theme::interaction_surface(cx);
+    list_row(theme, id, false, height, surface)
         .child(
             caption(theme, labels.message)
                 .flex_1()
@@ -240,25 +241,31 @@ pub fn paged_loading_row<T: 'static>(
                 row.role(gpui::Role::Group)
                     .aria_label(error.clone())
                     .child(
-                        IconButton::new("copy-error", "⧉", labels.copy_error).build_with(
-                            IconButtonStyle::Quiet,
-                            IconButtonDensity::Regular,
-                            cx,
-                            move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    error.to_string(),
-                                ));
-                            },
-                            |control| control.min_h_0().h(height - gpui::px(2.)).py_0(),
-                        ),
+                        IconButton::new("copy-error", "⧉", labels.copy_error)
+                            .surface(surface)
+                            .build_with(
+                                IconButtonStyle::Quiet,
+                                IconButtonDensity::Regular,
+                                cx,
+                                move |_, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        error.to_string(),
+                                    ));
+                                },
+                                |control| control.min_h_0().h(height - gpui::px(2.)).py_0(),
+                            ),
                     )
-                    .child(IconButton::new("retry", "󰑐", labels.retry).build_with(
-                        IconButtonStyle::Quiet,
-                        IconButtonDensity::Regular,
-                        cx,
-                        retry,
-                        |control| control.min_h_0().h(height - gpui::px(2.)).py_0(),
-                    ))
+                    .child(
+                        IconButton::new("retry", "󰑐", labels.retry)
+                            .surface(surface)
+                            .build_with(
+                                IconButtonStyle::Quiet,
+                                IconButtonDensity::Regular,
+                                cx,
+                                retry,
+                                |control| control.min_h_0().h(height - gpui::px(2.)).py_0(),
+                            ),
+                    )
             },
         )
 }

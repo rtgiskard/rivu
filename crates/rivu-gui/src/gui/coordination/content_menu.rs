@@ -623,7 +623,7 @@ impl WindowView {
             this.replace_content_menu(None, cx);
             cx.stop_propagation();
         });
-        let mut menu = Popover::menu(theme, "content-menu", window)
+        let mut menu = Popover::menu(cx, "content-menu", window)
             .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
                 dismiss(this, window, cx);
@@ -794,9 +794,14 @@ impl WindowView {
                                                 .aria_position_in_set(index + 1)
                                                 .aria_size_of_set(count)
                                                 .when(selected, |row| {
+                                                    let theme = rivu_ui::theme::palette(cx);
                                                     row.bg(
-                                                        rgb(rivu_ui::theme::palette(cx).selected),
+                                                        crate::gui::appearance::material::surface(
+                                                            cx,
+                                                        )
+                                                        .fill(theme.selected),
                                                     )
+                                                    .border_color(rgb(theme.accent))
                                                 })
                                                 .debug_selector(move || {
                                                     format!("content-playlist-target-{id}")

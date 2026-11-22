@@ -1009,7 +1009,10 @@ impl AudioProcessing {
             .tab_index(0)
             .role(Role::Splitter)
             .aria_label(self.tr("processing-workspace-resize-inspector"))
-            .hover(move |style| style.bg(rgb(theme.border)))
+            .hover({
+                let fill = crate::gui::appearance::material::surface(cx).fill(theme.border);
+                move |style| style.bg(fill)
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {

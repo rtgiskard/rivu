@@ -1130,6 +1130,7 @@ impl Element for InputElement {
 impl Render for Input {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::theme::palette(cx);
+        let surface = crate::theme::interaction_surface(cx);
         let focused = self.enabled && self.focus_handle.is_focused(window);
         let scale = window.rem_size() / px(16.);
         let typography_scale = crate::theme::font_size_scale(cx);
@@ -1245,7 +1246,7 @@ impl Render for Input {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .when(!self.embedded, |view| {
-                view.bg(rgb(if self.control_surface {
+                view.bg(surface.fill(if self.control_surface {
                     theme.control
                 } else {
                     theme.input
@@ -1258,7 +1259,7 @@ impl Render for Input {
                 })
                 .rounded(px(if self.control_surface { 2. } else { 4. }) * scale)
                 .when(self.control_surface && self.enabled, |view| {
-                    view.hover(|style| style.bg(rgb(theme.highlight)))
+                    view.hover(move |style| style.bg(surface.fill(theme.highlight)))
                 })
             })
             .when(self.embedded, |view| {

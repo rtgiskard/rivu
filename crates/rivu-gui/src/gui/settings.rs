@@ -440,6 +440,7 @@ impl Settings {
         open: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
         let trigger = select
+            .surface(crate::gui::appearance::material::surface(cx))
             .build(
                 self,
                 move |this| (this.dropdown_anchor == anchor).then_some(&mut this.dropdown),
@@ -1833,7 +1834,11 @@ impl Settings {
                     .text_sm()
                     .text_color(rgb(theme.text))
                     .cursor_pointer()
-                    .group_hover("control", |style| style.bg(rgb(theme.highlight)))
+                    .group_hover("control", {
+                        let fill =
+                            crate::gui::appearance::material::surface(cx).fill(theme.highlight);
+                        move |style| style.bg(fill)
+                    })
                     .aria_label(label.clone())
                     .child(
                         div()
@@ -1850,7 +1855,7 @@ impl Settings {
                 },
             ),
             active,
-            rivu_ui::SurfaceStyle::Opaque,
+            crate::gui::appearance::material::surface(cx),
         )
         .role(Role::Tab)
         .aria_selected(active)

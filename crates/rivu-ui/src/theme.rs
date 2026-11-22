@@ -30,6 +30,30 @@ pub fn palette(cx: &App) -> &'static Palette {
     cx.global::<ActivePalette>().0
 }
 
+struct InteractionSurface(fn(&App) -> crate::SurfaceStyle);
+impl Global for InteractionSurface {}
+
+pub fn set_interaction_surface(resolve: fn(&App) -> crate::SurfaceStyle, cx: &mut App) {
+    cx.set_global(InteractionSurface(resolve));
+}
+
+pub(crate) fn interaction_surface(cx: &App) -> crate::SurfaceStyle {
+    cx.try_global::<InteractionSurface>()
+        .map_or(crate::SurfaceStyle::Opaque, |surface| (surface.0)(cx))
+}
+
+struct FloatingBackgroundOpacity(fn(&App) -> f32);
+impl Global for FloatingBackgroundOpacity {}
+
+pub fn set_floating_background_opacity(resolve: fn(&App) -> f32, cx: &mut App) {
+    cx.set_global(FloatingBackgroundOpacity(resolve));
+}
+
+pub fn floating_background_opacity(cx: &App) -> f32 {
+    cx.try_global::<FloatingBackgroundOpacity>()
+        .map_or(1., |opacity| (opacity.0)(cx))
+}
+
 /// Publish resolved fonts at startup and whenever host typography changes.
 /// `font_size` is in points; 1pt maps to 4/3 logical pixels before UI scaling.
 /// Independent tooltip and drag roots read this current value on every render.

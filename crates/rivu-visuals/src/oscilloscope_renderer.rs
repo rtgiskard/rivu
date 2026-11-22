@@ -126,6 +126,7 @@ impl OscilloscopeRenderer {
         i18n: &Arc<VisualLabels>,
         panel_id: u64,
         options: AudioVisualizerOptions,
+        background_alpha: f32,
     ) -> AnyElement {
         let data = Rc::clone(&self.0);
         if options.labels {
@@ -162,7 +163,10 @@ impl OscilloscopeRenderer {
                         {
                             return;
                         }
-                        window.paint_quad(gpui::fill(bounds, rgb(data.background)));
+                        window.paint_quad(gpui::fill(
+                            bounds,
+                            rgb(data.background).alpha(background_alpha),
+                        ));
                         if options.reference_lines {
                             for channel in 0..if options.oscilloscope_overlay_channels {
                                 1

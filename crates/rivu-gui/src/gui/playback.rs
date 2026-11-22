@@ -904,7 +904,7 @@ impl Playback {
             .borrow_mut()
             .content(("audio-output", panel_id));
         let popup = self.output_scope.surface(
-            rivu_ui::Popover::surface(theme, ("audio-output-popup", panel_id))
+            rivu_ui::Popover::surface(cx, ("audio-output-popup", panel_id))
                 .role(gpui::Role::Dialog)
                 .flex()
                 .flex_col()

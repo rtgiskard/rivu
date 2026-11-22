@@ -335,10 +335,10 @@ impl Render for WindowView {
                 cx.notify();
             });
             footer_popup = Some(
-                Popover::menu(theme, "app-menu-popup", window)
+                Popover::menu(cx, "app-menu-popup", window)
                     .min_w(rems(8.))
                     .map(|surface| match material {
-                        Some(material) => material.floating(surface, theme),
+                        Some(material) => material.floating(surface, theme, cx),
                         None => surface,
                     })
                     .map(|surface| self.menu_surface(surface, cx))

@@ -96,12 +96,18 @@ pub fn menu_item_style(
     cx: &gpui::App,
 ) -> Stateful<Div> {
     let label = label.into();
+    let surface = crate::theme::interaction_surface(cx);
+    let hover_opacity = crate::theme::floating_background_opacity(cx);
     div()
         .id(id)
         .role(Role::MenuItem)
         .aria_label(label.clone())
         .tab_index(0)
-        .focus(|style| style.bg(rgb(theme.selected)))
+        .focus(move |style| {
+            style
+                .bg(surface.fill(theme.selected))
+                .border_color(rgb(theme.accent))
+        })
         .w_full()
         .min_h(gpui::rems(MENU_MIN_HEIGHT_REMS))
         .flex_shrink_0()
@@ -120,7 +126,7 @@ pub fn menu_item_style(
         .border_color(gpui::transparent_black())
         .bg(rgb(theme.panel).alpha(0.0))
         .rounded_sm()
-        .hover(|style| style.bg(rgb(theme.highlight)))
+        .hover(move |style| style.bg(rgb(theme.highlight).alpha(hover_opacity)))
         .child(
             div()
                 .id(label.clone())

@@ -520,6 +520,7 @@ impl AudioProcessing {
                 SharedString::from(self.tr("processing-enabled").to_string()),
                 text == "true",
                 true,
+                crate::gui::appearance::material::surface(cx),
                 cx,
                 move |this, enabled, cx| {
                     if target.current(this, cx) {

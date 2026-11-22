@@ -898,11 +898,11 @@ impl AlbumBrowser {
             Arc::new(gpui::ElementId::Path(Arc::from(key.directory.as_path()))),
             drag_label.clone(),
         );
-        let cover_fade = |color: u32| {
+        let cover_fade = |color: gpui::Rgba| {
             linear_gradient(
                 0.,
-                linear_color_stop(rgb(color), 0.),
-                linear_color_stop(rgb(color).alpha(0.), 1.),
+                linear_color_stop(color, 0.),
+                linear_color_stop(color.alpha(0.), 1.),
             )
         };
         let actions = row()
@@ -993,7 +993,10 @@ impl AlbumBrowser {
                     })
             })
             .rounded_md()
-            .hover(|style| style.bg(rgb(theme.highlight)))
+            .hover({
+                let surface = crate::gui::appearance::material::surface(cx);
+                move |style| style.bg(surface.fill(theme.highlight))
+            })
             .overflow_hidden()
             .child(
                 div()
@@ -1009,9 +1012,11 @@ impl AlbumBrowser {
                             .bottom_0()
                             .w_full()
                             .h(self.grid_layout.artwork_size * ALBUM_FADE_FRACTION)
-                            .bg(cover_fade(theme.panel))
-                            .group_hover("album-card", move |style| {
-                                style.bg(cover_fade(theme.highlight))
+                            .bg(cover_fade(rgb(theme.panel)))
+                            .group_hover("album-card", {
+                                let tint = crate::gui::appearance::material::surface(cx)
+                                    .fill(theme.highlight);
+                                move |style| style.bg(cover_fade(rgb(theme.panel).blend(tint)))
                             }),
                     ),
             )

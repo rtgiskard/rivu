@@ -1052,6 +1052,7 @@ impl AudioProcessing {
             }
             let select_frame = frame.clone();
             let pointer_frame = frame.clone();
+            let focus_fill = crate::gui::appearance::material::surface(cx).fill(theme.selected);
             let mut card = div()
                 .id(SharedString::from(format!("graph-card-{panel}-{id}")))
                 .debug_selector(move || format!("graph-card-{panel}-{id}"))
@@ -1071,7 +1072,10 @@ impl AudioProcessing {
                 .tab_index(0)
                 .tab_stop(true)
                 .role(Role::Button)
-                .focus(|v| v.bg(rgb(theme.selected)))
+                .focus(move |v| {
+                    v.bg(rgb(theme.panel).blend(focus_fill))
+                        .border_color(rgb(theme.accent))
+                })
                 .aria_label(SharedString::from(format!(
                     "{} #{id}",
                     self.tr(node_label(&node.kind))
@@ -1157,7 +1161,9 @@ impl AudioProcessing {
                                 "processing-graph-port-in"
                             })
                         )))
-                        .focus(|v| v.bg(rgb(theme.selected)))
+                        .border_1()
+                        .border_color(gpui::transparent_black())
+                        .focus(move |v| v.bg(focus_fill).border_color(rgb(theme.accent)))
                         .when(!output, |view| view.child(div().flex_shrink_0().child("●")))
                         .child(
                             div()
@@ -1185,7 +1191,7 @@ impl AudioProcessing {
             .h_full()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(theme.bg))
+            .bg(rgb(theme.bg).alpha(crate::gui::appearance::material::plot_background_alpha(cx)))
             .border_1()
             .border_color(rgb(theme.border))
             .tab_index(0)

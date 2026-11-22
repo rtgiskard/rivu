@@ -875,7 +875,7 @@ impl Playlists {
                 this.dismiss_playlist_action(window, cx);
                 cx.stop_propagation();
             });
-            let menu = rivu_ui::Popover::menu(theme, "playlist-row-menu", window)
+            let menu = rivu_ui::Popover::menu(cx, "playlist-row-menu", window)
                 .map(|surface| self.menu_surface(surface))
                 .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
                     dismiss(this, window, cx);

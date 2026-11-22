@@ -202,13 +202,17 @@ impl StyleCoordinator {
         panel_id: u64,
         status: PlaybackStatus,
         options: AudioVisualizerOptions,
+        background_alpha: f32,
     ) -> AnyElement {
         match options.style {
             AudioVisualizerStyle::StereoDensity => self.stereo[0].view(i18n, panel_id, options),
             AudioVisualizerStyle::SpatialSpectrum => self.stereo[1].view(i18n, panel_id, options),
             AudioVisualizerStyle::FractalBeams => self.fractal[0].view(i18n, panel_id, options),
             AudioVisualizerStyle::FractalFlow => self.fractal[1].view(i18n, panel_id, options),
-            AudioVisualizerStyle::Oscilloscope => self.oscilloscope.view(i18n, panel_id, options),
+            AudioVisualizerStyle::Oscilloscope => {
+                self.oscilloscope
+                    .view(i18n, panel_id, options, background_alpha)
+            }
             AudioVisualizerStyle::Bars
             | AudioVisualizerStyle::Rings
             | AudioVisualizerStyle::BarsRings => self.radial.view(i18n, panel_id, status, options),

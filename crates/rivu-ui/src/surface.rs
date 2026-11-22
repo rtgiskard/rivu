@@ -2,10 +2,16 @@ use crate::{layout::column, menu::menu_item};
 use gpui::{prelude::*, *};
 use rivu_format::palette::Palette;
 
-/// Opaque elevated material for menus, dropdowns, and tooltips only.
-pub(crate) fn floating_surface(theme: &'static Palette) -> Div {
+/// Elevated material for menus, dropdowns, and tooltips.
+pub(crate) fn floating_surface(cx: &App) -> Div {
+    let theme = crate::theme::palette(cx);
+    let opacity = crate::theme::floating_background_opacity(cx);
     div()
-        .bg(rgb(theme.control))
+        .bg(rgb(theme.control).alpha(opacity))
+        .when(
+            opacity < 1. && !cfg!(any(target_os = "macos", target_os = "ios")),
+            |surface| surface.backdrop_blur(px(6.)),
+        )
         .border_1()
         .border_color(rgb(theme.border))
         .shadow_sm()
@@ -58,17 +64,13 @@ impl Dialog {
 pub struct Popover;
 
 impl Popover {
-    pub fn surface(theme: &'static Palette, id: impl Into<ElementId>) -> Stateful<Div> {
-        floating_surface(theme).id(id).occlude()
+    pub fn surface(cx: &App, id: impl Into<ElementId>) -> Stateful<Div> {
+        floating_surface(cx).id(id).occlude()
     }
 
-    pub fn menu(
-        theme: &'static Palette,
-        id: impl Into<ElementId>,
-        window: &Window,
-    ) -> Stateful<Div> {
+    pub fn menu(cx: &App, id: impl Into<ElementId>, window: &Window) -> Stateful<Div> {
         let inset = window.rem_size() * 0.5;
-        Self::surface(theme, id)
+        Self::surface(cx, id)
             .role(Role::Menu)
             .max_w((window.viewport_size().width - inset * 2.).max(px(0.)))
             .max_h((window.viewport_size().height - inset * 2.).max(px(0.)))
@@ -78,12 +80,8 @@ impl Popover {
             .rounded_md()
     }
 
-    pub fn choices(
-        theme: &'static Palette,
-        id: impl Into<ElementId>,
-        width: Pixels,
-    ) -> Stateful<Div> {
-        Self::surface(theme, id)
+    pub fn choices(cx: &App, id: impl Into<ElementId>, width: Pixels) -> Stateful<Div> {
+        Self::surface(cx, id)
             .role(Role::ListBox)
             .w(width)
             .gap_0()

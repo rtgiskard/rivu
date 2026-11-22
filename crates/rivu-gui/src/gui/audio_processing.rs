@@ -2091,7 +2091,7 @@ impl AudioProcessing {
                         .position(bounds.bottom_left())
                         .snap_to_window()
                         .child(
-                            Popover::surface(theme, ("eq-preset-empty", panel))
+                            Popover::surface(cx, ("eq-preset-empty", panel))
                                 .p_1()
                                 .on_mouse_down_out(cx.listener(|this, event, window, cx| {
                                     if this.dismiss_preset_choices(event, window, cx) {
@@ -2148,7 +2148,7 @@ impl AudioProcessing {
                         .child(
                             popup
                                 .scope
-                                .surface(Popover::surface(theme, ("eq-preset-management", panel)))
+                                .surface(Popover::surface(cx, ("eq-preset-management", panel)))
                                 .flex()
                                 .flex_col()
                                 .gap_1()
@@ -2454,6 +2454,7 @@ impl AudioProcessing {
                         self.tr(group),
                         enabled,
                         true,
+                        crate::gui::appearance::material::surface(cx),
                         cx,
                         move |this, _, cx| {
                             this.send(Command::ToggleProcessing { target: toggle }, cx);
@@ -2521,6 +2522,7 @@ impl AudioProcessing {
                         self.tr("processing-speech-post-filter-model"),
                         neural.speech_post_filter,
                         true,
+                        crate::gui::appearance::material::surface(cx),
                         cx,
                         |this, _, cx| {
                             this.send(

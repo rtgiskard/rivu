@@ -169,15 +169,11 @@ pub fn dropdown_row(
     selected: bool,
     label: impl Into<SharedString>,
     height: gpui::Pixels,
+    cx: &gpui::App,
 ) -> Stateful<Div> {
-    list_row_surface(theme, id, selected, height, crate::SurfaceStyle::Opaque)
-        .hover(move |style| {
-            style.bg(rgb(if selected {
-                theme.selected_hover
-            } else {
-                theme.highlight
-            }))
-        })
+    let surface = crate::theme::interaction_surface(cx);
+    list_row(theme, id, selected, height, surface)
+        .when(selected, |row| row.text_color(rgb(theme.accent)))
         .child(
             div()
                 .flex_1()

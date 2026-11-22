@@ -571,8 +571,16 @@ impl FrequencyViews {
         i18n: &Arc<VisualLabels>,
         panel_id: u64,
         options: rivu_format::config::AudioVisualizerOptions,
+        background_alpha: f32,
     ) -> AnyElement {
-        self.view(theme, i18n, panel_id, FrequencyKind::Spectrum, options)
+        self.view(
+            theme,
+            i18n,
+            panel_id,
+            FrequencyKind::Spectrum,
+            options,
+            background_alpha,
+        )
     }
 
     pub fn spectrogram(
@@ -582,7 +590,14 @@ impl FrequencyViews {
         panel_id: u64,
         options: rivu_format::config::AudioVisualizerOptions,
     ) -> AnyElement {
-        self.view(theme, i18n, panel_id, FrequencyKind::Spectrogram, options)
+        self.view(
+            theme,
+            i18n,
+            panel_id,
+            FrequencyKind::Spectrogram,
+            options,
+            1.0,
+        )
     }
     pub fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
         let mut data = self.data.borrow_mut();
@@ -666,6 +681,7 @@ impl FrequencyViews {
         panel_id: u64,
         mode: FrequencyKind,
         options: rivu_format::config::AudioVisualizerOptions,
+        background_alpha: f32,
     ) -> AnyElement {
         let data = Rc::clone(&self.data);
         let message: Option<SharedString> = {
@@ -691,38 +707,31 @@ impl FrequencyViews {
             FrequencyKind::Spectrum => "spectrum",
             FrequencyKind::Spectrogram => "spectrogram",
         };
-        let visualization_background = self.data.borrow().visualization_background;
+        let background = rgb(self.data.borrow().visualization_background).alpha(background_alpha);
         gpui::container_query(move |available, window, _| {
             prepaint_data.borrow_mut().spectrogram.scale_factor = window.scale_factor();
+            let panel = div()
+                .id((kind, panel_id))
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .bg(background);
             if !prepaint_data.borrow_mut().prepaint_panel_with_labels(
                 panel_id,
                 mode,
                 available,
                 options.labels,
             ) {
-                return div()
-                    .id((kind, panel_id))
-                    .size_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .bg(rgb(visualization_background))
-                    .into_any_element();
+                return panel.into_any_element();
             }
-            div()
-                .id((kind, panel_id))
+            panel
                 .relative()
-                .size_full()
-                .min_w_0()
-                .min_h_0()
-                .overflow_hidden()
-                .bg(rgb(visualization_background))
                 .child(
                     canvas(
                         |_, _, _| (),
                         move |bounds, _, window, cx| {
                             let mut data = data.borrow_mut();
-                            window.paint_quad(fill(bounds, rgb(data.visualization_background)));
                             if !visual_canvas_has_room(bounds.size) {
                                 return;
                             }

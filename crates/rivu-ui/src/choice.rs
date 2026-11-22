@@ -372,6 +372,7 @@ impl ChoicePopup {
                                 selected == Some(index),
                                 label,
                                 row_height,
+                                cx,
                             )
                             .role(Role::ListBoxOption)
                             .aria_label(hint.clone())
@@ -397,14 +398,17 @@ impl ChoicePopup {
         .h_full()
         .w_full()
         .edge_fade_color(palette(cx).control)
-        .scrollbar(self.scrollbar_id, crate::SurfaceStyle::Opaque);
+        .scrollbar(
+            self.scrollbar_id,
+            crate::SurfaceStyle::Translucent(crate::theme::floating_background_opacity(cx)),
+        );
         deferred(
             anchored()
                 .position(self.anchor.bottom_left())
                 .snap_to_window()
                 .child(
                     Popover::choices(
-                        palette(cx),
+                        cx,
                         self.id,
                         self.anchor.size.width.min(window.viewport_size().width),
                     )

@@ -523,6 +523,7 @@ impl Render for RowSurfaces {
                 self.selected,
                 label,
                 crate::row::single_line_row_height(window, cx),
+                cx,
             ))
             .on_children_prepainted(move |children, _, _| {
                 let mut measured = bounds.get();

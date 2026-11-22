@@ -2131,7 +2131,7 @@ impl EqualizerEditor {
             .w_full()
             .h(rems(12.))
             .flex_shrink_0()
-            .bg(rgb(theme.bg))
+            .bg(rgb(theme.bg).alpha(crate::gui::appearance::material::plot_background_alpha(cx)))
             .border_1()
             .border_color(rgb(theme.border))
             .on_mouse_down(
@@ -2534,6 +2534,7 @@ impl EqualizerEditor {
             );
         let gains = row()
             .min_w_0()
+            .flex_wrap()
             .gap_2()
             .child(self.field_view(
                 &EqField::PreampDb,
@@ -2541,7 +2542,6 @@ impl EqualizerEditor {
                 !self.input_locked(),
                 cx,
             ))
-            .flex_wrap()
             .child(self.field_view(
                 &EqField::OutputGainDb,
                 self.tr("processing-output-gain-short"),
@@ -2815,6 +2815,7 @@ impl EqualizerEditor {
                                 self.tr("processing-enabled"),
                                 band.enabled,
                                 !self.config_locked(),
+                                crate::gui::appearance::material::surface(cx),
                                 cx,
                                 move |this, value, cx| {
                                     if this.field_control_current(&enabled_control, cx) {
@@ -2827,6 +2828,7 @@ impl EqualizerEditor {
                                 self.tr("processing-solo"),
                                 band.solo,
                                 !self.config_locked(),
+                                crate::gui::appearance::material::surface(cx),
                                 cx,
                                 move |this, value, cx| {
                                     if this.field_control_current(&solo_control, cx) {

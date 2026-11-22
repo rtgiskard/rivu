@@ -183,6 +183,7 @@ pub fn sortable_header<T: 'static>(
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
+    let surface = crate::theme::interaction_surface(cx);
     let label = label.into();
     let mut control = div()
         .id(id)
@@ -210,7 +211,11 @@ pub fn sortable_header<T: 'static>(
         .text_xs()
         .text_color(rgb(if active { theme.accent } else { theme.muted }))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(theme.highlight)).text_color(rgb(theme.text)))
+        .hover(move |style| {
+            style
+                .bg(surface.fill(theme.highlight))
+                .text_color(rgb(theme.text))
+        })
         .on_click(cx.listener(move |this, _, window, cx| {
             action(this, window, cx);
             cx.stop_propagation();
@@ -685,12 +690,13 @@ pub fn checkbox<T: 'static>(
     label: impl Into<SharedString>,
     checked: bool,
     enabled: bool,
+    surface: SurfaceStyle,
     cx: &mut Context<T>,
     on_change: impl Fn(&mut T, bool, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
     let label = label.into();
-    let control = control_surface(theme, id, SurfaceStyle::Opaque)
+    let control = control_surface(theme, id, surface)
         .role(Role::CheckBox)
         .aria_label(label.clone())
         .aria_toggled(if checked {
@@ -786,9 +792,14 @@ mod tests {
                     "First line\nSecond line",
                     crate::layout::StatusKind::Info,
                 ),
-                "choice" => {
-                    crate::row::dropdown_row(theme, "control", false, TOOLTIP_LABEL, gpui::px(32.))
-                }
+                "choice" => crate::row::dropdown_row(
+                    theme,
+                    "control",
+                    false,
+                    TOOLTIP_LABEL,
+                    gpui::px(32.),
+                    cx,
+                ),
                 "trigger" => dropdown_trigger(
                     theme,
                     "control",
@@ -1326,7 +1337,15 @@ mod tests {
             assert_eq!(node.toggled(), Some(Toggled::True));
             assert_eq!(node.is_selected(), None);
 
-            let check = checkbox("check", "Keep enabled", false, true, cx, |_, _, _| {});
+            let check = checkbox(
+                "check",
+                "Keep enabled",
+                false,
+                true,
+                SurfaceStyle::Translucent(0.28),
+                cx,
+                |_, _, _| {},
+            );
             let mut node = gpui::accesskit::Node::new(check.a11y_role().unwrap());
             check.write_a11y_info(&mut node);
             assert_eq!(node.role(), Role::CheckBox);

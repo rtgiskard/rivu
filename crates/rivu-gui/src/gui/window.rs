@@ -450,6 +450,11 @@ impl WindowView {
         cx.set_global(appearance::material::MaterialSession::from_preferences(
             &state.system.config.material,
         ));
+        rivu_ui::theme::set_interaction_surface(appearance::material::surface, cx);
+        rivu_ui::theme::set_floating_background_opacity(
+            appearance::material::plot_background_alpha,
+            cx,
+        );
         let localized_text = Rc::new(
             i18n.fixed_texts()
                 .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))

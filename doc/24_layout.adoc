@@ -480,7 +480,7 @@ Material enablement, selection and per-preset parameters belong to Core's
 configuration authority, independently of layout-local state and the Settings
 draft. The renderer consumes the accepted preferences without changing semantic
 theme colors, playback, queue state or saved-layout syntax. Menus and dialogs
-retain opaque elevated surfaces and input barriers.
+retain their input barriers.
 
 Idle rows and tabs paint no background. Rows, tabs, buttons and scroll-edge
 fades share the host surface policy: ordinary surfaces use unscaled fill;
@@ -488,8 +488,10 @@ material surfaces multiply interaction fill alpha by the configured
 `interaction_background_strength` (see
 link:01_config.adoc#_appearance_and_library_display[Appearance and library display]).
 This is independent of panel opacity and does not alter semantic colors, text,
-icons or focus borders. Expanded search matches its collapsed button's fill;
-menus, dialogs and standalone input fields remain opaque.
+icons or focus borders. Standalone inputs, album-card hover and history sort-header
+hover follow the same interaction fill policy. Expanded search matches its
+collapsed button's fill. Menus and tooltips follow the elevated surface opacity
+range described in the configuration guide. Modal dialog cards use an opaque fill.
 
 Floating row actions use the same selection or hover fill, with no extra button
 hover fill or text reflow. Only material surfaces add local backdrop blur.

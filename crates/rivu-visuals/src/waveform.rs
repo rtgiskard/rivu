@@ -1393,6 +1393,7 @@ impl Waveform {
         i18n: &Arc<VisualLabels>,
         state: WaveformViewState,
         config: &VisualParameters,
+        background_alpha: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let WaveformViewState {
@@ -1408,7 +1409,7 @@ impl Waveform {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(config.visualization_background.rgb()));
+            .bg(rgb(config.visualization_background.rgb()).alpha(background_alpha));
         let Some(source) = self.source.as_deref() else {
             self.plot.borrow_mut().columns.remove(&panel_id);
             if let Some(generation) = self.remove_interaction_panel(panel_id) {
@@ -1446,7 +1447,6 @@ impl Waveform {
         let error_i18n = Arc::clone(i18n);
         let error_theme = theme;
         let water = rgb(config.waveform_cursor_color.rgb());
-        let background = rgb(config.visualization_background.rgb());
         let glow = config.waveform_glow;
         let labels = options.labels;
         let rms_gain = config.waveform_rms_gain;
@@ -1512,7 +1512,6 @@ impl Waveform {
                                     }
                                 },
                                 move |bounds, _, window, cx| {
-                                    window.paint_quad(fill(bounds, background));
                                     if bounds.size.width <= px(16.0)
                                         || bounds.size.height
                                             <= px(if labels { 32.0 } else { 16.0 })

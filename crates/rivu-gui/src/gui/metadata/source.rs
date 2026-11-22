@@ -623,7 +623,7 @@ impl Metadata {
         let surface = self
             .source_menu
             .scope
-            .menu_surface(Popover::menu(theme, ("metadata-tags-popup", panel), window))
+            .menu_surface(Popover::menu(cx, ("metadata-tags-popup", panel), window))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 // Pointer dismissal leaves the next control's focus handoff alone.
                 this.source_menu.close();

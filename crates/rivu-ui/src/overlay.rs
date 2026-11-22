@@ -13,13 +13,17 @@ pub fn copyable_message<T: 'static>(
     message: String,
     cx: &mut Context<T>,
 ) -> Stateful<Div> {
+    let theme = crate::theme::palette(cx);
+    let focus_fill = crate::theme::interaction_surface(cx).fill(theme.highlight);
     row()
         .id(id)
         .role(gpui::Role::Button)
         .aria_label(copy_label)
         .aria_description(message.clone())
         .tab_index(0)
-        .focus(|style| style.bg(rgb(crate::theme::palette(cx).highlight)))
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus(move |style| style.bg(focus_fill).border_color(rgb(theme.accent)))
         .flex_1()
         .min_w_0()
         .overflow_hidden()
@@ -49,7 +53,7 @@ pub fn tooltip_surface(window: &Window, cx: &gpui::App, max_width_rems: f32) -> 
     let theme = crate::theme::palette(cx);
     let inset = window.rem_size() * 0.5;
     let available = (window.viewport_size().width - inset * 2.).max(px(0.));
-    floating_surface(theme)
+    floating_surface(cx)
         .min_w_0()
         .max_w((window.rem_size() * max_width_rems).min(available))
         .px_2()

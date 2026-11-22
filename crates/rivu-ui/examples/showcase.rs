@@ -437,7 +437,7 @@ impl Render for Showcase {
                 .child(column().flex_1().child(format!("Preview: {}", self.slider_preview.map(|value| format!("{:.0}%", value * 100.)).unwrap_or_else(|| "none".into())))
                     .child(slider)))
             .child(row().flex_wrap()
-                .child(checkbox("slider-enabled", "Enable slider", self.slider_enabled, true, cx, |this, next, cx| {
+                .child(checkbox("slider-enabled", "Enable slider", self.slider_enabled, true, rivu_ui::SurfaceStyle::Opaque, cx, |this, next, cx| {
                     this.cancel_slider("Preview cancelled because the slider was disabled.", cx);
                     this.slider_enabled = next;
                     cx.notify();
@@ -465,10 +465,10 @@ impl Render for Showcase {
                 .child(format!("Activations: {}",self.clicks)))
             .child(column().w_64().max_w_full().child(button("long-action", "保存更改 / Save changes with a deliberately long action label", cx, |this,_,cx| { this.clicks += 1; cx.notify(); })))
             .child(icon_groups)
-            .child(checkbox("enabled", "Enable action and editor", self.enabled, true, cx, |this,next,cx| {
+            .child(checkbox("enabled", "Enable action and editor", self.enabled, true, rivu_ui::SurfaceStyle::Opaque, cx, |this,next,cx| {
                 this.enabled = next; this.input.update(cx,|input,cx| input.set_enabled(next,cx)); cx.notify();
             }))
-            .child(checkbox("checked", "A host-owned setting", self.checked, self.enabled, cx, |this,next,cx| { this.checked = next; cx.notify(); }))
+            .child(checkbox("checked", "A host-owned setting", self.checked, self.enabled, rivu_ui::SurfaceStyle::Opaque, cx, |this,next,cx| { this.checked = next; cx.notify(); }))
             .child(row().items_start().child(FormField::new(colors, "Retained text", self.input.clone()).hint("The host retains this draft and decides when to apply it.").into_div().flex_1()).child(FormField::new(colors, "Choice", dropdown).into_div().flex_1()))
             .child(format!("User edits: {} · Draft: {}",self.edits,self.input.read(cx).text()))
             .child(slider_demo)

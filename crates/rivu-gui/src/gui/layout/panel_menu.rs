@@ -111,7 +111,8 @@ impl WindowView {
                 .rounded_sm()
                 .text_sm()
                 .when(available, |view| {
-                    view.hover(|style| style.bg(rgb(theme.highlight)))
+                    let fill = crate::gui::appearance::material::surface(cx).fill(theme.highlight);
+                    view.hover(move |style| style.bg(fill))
                 })
                 .when(!available, |view| view.text_color(rgb(theme.muted)))
                 .child(div().text_color(rgb(theme.muted)).child("⠿"))
@@ -160,7 +161,7 @@ impl WindowView {
                 choices = choices.child(choice);
             }
         }
-        Popover::surface(theme, "panel-catalog")
+        Popover::surface(cx, "panel-catalog")
             .flex()
             .flex_col()
             .min_w_0()
@@ -212,7 +213,7 @@ impl WindowView {
             });
         let is_audio_visualizer = panel_kind == Some("audio_visualizer");
         let is_artwork = panel_kind == Some("artwork");
-        let mut menu = Popover::menu(theme, "panel-context-menu", window)
+        let mut menu = Popover::menu(cx, "panel-context-menu", window)
             .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.panel_menu = None;

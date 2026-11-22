@@ -3,6 +3,7 @@
 //! refreshes the application root. Panel entities are the only redraw targets.
 
 use crate::frontend::FrontendHandle;
+use crate::gui::appearance::material::plot_background_alpha;
 use crate::gui::{animation_frames::AnimationFrames, layout, visualization};
 #[cfg(test)]
 use crate::test_support::ConfigFixture;
@@ -676,26 +677,38 @@ impl VisualizerRuntime {
     }
 
     fn render_panel(&mut self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let panel = self.panels.get(&id).copied();
+        let background_alpha = match panel {
+            Some(PanelKind::Spectrum(_) | PanelKind::Waveform(_))
+            | Some(PanelKind::Audio(AudioVisualizerOptions {
+                style: AudioVisualizerStyle::Oscilloscope,
+                ..
+            })) => plot_background_alpha(cx),
+            _ => 1.0,
+        };
         if !self.active() {
             return div()
                 .size_full()
-                .bg(rgb(self.config.visualization_background.rgb()))
+                .bg(rgb(self.config.visualization_background.rgb()).alpha(background_alpha))
                 .into_any_element();
         }
         let theme = rivu_ui::theme::palette(cx);
-        match self.panels.get(&id).copied() {
+        match panel {
             Some(PanelKind::Spectrum(options)) => {
                 self.frequency_views
-                    .spectrum(theme, &self.labels, id, options)
+                    .spectrum(theme, &self.labels, id, options, background_alpha)
             }
             Some(PanelKind::Spectrogram(options)) => {
                 self.frequency_views
                     .spectrogram(theme, &self.labels, id, options)
             }
-            Some(PanelKind::Audio(options)) => {
-                self.style_coordinator
-                    .view(&self.labels, id, self.status, options)
-            }
+            Some(PanelKind::Audio(options)) => self.style_coordinator.view(
+                &self.labels,
+                id,
+                self.status,
+                options,
+                background_alpha,
+            ),
             Some(PanelKind::Waveform(options)) => self.waveform.update(cx, |waveform, cx| {
                 waveform.view(
                     theme,
@@ -707,6 +720,7 @@ impl VisualizerRuntime {
                         options,
                     },
                     &self.parameters,
+                    background_alpha,
                     cx,
                 )
             }),

@@ -23,6 +23,9 @@ impl WindowView {
             None => return None,
         };
         let theme = rivu_ui::theme::palette(cx);
+        let hover_fill = appearance::material::surface(cx)
+            .fill(theme.text)
+            .opacity(0.08);
         let copied_message = message.clone();
         let mut buttons = row().h_full().flex_shrink_0().gap_0().ml_4().child(
             IconButton::new(
@@ -51,7 +54,7 @@ impl WindowView {
                         .h_full()
                         .min_h_0()
                         .py_0()
-                        .group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
+                        .group_hover("control", move |style| style.bg(hover_fill))
                 },
             ),
         );
@@ -70,7 +73,7 @@ impl WindowView {
                             .h_full()
                             .min_h_0()
                             .py_0()
-                            .group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
+                            .group_hover("control", move |style| style.bg(hover_fill))
                     },
                 ),
             );
@@ -85,7 +88,8 @@ impl WindowView {
                 .text_xs()
                 .text_color(rgb(theme.text))
                 .when(is_error, |notification| {
-                    notification.bg(rgb(theme.error_bg))
+                    notification.bg(rgb(theme.error_bg)
+                        .alpha(crate::gui::appearance::material::plot_background_alpha(cx)))
                 })
                 .child(
                     div()
