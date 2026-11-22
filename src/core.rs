@@ -435,6 +435,7 @@ struct Core {
     pending_written_source: Option<source_tags::PendingWrittenSource>,
     processing: rivu_processing::Service,
     pending_processing_audition: Option<(u64, u64)>,
+    pending_processing_resume: Option<processing::PendingProcessingResume>,
     scan_tx: mpsc::Sender<ScanEvent>,
     scan_rx: mpsc::Receiver<ScanEvent>,
     active_scan: Option<ScanTask>,
@@ -454,6 +455,7 @@ impl Drop for Core {
     fn drop(&mut self) {
         // Runs on the dedicated Core owner (or a synchronous test owner),
         // including unwind. Cancellation is intent, never retirement.
+        self.cancel_pending_processing_resume("Audition resume cancelled because Core stopped");
         self.close_task_waiters();
         if let Some(reads) = &self.read_queries {
             reads.fence.transition().finish(true);

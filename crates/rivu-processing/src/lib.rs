@@ -233,6 +233,11 @@ pub enum Event {
         generation: u64,
         result: Result<audio::PcmAudio>,
     },
+    ResumePrepared {
+        id: u64,
+        generation: u64,
+        result: Result<Box<audio::GraphRunner>>,
+    },
 }
 struct ActiveTask {
     id: u64,
@@ -262,6 +267,13 @@ struct RetainedAudition {
     resource: AuditionResource,
 }
 
+struct ResumeWorker {
+    id: u64,
+    generation: u64,
+    cancelled: Arc<AtomicBool>,
+    worker: JoinHandle<()>,
+}
+
 enum AuditionResource {
     Cached {
         pcm: audio::PcmAudio,
@@ -285,6 +297,7 @@ pub struct Service {
     history: VecDeque<u64>,
     next_id: u64,
     audition: Option<RetainedAudition>,
+    resume_worker: Option<ResumeWorker>,
     reclaimer: Option<reclaim::Reclaimer>,
     budget: Arc<audio::PcmBudget>,
     #[cfg(any(test, feature = "test-support"))]
@@ -339,6 +352,7 @@ impl Service {
             reclaimer: None,
             budget: audio::PcmBudget::new(MEMORY_LIMIT),
             audition: None,
+            resume_worker: None,
             #[cfg(any(test, feature = "test-support"))]
             panic_after_processing: false,
             #[cfg(any(test, feature = "test-support"))]
@@ -647,6 +661,7 @@ impl Service {
     /// A selected stem mix is owned only by its audition; its PCM must not be
     /// destroyed on the business thread.
     fn replace_audition(&mut self, next: Option<RetainedAudition>) {
+        self.cancel_resume();
         let previous = std::mem::replace(&mut self.audition, next);
         if let (Some(previous), Some(reclaimer)) = (previous, self.reclaimer.as_ref()) {
             reclaimer.retire_audition(previous);
@@ -660,24 +675,86 @@ impl Service {
         }
     }
 
+    pub fn audition_pcm(&self) -> Option<audio::PcmAudio> {
+        match &self.audition.as_ref()?.resource {
+            AuditionResource::Cached { pcm, .. } => Some(pcm.clone()),
+            AuditionResource::Graph { pcm, .. } => pcm.clone(),
+        }
+    }
+
+    pub fn cancel_resume(&self) {
+        if let Some(worker) = &self.resume_worker {
+            worker.cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    /// Cached auditions need no worker. A live audition uses the same background
+    /// preparation and reclamation ownership as initial graph preparation.
+    /// Keep one worker in flight; Core retries a newer intent after a cancelled
+    /// worker reports completion.
+    pub fn prepare_resume(&mut self) -> Result<bool> {
+        let audition = self
+            .audition
+            .as_ref()
+            .context("No retained audition to resume")?;
+        let AuditionResource::Graph { snapshot, .. } = &audition.resource else {
+            return Ok(false);
+        };
+        if self.resume_worker.is_none() {
+            let id = audition.id;
+            let generation = audition.generation;
+            let snapshot = snapshot.clone();
+            let tx = self.sender.clone();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let worker_cancelled = Arc::clone(&cancelled);
+            let worker = self
+                .reclaimer
+                .as_ref()
+                .context("Missing graph preparation owner")?
+                .spawn("rivu-graph-resume", move |retired| {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        retired?;
+                        ensure!(
+                            !worker_cancelled.load(Ordering::Acquire),
+                            "Audition resume cancelled"
+                        );
+                        snapshot.prepare().map(Box::new)
+                    }))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("Graph preparation worker panicked")));
+                    let _ = tx.send_blocking(Event::ResumePrepared {
+                        id,
+                        generation,
+                        result,
+                    });
+                })?;
+            self.resume_worker = Some(ResumeWorker {
+                id,
+                generation,
+                cancelled,
+                worker,
+            });
+        }
+        Ok(true)
+    }
+
+    pub fn finish_resume(&mut self, id: u64, generation: u64) -> bool {
+        if !self
+            .resume_worker
+            .as_ref()
+            .is_some_and(|worker| worker.id == id && worker.generation == generation)
+        {
+            return false;
+        }
+        let worker = self.resume_worker.take().unwrap();
+        let _ = worker.worker.join();
+        !worker.cancelled.load(Ordering::Acquire) && self.audition_selected(id, generation)
+    }
+
     pub fn retire_runner(&self, runner: audio::GraphRunner) {
         self.reclaimer
             .as_ref()
             .expect("runner requires an admitted worker")
             .retire_runner(runner);
-    }
-
-    pub fn resume_audition(&self) -> Result<(Option<audio::PcmAudio>, Option<audio::GraphRunner>)> {
-        let audition = self
-            .audition
-            .as_ref()
-            .context("No retained audition to resume")?;
-        match &audition.resource {
-            AuditionResource::Cached { pcm, .. } => Ok((Some(pcm.clone()), None)),
-            AuditionResource::Graph { pcm, snapshot, .. } => {
-                Ok((pcm.clone(), Some(snapshot.prepare()?)))
-            }
-        }
     }
 
     pub fn audition_projection(&self) -> Option<ProcessingAudition> {
@@ -1058,10 +1135,14 @@ impl Service {
         if let Some(task) = &task {
             task.cancelled.cancel();
         }
+        self.cancel_resume();
         // Closing admission wakes every reliable sender, including a worker
         // blocked behind buffered progress. Join for any terminal work the
         // channel could not carry, then drain without publishing output.
         self.receiver.close();
+        if let Some(worker) = self.resume_worker.take() {
+            let _ = worker.worker.join();
+        }
         let mut undelivered = match task.and_then(|task| task.worker.join().ok().flatten()) {
             Some(WorkerExit::Undelivered(event)) => Some(event),
             Some(WorkerExit::Interrupted(mut status)) if unfinished == Some(status.id) => {
@@ -1096,6 +1177,9 @@ impl Service {
                 Event::MixFinished {
                     result: Ok(pcm), ..
                 } => self.retire_pcm(pcm),
+                Event::ResumePrepared {
+                    result: Ok(runner), ..
+                } => self.retire_runner(*runner),
                 _ => {}
             }
         }

@@ -8,6 +8,7 @@ pub(super) enum CommandExecution {
     DeferredExport,
     DeferredOptimization,
     DeferredSourceTags,
+    DeferredProcessingResume,
 }
 
 #[derive(Debug)]
@@ -255,8 +256,8 @@ impl Core {
             }
             Command::CancelRelocation { id } => self.cancel_relocation(id)?,
             Command::KeepTrackIndependent { track_id } => self.keep_track_independent(track_id)?,
-            Command::ProcessingBypass { bypassed } => self.processing_bypass(bypassed)?,
-            Command::ToggleProcessing { target } => self.toggle_processing(target)?,
+            Command::ProcessingBypass { bypassed } => return self.processing_bypass(bypassed),
+            Command::ToggleProcessing { target } => return self.toggle_processing(target),
             Command::EqualizerEdit {
                 expected_revision,
                 edit,

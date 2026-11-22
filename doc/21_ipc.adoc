@@ -1326,7 +1326,10 @@ the saved configuration unchanged.
 bypass flag independently of Monitor EQ enablement. Entering bypass restores
 Original and revokes pending automatic audition without cancelling render/export
 or deleting results. Cancelling bypass revalidates the session's retained selection
-before restoring its route. `processing_audition` describes actual audition;
+before restoring its route. A live resume prepares the runner in the background;
+success acknowledges persistence and audio admission, not decoder opening.
+Superseding the request or stopping playback rejects a pending resume receipt.
+`processing_audition` describes actual audition;
 `processing_selection` describes the independently retained resume target.
 Neither late completion nor effect parameter edits may clear master bypass. See
 link:07_audio_processing.adoc#playback-bypass[Playback bypass] for desktop/CLI use.

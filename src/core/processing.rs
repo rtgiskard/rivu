@@ -1,10 +1,22 @@
 use super::*;
 use anyhow::ensure;
+use command::CommandExecution;
+
+pub(super) struct PendingProcessingResume {
+    id: u64,
+    generation: u64,
+    pub(super) reply: Option<oneshot::Sender<CoreResponse>>,
+}
 
 impl Core {
-    pub(in crate::core) fn toggle_processing(&mut self, target: ProcessingToggle) -> Result<()> {
+    pub(in crate::core) fn toggle_processing(
+        &mut self,
+        target: ProcessingToggle,
+    ) -> Result<CommandExecution> {
         if target == ProcessingToggle::Bypass {
-            return self.processing_bypass(!self.preferences.settings().processing_bypassed);
+            let bypassed = self.preferences.settings().processing_bypassed
+                && self.pending_processing_resume.is_none();
+            return self.processing_bypass(!bypassed);
         }
         let mut config = self.preferences.checkpoint();
         let enabled = match target {
@@ -14,12 +26,19 @@ impl Core {
             ProcessingToggle::SpeechPostFilter => &mut config.neural.speech_post_filter,
         };
         *enabled = !*enabled;
-        self.commit_processing_config(config)
+        self.commit_processing_config(config)?;
+        Ok(CommandExecution::Complete(CommandOutput::None))
     }
 
-    pub(in crate::core) fn processing_bypass(&mut self, bypassed: bool) -> Result<()> {
+    pub(in crate::core) fn processing_bypass(
+        &mut self,
+        bypassed: bool,
+    ) -> Result<CommandExecution> {
+        if bypassed {
+            self.cancel_pending_processing_resume("Audition resume superseded by enabling bypass");
+        }
         if self.preferences.settings().processing_bypassed == bypassed {
-            return Ok(());
+            return Ok(CommandExecution::Complete(CommandOutput::None));
         }
         let selected = self.processing.audition_projection();
         if selected.is_some() {
@@ -29,62 +48,33 @@ impl Core {
         self.engine.ensure_command_capacity(
             usize::from(monitor_enabled) + 2 * usize::from(selected.is_some()),
         )?;
+        if let Some(selection) = selected.as_ref()
+            && !bypassed
+        {
+            self.validate_resume_target(selection.id)?;
+            if self.processing.prepare_resume()? {
+                // Reuse any eligible preparation for the same selection, but
+                // only the latest command owns the pending receipt.
+                self.reject_pending_processing_resume(
+                    "Audition resume superseded by a newer request",
+                );
+                self.pending_processing_resume = Some(PendingProcessingResume {
+                    id: selection.id,
+                    generation: self.transport.generation,
+                    reply: None,
+                });
+                return Ok(CommandExecution::DeferredProcessingResume);
+            }
+        }
         let mut config = self.preferences.checkpoint();
         config.processing_bypassed = bypassed;
         if let Some(selection) = selected {
-            if !bypassed {
-                let valid = self
-                    .processing
-                    .results()
-                    .iter()
-                    .find(|result| result.id == selection.id)
-                    .context("Resume target is no longer retained")
-                    .and_then(|result| {
-                        let track = self.processing_source(&result.track, result.stamp)?;
-                        ensure!(
-                            self.state.current_track.as_ref().is_some_and(|current| {
-                                current.id == track.id
-                                    && current.path == track.path
-                                    && current.cue == track.cue
-                                    && current.decoder_hint == track.decoder_hint
-                            }),
-                            "Resume target does not belong to the current source"
-                        );
-                        Ok(())
-                    });
-                if let Err(error) = valid {
-                    self.processing.clear_audition();
-                    return Err(error.context("Resume target is stale; bypass remains enabled"));
-                }
-            }
-            let (pcm, runner) = if bypassed {
-                (None, None)
+            let pcm = if bypassed {
+                None
             } else {
-                match self.processing.resume_audition() {
-                    Ok(source) => source,
-                    Err(error) => {
-                        self.processing.clear_audition();
-                        return Err(
-                            error.context("Resume target is unavailable; bypass remains enabled")
-                        );
-                    }
-                }
+                self.processing.audition_pcm()
             };
-            // Capacity and persistence failures do not revoke selection.
-            let mut runner = runner.map(Box::new);
-            if let Err(error) =
-                self.replace_processing_source(selection.id, pcm, &mut runner, Some(config))
-            {
-                if let Some(runner) = runner {
-                    self.processing.retire_runner(*runner);
-                }
-                return Err(error);
-            }
-            self.processing
-                .retain_audition_for_generation(self.transport.generation);
-            if !bypassed {
-                self.transport.processing_resume_generation = Some(self.transport.generation);
-            }
+            self.commit_processing_bypass_source(selection.id, pcm, &mut None, config)?;
         } else {
             let config = Arc::new(config);
             self.write_config(&config)?;
@@ -96,7 +86,150 @@ impl Core {
         }
         // Background work retains its resources but loses the right to start audio.
         self.pending_processing_audition = None;
+        Ok(CommandExecution::Complete(CommandOutput::None))
+    }
+
+    fn reject_pending_processing_resume(&mut self, reason: &str) {
+        if let Some(pending) = self.pending_processing_resume.take() {
+            self.reply_to_command(pending.reply, Err(anyhow::anyhow!("{reason}")));
+        }
+    }
+
+    pub(in crate::core) fn cancel_pending_processing_resume(&mut self, reason: &str) {
+        self.processing.cancel_resume();
+        self.reject_pending_processing_resume(reason);
+    }
+
+    pub(in crate::core) fn clear_processing_audition(&mut self, reason: &str) {
+        self.processing.clear_audition();
+        self.reject_pending_processing_resume(reason);
+    }
+
+    fn validate_resume_target(&mut self, id: u64) -> Result<()> {
+        let valid = self
+            .processing
+            .results()
+            .iter()
+            .find(|result| result.id == id)
+            .context("Resume target is no longer retained")
+            .and_then(|result| {
+                let track = self.processing_source(&result.track, result.stamp)?;
+                ensure!(
+                    self.state.current_track.as_ref().is_some_and(|current| {
+                        current.id == track.id
+                            && current.path == track.path
+                            && current.cue == track.cue
+                            && current.decoder_hint == track.decoder_hint
+                    }),
+                    "Resume target does not belong to the current source"
+                );
+                Ok(())
+            });
+        if let Err(error) = valid {
+            self.clear_processing_audition("Audition resume cancelled: target is stale");
+            return Err(error.context("Resume target is stale; bypass remains enabled"));
+        }
         Ok(())
+    }
+
+    fn commit_processing_bypass_source(
+        &mut self,
+        id: u64,
+        pcm: Option<audio::PcmAudio>,
+        runner: &mut Option<Box<audio::GraphRunner>>,
+        config: Config,
+    ) -> Result<()> {
+        let bypassed = config.processing_bypassed;
+        // Capacity and persistence failures do not revoke selection.
+        self.replace_processing_source(id, pcm, runner, Some(config))?;
+        self.processing
+            .retain_audition_for_generation(self.transport.generation);
+        if !bypassed {
+            self.transport.processing_resume_generation = Some(self.transport.generation);
+        }
+        Ok(())
+    }
+
+    fn processing_resume_prepared(
+        &mut self,
+        id: u64,
+        generation: u64,
+        result: Result<Box<audio::GraphRunner>>,
+    ) {
+        let eligible = self.processing.finish_resume(id, generation);
+        if eligible
+            && self
+                .pending_processing_resume
+                .as_ref()
+                .is_some_and(|pending| (id, generation) == (pending.id, pending.generation))
+        {
+            let reply = self.pending_processing_resume.take().unwrap().reply;
+            let outcome = self.commit_prepared_processing_resume(id, generation, result);
+            self.complete_background(reply, outcome);
+            return;
+        }
+        if let Ok(runner) = result {
+            self.processing.retire_runner(*runner);
+        }
+        if let Some(pending) = &self.pending_processing_resume {
+            // A newer intent may be waiting for a cancelled worker to retire.
+            let retry = self
+                .ensure_current_processing_resume(pending.id, pending.generation)
+                .and_then(|()| {
+                    ensure!(
+                        self.processing.prepare_resume()?,
+                        "Missing live audition to resume"
+                    );
+                    Ok(())
+                });
+            if let Err(error) = retry {
+                let reply = self.pending_processing_resume.take().unwrap().reply;
+                self.complete_background(reply, Err(error));
+            }
+        }
+    }
+
+    fn ensure_current_processing_resume(&self, id: u64, generation: u64) -> Result<()> {
+        ensure!(
+            generation == self.transport.generation
+                && self.preferences.settings().processing_bypassed
+                && self.processing.audition_selected(id, generation),
+            "Audition resume target is no longer selected"
+        );
+        Ok(())
+    }
+
+    fn commit_prepared_processing_resume(
+        &mut self,
+        id: u64,
+        generation: u64,
+        result: Result<Box<audio::GraphRunner>>,
+    ) -> Result<()> {
+        let valid = self
+            .ensure_current_processing_resume(id, generation)
+            .and_then(|()| self.validate_resume_target(id));
+        let mut runner = match result {
+            Ok(runner) => Some(runner),
+            Err(error) => {
+                valid?;
+                self.processing.clear_audition();
+                return Err(error.context("Resume target is unavailable; bypass remains enabled"));
+            }
+        };
+        let outcome = valid.and_then(|()| {
+            let mut config = self.preferences.checkpoint();
+            config.processing_bypassed = false;
+            self.commit_processing_bypass_source(
+                id,
+                self.processing.audition_pcm(),
+                &mut runner,
+                config,
+            )
+        });
+        if let Some(runner) = runner {
+            self.processing.retire_runner(*runner);
+        }
+        outcome
     }
 
     pub(in crate::core) fn playback_equalizer(
@@ -610,6 +743,7 @@ impl Core {
     }
 
     pub(in crate::core) fn shutdown_processing(&mut self) {
+        self.cancel_pending_processing_resume("Audition resume cancelled during shutdown");
         let active = self.processing.active_id();
         self.processing.shutdown();
         if let Some(id) = active {
@@ -681,6 +815,11 @@ impl Core {
                 total,
                 phase,
             } => self.processing.progress(id, completed, total, phase),
+            Event::ResumePrepared {
+                id,
+                generation,
+                result,
+            } => return self.processing_resume_prepared(id, generation, result),
             Event::Finished { id, result } => {
                 let Some(cancelled) = self.processing.finish_task(id) else {
                     if let Ok(result) = result {
@@ -1117,6 +1256,7 @@ impl Core {
         if let Some(config) = config {
             self.preferences.accept(config);
         }
+        self.cancel_pending_processing_resume("Audition resume superseded by a replacement route");
         Ok(())
     }
 

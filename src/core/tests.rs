@@ -160,6 +160,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         pending_written_source: None,
         processing: rivu_processing::Service::new(),
         pending_processing_audition: None,
+        pending_processing_resume: None,
         scan_tx,
         scan_rx,
         active_scan: None,

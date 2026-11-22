@@ -68,7 +68,7 @@ impl Core {
                     || track.fingerprint != result.track.fingerprint
             })
         {
-            self.processing.clear_audition();
+            self.clear_processing_audition("Audition resume cancelled: source identity changed");
         }
         if let Some(track) = track.as_mut()
             && let Some(playback) = self

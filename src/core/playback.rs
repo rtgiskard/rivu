@@ -943,7 +943,7 @@ impl Core {
             self.transport.generation = self.transport.generation.wrapping_add(1);
             self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
         }
-        self.processing.clear_audition();
+        self.clear_processing_audition("Audition resume cancelled because playback stopped");
         self.transport.processing_resume_generation = None;
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.playback.position = 0.0;
@@ -982,6 +982,7 @@ impl Core {
         stopped.and(bookkeeping).and(statistics)
     }
     pub(in crate::core) fn stop_playback(&mut self) -> Result<()> {
+        self.cancel_pending_processing_resume("Audition resume cancelled because playback stopped");
         let mut stop = self.engine.stop_request();
         let generation = self.transport.generation;
         let mut bookkeeping = Ok(());

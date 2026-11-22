@@ -268,6 +268,7 @@ impl Core {
             BusinessEvent::Shutdown(control) => {
                 self.state.system.shutting_down = true;
                 self.publish();
+                self.cancel_pending_processing_resume("Audition resume cancelled during shutdown");
                 control.acknowledge(CommandReceipt::from_result(
                     Ok(()),
                     self.state.system.revision,
@@ -477,6 +478,13 @@ impl Core {
                             .reply = request.reply;
                         return;
                     }
+                    Ok(CommandExecution::DeferredProcessingResume) => {
+                        self.pending_processing_resume
+                            .as_mut()
+                            .expect("audition resume was accepted")
+                            .reply = request.reply;
+                        return;
+                    }
                     Err(error) => Err(error.error),
                 };
                 self.reply_to_command(request.reply, result);
@@ -524,6 +532,7 @@ impl Core {
     }
 
     fn finalize(&mut self) -> Result<()> {
+        self.cancel_pending_processing_resume("Audition resume cancelled during shutdown");
         // Retire background database users before final writes on Core's connection.
         if let Some((reply, result)) = self.shutdown_export() {
             self.complete_background(reply, result);

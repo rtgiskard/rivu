@@ -3322,6 +3322,25 @@ fn selected_pcm_budget_rejects_new_result_without_revoking_retained_audio() {
     assert!(core.processing.memory_bytes() <= 48 * 1024);
 }
 
+fn request_processing_resume(core: &mut Core, command: Command) -> oneshot::Receiver<CoreResponse> {
+    let (reply, mut response) = oneshot::channel();
+    assert!(
+        core.business_event(dispatch::BusinessEvent::Request(Request {
+            operation: Operation::Command(command),
+            reply: Some(reply),
+        }))
+    );
+    assert!(response.try_recv().unwrap().is_none());
+    response
+}
+
+fn ready_resume_receipt(mut response: oneshot::Receiver<CoreResponse>) -> CommandReceipt {
+    let Some(CoreResponse::Ack(receipt)) = response.try_recv().unwrap() else {
+        panic!("expected settled audition resume receipt");
+    };
+    receipt
+}
+
 #[test]
 fn master_bypass_async_resume_open_failure_stops_and_reenables_bypass() {
     let (directory, mut core) = fixture();
@@ -3332,6 +3351,9 @@ fn master_bypass_async_resume_open_failure_stops_and_reenables_bypass() {
     complete(&mut core);
     core.processing_bypass(true).unwrap();
     core.processing_bypass(false).unwrap();
+    let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    core.processing_event(event);
+    assert!(!core.preferences.settings().processing_bypassed);
     let generation = core.transport.generation;
     core.audio_event(AudioEvent::Failed {
         generation,
@@ -3347,7 +3369,7 @@ fn master_bypass_async_resume_open_failure_stops_and_reenables_bypass() {
             .processing_bypassed
     );
     assert!(core.processing.audition_projection().is_none());
-    assert!(core.processing.resume_audition().is_err());
+    assert!(core.processing.audition_pcm().is_none());
 }
 
 #[test]
@@ -3373,7 +3395,7 @@ fn original_clears_cached_and_live_selection_without_revoking_result_capabilitie
             .unwrap();
         assert!(core.transport.generation > generation);
         assert!(core.processing.audition_projection().is_none());
-        assert!(core.processing.resume_audition().is_err());
+        assert!(core.processing.audition_pcm().is_none());
         loop {
             if let AudioCommand::Audition {
                 pcm, generation, ..
@@ -3412,7 +3434,7 @@ fn master_bypass_stop_and_next_source_revoke_retained_selection() {
             core.stop().unwrap();
         }
         assert!(core.processing.audition_projection().is_none());
-        assert!(core.processing.resume_audition().is_err());
+        assert!(core.processing.audition_pcm().is_none());
         assert_completed_graph_nodes(&core.processing_status(1).unwrap());
         core.processing_bypass(false).unwrap();
         core.publish();
@@ -3583,6 +3605,19 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
         core.processing_bypass(true).unwrap();
         assert_eq!(core.processing.audition_projection(), Some(selected));
         recorded_audio(&audio_port(&mut core), &commands);
+        let release = core.processing.hold_reclamation();
+        let mut response = request_processing_resume(
+            &mut core,
+            Command::ToggleProcessing {
+                target: ProcessingToggle::Bypass,
+            },
+        );
+        assert!(core.preferences.settings().processing_bypassed);
+        assert!(
+            Config::load(&core.state.configuration.config_path)
+                .unwrap()
+                .processing_bypassed
+        );
         core.processing_graph_edit(
             0,
             GraphEdit::Replace {
@@ -3591,7 +3626,28 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
             },
         )
         .unwrap();
-        core.processing_bypass(false).unwrap();
+        let edited_revision = core.preferences.settings().processing_graph.revision;
+        release.send(()).unwrap();
+        let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+        assert!(matches!(
+            event,
+            rivu_processing::Event::ResumePrepared { .. }
+        ));
+        assert!(response.try_recv().unwrap().is_none());
+        core.processing_event(event);
+        assert!(!core.preferences.settings().processing_bypassed);
+        let receipt = ready_resume_receipt(response);
+        assert!(matches!(receipt.output(), Some(CommandOutput::None)));
+        assert_eq!(receipt.revision, core.shared.read().system.revision);
+        assert!(
+            !Config::load(&core.state.configuration.config_path)
+                .unwrap()
+                .processing_bypassed
+        );
+        assert_eq!(
+            core.preferences.settings().processing_graph.revision,
+            edited_revision
+        );
         assert_eq!(core.processing.audition_projection(), Some(selected));
         assert!(core.transport.generation > before);
         loop {
@@ -3621,6 +3677,207 @@ fn master_bypass_live_roundtrip_rebuilds_frozen_runner_and_checks_source() {
         core.processing_bypass(false).unwrap();
         assert!(!core.preferences.settings().processing_bypassed);
     }
+}
+
+#[test]
+fn master_bypass_rejects_superseded_and_stale_live_resume_completions() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let commands = recording_audio(&mut core);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+        .unwrap();
+    complete(&mut core);
+    let selected = core.processing.audition_projection().unwrap();
+    core.processing_bypass(true).unwrap();
+    recorded_audio(&audio_port(&mut core), &commands);
+    let generation = core.transport.generation;
+
+    let resume = || Command::ProcessingBypass { bypassed: false };
+    let first_reply = request_processing_resume(&mut core, resume());
+    let first = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    let bypass = operation_ack(
+        &mut core,
+        Operation::Command(Command::ToggleProcessing {
+            target: ProcessingToggle::Bypass,
+        }),
+    );
+    assert!(bypass.is_success());
+    let rejected = ready_resume_receipt(first_reply);
+    assert_eq!(rejected.status(), AckStatus::Failed);
+    assert!(rejected.error().unwrap().contains("superseded"));
+    let mut second_reply = request_processing_resume(&mut core, resume());
+    core.processing_event(first);
+    assert!(core.preferences.settings().processing_bypassed);
+    assert_eq!(core.transport.generation, generation);
+    assert_eq!(core.processing.audition_projection(), Some(selected));
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
+    assert!(second_reply.try_recv().unwrap().is_none());
+
+    let second = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    std::fs::write(directory.path().join("1.wav"), b"changed source").unwrap();
+    core.processing_event(second);
+    let rejected = ready_resume_receipt(second_reply);
+    assert_eq!(rejected.status(), AckStatus::Failed);
+    assert!(rejected.error().unwrap().contains("stale"));
+    assert!(core.preferences.settings().processing_bypassed);
+    assert_eq!(core.transport.generation, generation);
+    assert!(core.processing.audition_projection().is_none());
+    assert!(
+        core.state
+            .system
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("stale")
+    );
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
+}
+
+#[test]
+fn master_bypass_cancels_blocked_resume_on_stop_and_shutdown() {
+    for shutdown in [false, true] {
+        let (directory, mut core) = fixture();
+        source(directory.path());
+        let commands = recording_audio(&mut core);
+        core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+            .unwrap();
+        complete(&mut core);
+        core.processing_bypass(true).unwrap();
+        recorded_audio(&audio_port(&mut core), &commands);
+
+        let release = core.processing.hold_reclamation();
+        let command = || Command::ProcessingBypass { bypassed: false };
+        let older = request_processing_resume(&mut core, command());
+        let reply = request_processing_resume(&mut core, command());
+        let receipt = ready_resume_receipt(older);
+        assert_eq!(receipt.status(), AckStatus::Failed);
+        assert!(receipt.error().unwrap().contains("superseded"));
+
+        let reason = if shutdown {
+            let (control, _shutdown) = CoreLifecycle::new();
+            assert!(!core.business_event(dispatch::BusinessEvent::Shutdown(control)));
+            "shutdown"
+        } else {
+            let stop = operation_ack(&mut core, Operation::Command(Command::Stop));
+            assert!(stop.is_success());
+            "playback stopped"
+        };
+        let receipt = ready_resume_receipt(reply);
+        assert_eq!(receipt.status(), AckStatus::Failed);
+        assert!(receipt.error().unwrap().contains(reason));
+
+        if !shutdown {
+            release.send(()).unwrap();
+            let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+            let rivu_processing::Event::ResumePrepared {
+                result: Err(error), ..
+            } = &event
+            else {
+                panic!("cancelled worker must skip runner preparation");
+            };
+            assert!(error.to_string().contains("cancelled"));
+            core.processing_event(event);
+        }
+        // Shutdown joins even with the barrier held: closing event delivery
+        // releases the test hold, without granting the worker permission to prepare.
+        core.shutdown_processing();
+        assert!(core.preferences.settings().processing_bypassed);
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert!(core.processing.audition_projection().is_none());
+        assert!(
+            recorded_audio(&audio_port(&mut core), &commands)
+                .iter()
+                .all(|command| !matches!(command, AudioCommand::GraphAudition { .. }))
+        );
+    }
+}
+
+#[test]
+fn master_bypass_live_resume_rechecks_capacity_and_persistence_at_cutover() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let commands = recording_audio(&mut core);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+        .unwrap();
+    complete(&mut core);
+    core.processing_bypass(true).unwrap();
+    recorded_audio(&audio_port(&mut core), &commands);
+    let selected = core.processing.audition_projection();
+    let generation = core.transport.generation;
+
+    let resume = || Command::ProcessingBypass { bypassed: false };
+    let reply = request_processing_resume(&mut core, resume());
+    let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    let (limited, receive) = async_channel::bounded(1);
+    let previous = core.engine.replace_commands(limited);
+    core.processing_event(event);
+    let receipt = ready_resume_receipt(reply);
+    assert_eq!(receipt.status(), AckStatus::Failed);
+    assert!(receipt.error().unwrap().contains("capacity"));
+    assert!(receive.try_recv().is_err());
+    assert!(core.state.system.last_error.take().is_some());
+    assert!(core.preferences.settings().processing_bypassed);
+    assert_eq!(core.processing.audition_projection(), selected);
+    assert_eq!(core.transport.generation, generation);
+
+    core.engine.replace_commands(previous);
+    let reply = request_processing_resume(&mut core, resume());
+    let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    core.state.configuration.config_path = directory.path().to_path_buf();
+    core.processing_event(event);
+    let receipt = ready_resume_receipt(reply);
+    assert_eq!(receipt.status(), AckStatus::Failed);
+    assert!(receipt.error().unwrap().contains("Saving configuration"));
+    assert!(core.state.system.last_error.is_some());
+    assert!(core.preferences.settings().processing_bypassed);
+    assert_eq!(core.processing.audition_projection(), selected);
+    assert_eq!(core.transport.generation, generation);
+    assert!(recorded_audio(&audio_port(&mut core), &commands).is_empty());
+}
+
+#[test]
+fn master_bypass_live_resume_restores_bypass_when_route_is_rejected() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let _audio = recording_audio(&mut core);
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Realtime)
+        .unwrap();
+    complete(&mut core);
+    core.processing_bypass(true).unwrap();
+    let generation = core.transport.generation;
+
+    let reply = request_processing_resume(&mut core, Command::ProcessingBypass { bypassed: false });
+    let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    let (commands, receive) = async_channel::bounded(4);
+    let original = core.engine.replace_commands(commands);
+    let worker = thread::spawn(move || {
+        let AudioCommand::StopAndSnapshot(stopped) = receive.recv_blocking().unwrap().command
+        else {
+            panic!("resume must retire the original route before replacement");
+        };
+        // The worker goes away after acknowledging its final source snapshot.
+        receive.close();
+        stopped
+            .send(audio::AudioSnapshot {
+                generation,
+                ..Default::default()
+            })
+            .unwrap();
+    });
+    core.processing_event(event);
+    core.engine.replace_commands(original);
+    worker.join().unwrap();
+
+    let receipt = ready_resume_receipt(reply);
+    assert_eq!(receipt.status(), AckStatus::Failed);
+    assert!(receipt.error().unwrap().contains("Audio worker stopped"));
+    assert!(core.preferences.settings().processing_bypassed);
+    assert!(
+        Config::load(&core.state.configuration.config_path)
+            .unwrap()
+            .processing_bypassed
+    );
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
 }
 
 #[test]
@@ -4969,7 +5226,9 @@ fn failed_cancelled_or_revoked_mix_preparation_never_opens_its_source() {
                 .command(Command::PlayQueue { queue_id: 2 })
                 .map(|_| ())
                 .unwrap(),
-            "bypass" => core.processing_bypass(true).unwrap(),
+            "bypass" => {
+                core.processing_bypass(true).unwrap();
+            }
             "failure" => {}
             _ => unreachable!(),
         }
