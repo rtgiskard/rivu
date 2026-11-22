@@ -642,6 +642,22 @@ impl FieldKey {
     }
 }
 
+fn denoise_unit(field: DenoiseField, bins: impl FnOnce() -> SharedString) -> SharedString {
+    match field {
+        DenoiseField::SpectralGainFloorDb => "dB",
+        DenoiseField::AttackMs | DenoiseField::ReleaseMs => "ms",
+        DenoiseField::HumFundamentalHz => "Hz",
+        DenoiseField::SmoothingBins => return bins(),
+        DenoiseField::StationaryNoiseDbfs | DenoiseField::ImpulseFloorDbfs => "dBFS",
+        _ => "",
+    }
+    .into()
+}
+
+fn numeric_parameter_input(input: Entity<Input>) -> Div {
+    div().w(rems(5.)).max_w_full().min_w_0().child(input)
+}
+
 fn page_parameter_command<'a>(
     page: Page,
     fields: impl Iterator<Item = (FieldKey, &'a str)>,
@@ -1567,19 +1583,48 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let label = self.tr(label_id);
         let input = self.field_input(panel, key, &label, cx);
-        let hint = if key == FieldKey::ExportRate {
-            None
-        } else {
-            self.field_help(key)
+        let control = match key {
+            FieldKey::PresetName | FieldKey::PresetPath => {
+                return self.parameter_row(
+                    theme,
+                    SharedString::from(format!("field-label-{key:?}")),
+                    label,
+                    column()
+                        .gap_1()
+                        .child(input)
+                        .when_some(self.field_help(key), |view, help| {
+                            view.child(caption(theme, help))
+                        }),
+                );
+            }
+            FieldKey::Neural(field) if field.input_kind() == FieldInputKind::Path => {
+                div().min_w_0().child(input)
+            }
+            _ => {
+                let unit = match key {
+                    FieldKey::Denoise(field) => {
+                        denoise_unit(field, || self.tr("processing-smoothing-unit"))
+                    }
+                    FieldKey::Neural(NeuralField::SpeechAttenuationLimitDb)
+                    | FieldKey::VocalGain
+                    | FieldKey::AccompanimentGain => "dB".into(),
+                    FieldKey::ProfileStart | FieldKey::ProfileEnd => "s".into(),
+                    FieldKey::ExportBitrate => "kb/s".into(),
+                    _ => SharedString::default(),
+                };
+                row()
+                    .gap_1()
+                    .child(numeric_parameter_input(input))
+                    .when(!unit.is_empty(), |view| {
+                        view.child(caption(theme, unit).flex_shrink_0())
+                    })
+            }
         };
         self.parameter_row(
             theme,
             SharedString::from(format!("field-label-{key:?}")),
             label,
-            column()
-                .gap_1()
-                .child(input)
-                .when_some(hint, |view, help| view.child(caption(theme, help))),
+            control,
         )
     }
 
@@ -1590,15 +1635,16 @@ impl AudioProcessing {
         label: SharedString,
         control: impl IntoElement,
     ) -> Div {
-        let compact = self.page == Page::Export;
+        let preset = self.page == Page::Equalizer;
         row()
             .min_w_0()
             .items_center()
-            .gap_2()
+            .gap_1()
             .child(
                 div()
-                    .w(relative(0.42))
-                    .when(compact, |label| label.max_w_32())
+                    .w(rems(7.))
+                    .max_w(relative(0.42))
+                    .when(preset, |label| label.w(relative(0.42)))
                     .flex_shrink_0()
                     .min_w_0()
                     .truncate()
@@ -2448,30 +2494,25 @@ impl AudioProcessing {
                     theme,
                     "speech-post-filter-label",
                     self.tr("processing-speech-post-filter"),
-                    column()
-                        .gap_1()
-                        .child(
-                            checkbox(
-                                "neural.speech_post_filter",
-                                self.tr("processing-speech-post-filter-model"),
-                                neural.speech_post_filter,
-                                true,
-                                cx,
-                                |this, _, cx| {
-                                    this.send(
-                                        Command::ToggleProcessing {
-                                            target: ProcessingToggle::SpeechPostFilter,
-                                        },
-                                        cx,
-                                    )
+                    checkbox(
+                        "neural.speech_post_filter",
+                        self.tr("processing-speech-post-filter-model"),
+                        neural.speech_post_filter,
+                        true,
+                        cx,
+                        |this, _, cx| {
+                            this.send(
+                                Command::ToggleProcessing {
+                                    target: ProcessingToggle::SpeechPostFilter,
                                 },
+                                cx,
                             )
-                            .debug_selector(|| "speech-post-filter".to_owned())
-                            .aria_label(self.tr("processing-speech-post-filter"))
-                            .aria_description(help.clone())
-                            .tooltip(rivu_ui::text_tooltip(help.clone())),
-                        )
-                        .child(caption(theme, help)),
+                        },
+                    )
+                    .debug_selector(|| "speech-post-filter".to_owned())
+                    .aria_label(self.tr("processing-speech-post-filter"))
+                    .aria_description(help.clone())
+                    .tooltip(rivu_ui::text_tooltip(help)),
                 ),
             );
         }

@@ -759,7 +759,7 @@ impl AudioProcessing {
         let destination = row()
             .min_w_0()
             .items_center()
-            .gap_2()
+            .gap_1()
             .id(("audio-export-path", panel))
             .debug_selector(move || format!("audio-export-path-{panel}"))
             .child(

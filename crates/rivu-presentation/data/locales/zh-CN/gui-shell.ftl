@@ -140,6 +140,7 @@ processing-release = 增益恢复时间
 processing-release-input-help = 0…10000 ms
 processing-smoothing = 频率平滑半径
 processing-smoothing-input-help = 0…16 个频点
+processing-smoothing-unit = 频点
 processing-transients = 瞬态保护
 processing-transients-input-help = 0…1
 processing-wet = 湿声比例

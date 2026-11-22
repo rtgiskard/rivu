@@ -1,6 +1,6 @@
 //! Typed node drafts and their optimistic, atomic commit boundary.
 use super::*;
-use rivu_ui::{FormField, IconButton, IconButtonDensity, IconButtonStyle};
+use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DraftStamp {
@@ -534,25 +534,42 @@ impl AudioProcessing {
             .into_any_element()
         } else {
             let input = self.field_input(panel, key, &label, cx);
-            let editor = if let Some(step) = descriptor.numeric_step() {
-                let mut numeric = rivu_ui::NumericInput::new(input);
-                for (sign, delta) in [("−", -step), ("+", step)] {
-                    let target = target.clone();
-                    numeric = numeric.step(
-                        crate::gui::appearance::material::button(
-                            SharedString::from(format!("graph-step-{panel}-{key:?}-{sign}")),
-                            SharedString::from(format!("{sign}{}", step)),
-                            cx,
-                            move |this, _, cx| {
-                                if target.current(this, cx) {
-                                    this.step_graph_field(key, delta, cx);
-                                }
-                            },
-                        )
-                        .debug_selector(move || format!("graph-step-{panel}-{key:?}-{sign}")),
-                    );
+            let editor = if !descriptor.is_path() {
+                let unit = match descriptor {
+                    GraphField::Denoise(field) => {
+                        denoise_unit(field, || self.tr("processing-smoothing-unit"))
+                    }
+                    GraphField::Neural(NeuralField::SpeechAttenuationLimitDb)
+                    | GraphField::MixGain(_) => "dB".into(),
+                    GraphField::ProfileStart | GraphField::ProfileEnd => "s".into(),
+                    _ => SharedString::default(),
+                };
+                let value = row()
+                    .gap_1()
+                    .child(numeric_parameter_input(input))
+                    .when(!unit.is_empty(), |view| view.child(caption(theme, unit)));
+                let mut numeric = row().gap_1().flex_wrap().child(value);
+                if let Some(step) = descriptor.numeric_step() {
+                    let mut steps = row().gap_1();
+                    for (sign, delta) in [("−", -step), ("+", step)] {
+                        let target = target.clone();
+                        steps = steps.child(
+                            crate::gui::appearance::material::button(
+                                SharedString::from(format!("graph-step-{panel}-{key:?}-{sign}")),
+                                SharedString::from(format!("{sign}{}", step)),
+                                cx,
+                                move |this, _, cx| {
+                                    if target.current(this, cx) {
+                                        this.step_graph_field(key, delta, cx);
+                                    }
+                                },
+                            )
+                            .debug_selector(move || format!("graph-step-{panel}-{key:?}-{sign}")),
+                        );
+                    }
+                    numeric = numeric.child(steps);
                 }
-                numeric.into_div()
+                numeric
             } else {
                 row().gap_1().child(div().flex_1().min_w_0().child(input))
             };
@@ -576,17 +593,14 @@ impl AudioProcessing {
             }
             editor.into_any_element()
         };
-        let label = if dirty {
-            format!("{label} · {}", self.tr("processing-draft"))
-        } else {
-            label
-        };
         let apply_key = key;
-        let mut field = FormField::new(theme, label, control);
-        if let Some(help) = help {
-            field = field.hint(help);
-        }
-        field = field.action(disabled_control(
+        let field = self.parameter_row(
+            theme,
+            SharedString::from(format!("graph-field-label-{panel}-{key:?}")),
+            label.into(),
+            control,
+        );
+        let action = disabled_control(
             theme,
             crate::gui::appearance::material::button(
                 SharedString::from(format!("graph-apply-{panel}-{key:?}")),
@@ -600,11 +614,16 @@ impl AudioProcessing {
             )
             .self_start(),
             self.graph_busy() || !dirty,
-        ));
-        if let Some(error) = self.graph_editor.field_errors.get(&key) {
-            field = field.error(error.clone());
-        }
-        field.into_div()
+        );
+        column()
+            .gap_1()
+            .child(field)
+            .when_some(self.graph_editor.field_errors.get(&key), |view, error| {
+                view.child(caption(theme, error.clone()).text_color(rgb(theme.error)))
+            })
+            .child(row().gap_1().flex_wrap().child(action).when(dirty, |view| {
+                view.child(caption(theme, self.tr("processing-draft")))
+            }))
     }
 
     pub(super) fn activate_graph_profile(

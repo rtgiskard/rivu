@@ -140,6 +140,7 @@ processing-release = Recovery release
 processing-release-input-help = 0…10000 ms
 processing-smoothing = Frequency smoothing radius
 processing-smoothing-input-help = 0…16 bins
+processing-smoothing-unit = bins
 processing-transients = Transient protection
 processing-transients-input-help = 0…1
 processing-wet = Wet blend
