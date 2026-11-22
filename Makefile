@@ -83,6 +83,7 @@ package:
 	trap 'rm -rf "$$stage"' EXIT; \
 	trap 'exit 1' HUP INT TERM; \
 	$(MAKE) install PREFIX= DESTDIR="$$stage/$(PACKAGE_NAME)"; \
+	install -m644 licenses/THIRD-PARTY-NOTICES.adoc "$$stage/$(PACKAGE_NAME)/"; \
 	{ \
 		printf 'Build: %s\n' "$(RIVU_GIT_VERSION)"; \
 		printf 'RUSTFLAGS: %s\n' "$${RUSTFLAGS:-<unset>}"; \
