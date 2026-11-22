@@ -6,7 +6,7 @@ use rivu_protocol::{
     query_tracking::QuerySubmission,
     response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 pub(super) const DIRECTORY_WORKERS: usize = 4;
 #[derive(Default)]
@@ -14,7 +14,7 @@ pub(super) struct LibraryRequests {
     generation: u64,
     directory_workers: HashMap<library::TreeBranch, (usize, u64)>,
     directory_queued: VecDeque<(library::TreeBranch, usize)>,
-    root_count_workers: HashSet<usize>,
+    root_count_worker: Option<usize>,
 }
 impl LibraryRequests {
     pub(in crate::gui) fn cancel_directory_demand(&mut self) {
@@ -42,7 +42,7 @@ impl LibraryRequests {
     }
 
     pub(super) fn reads_pending(&self) -> bool {
-        !self.directory_workers.is_empty() || !self.root_count_workers.is_empty()
+        !self.directory_workers.is_empty() || self.root_count_worker.is_some()
     }
 }
 /// Local publication needs a redraw; queued demand alone must wait for a worker.
@@ -297,12 +297,12 @@ impl Library {
         structure: u64,
     ) -> Option<RootCountRead> {
         self.library.sync_root_counts(roots, structure);
-        if !self.requests.root_count_workers.is_empty() || self.library.root_counts_settled() {
+        if self.requests.root_count_worker.is_some() || self.library.root_counts_settled() {
             return None;
         }
-        let (generation, batches) = self.library.begin_root_counts(roots, structure);
-        let offset = batches.into_iter().next()?;
-        self.requests.root_count_workers.insert(offset);
+        let (generation, offset) = self.library.begin_root_counts(roots, structure);
+        let offset = offset?;
+        self.requests.root_count_worker = Some(offset);
         Some(RootCountRead {
             query: Query::LibraryRootCounts {
                 roots: roots
@@ -322,12 +322,14 @@ impl Library {
         revisions: QueryRevisions,
         response: QueryResponse,
     ) -> Option<String> {
-        self.requests.root_count_workers.remove(&read.offset);
+        self.retire_root_count_read(&read);
         self.publish_root_count_read(&read, roots, revisions, response)
     }
 
     pub(super) fn retire_root_count_read(&mut self, read: &RootCountRead) {
-        self.requests.root_count_workers.remove(&read.offset);
+        if self.requests.root_count_worker == Some(read.offset) {
+            self.requests.root_count_worker = None;
+        }
     }
 
     pub(super) fn publish_root_count_read(
@@ -1159,7 +1161,6 @@ mod tests {
                 assert_eq!(browser.requests.directory_queued.len(), 1);
                 assert!(browser.prepare_root_count_read(&roots, 0).is_none());
                 assert_eq!(browser.requests.directory_workers.len(), DIRECTORY_WORKERS);
-                assert_eq!(browser.requests.root_count_workers.len(), 1);
             }
             browser.abandon_directory_read(&reads[0]);
             let (branch, offset) = browser.next_directory_demand(true).unwrap();

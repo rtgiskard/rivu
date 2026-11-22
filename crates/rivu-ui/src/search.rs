@@ -13,6 +13,9 @@ pub enum SearchEvent {
     Changed(Option<String>),
 }
 
+/// Enter was pressed with no pending change to the applied query.
+pub struct SearchSubmitted;
+
 /// Labels are resolved by the host; the field does not load localization resources.
 pub struct SearchLabels {
     pub name: SharedString,
@@ -32,12 +35,13 @@ pub struct SearchField {
     query: Option<String>,
     generation: u64,
     timer: Option<Task<()>>,
-    counts: Option<(usize, usize)>,
+    counts: Option<(Option<usize>, Option<usize>)>,
     _subscription: Subscription,
     blur_subscription: Option<Subscription>,
 }
 
 impl EventEmitter<SearchEvent> for SearchField {}
+impl EventEmitter<SearchSubmitted> for SearchField {}
 
 impl SearchField {
     /// Resolve both collapsed and expanded backgrounds from the current host surface.
@@ -51,10 +55,10 @@ impl SearchField {
             Input::new(labels.name.clone(), "", labels.placeholder.clone(), cx).embedded()
         });
         input.update(cx, |input, cx| input.set_trailing_text("—".into(), cx));
-        let subscription = cx.subscribe(&input, |this, _, event, cx| {
-            if matches!(event, InputEvent::Changed { user: true, .. }) {
-                this.edited(cx);
-            }
+        let subscription = cx.subscribe(&input, |this, _, event, cx| match event {
+            InputEvent::Changed { user: true, .. } => this.edited(cx),
+            InputEvent::Submit if this.timer.is_none() => cx.emit(SearchSubmitted),
+            _ => {}
         });
         Self {
             labels,
@@ -176,6 +180,21 @@ impl SearchField {
         matched: usize,
         total: usize,
         format: impl FnOnce(usize, usize) -> SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_count_parts(
+            Some(matched),
+            Some(total),
+            |_, _| format(matched, total),
+            cx,
+        );
+    }
+
+    pub fn set_count_parts(
+        &mut self,
+        matched: Option<usize>,
+        total: Option<usize>,
+        format: impl FnOnce(Option<usize>, Option<usize>) -> SharedString,
         cx: &mut Context<Self>,
     ) {
         if self.counts != Some((matched, total)) {
@@ -557,9 +576,25 @@ mod tests {
     #[test]
     fn clearing_search_cancels_pending_query_and_new_edits_still_publish() {
         let mut cx = TestAppContext::single();
+        cx.update(Input::init);
         let delay = Duration::from_millis(100);
         let (window, search, published, _subscription) = observed_search_window(&mut cx, delay);
         let handle = window.into();
+        let submissions = Rc::new(std::cell::Cell::new(0));
+        let _submit_subscription = cx.update(|cx| {
+            let submissions = submissions.clone();
+            cx.subscribe(&search, move |_, _: &SearchSubmitted, _| {
+                submissions.set(submissions.get() + 1);
+            })
+        });
+        let submit = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, cx| {
+                search.update(cx, |search, cx| search.focus(window, cx));
+                window.draw(cx).clear(cx);
+                window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+            })
+            .unwrap();
+        };
         let edit = |text: &str, cx: &mut TestAppContext| {
             cx.update_window(handle, |_, window, cx| {
                 search.update(cx, |search, cx| {
@@ -581,8 +616,13 @@ mod tests {
         assert_eq!(*published.borrow(), Vec::<Option<String>>::new());
 
         edit("current", &mut cx);
+        submit(&mut cx);
+        assert_eq!(submissions.get(), 0);
         cx.executor().advance_clock(delay);
         cx.run_until_parked();
+        assert_eq!(*published.borrow(), vec![Some("current".into())]);
+        submit(&mut cx);
+        assert_eq!(submissions.get(), 1);
         assert_eq!(*published.borrow(), vec![Some("current".into())]);
         // Returning to the applied query must cancel a different pending query.
         edit("obsolete", &mut cx);

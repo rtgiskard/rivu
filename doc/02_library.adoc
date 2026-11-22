@@ -136,9 +136,9 @@ by default; choices survive restart. Hover truncated rows for full metadata and 
 
 Root totals include missing files and tracks in unloaded or collapsed directories.
 See <<desktop-list-search,Desktop list search>> for filtered counts. If a count
-fails, the directory action retries it before returning to Rescan, including when
-filtered counts are waiting for a failed root total. Changing filters does not
-retry that failed dependency.
+fails, focus the Library search field and press Enter after the current search
+has applied. This retries unavailable counts without rescanning files or clearing
+the selection. Rescan and Other Tracks' Check action still operate on files.
 
 Dragging a directory adds its full contents, regardless of display filters. To add
 only matching, favorite, or missing tracks, select and drag the track rows.
@@ -193,11 +193,12 @@ literal substring matches, not wildcard patterns: `%` and `_` match themselves.
 Track searches cover the whole collection, including unloaded pages, rather
 than just the rows on screen.
 
-Each Library root shows its recursive track total. While any text, favorite, or
-missing-file filter is active, it shows matching tracks / total tracks instead,
-including tracks in collapsed folders and unloaded pages. Roots with no matches
-remain visible with a zero matching count; a pending or failed count is shown as
-an em dash, not zero. Clear all filters to return to the total alone.
+Each Library root and Other Tracks show their unfiltered track totals. While a
+text, favorite, or missing-file filter is active, these rows and the search
+caption show matching tracks / total tracks. The two counts load independently:
+`24 / -` means the total is unavailable, and `- / 1200` means the matching
+count is unavailable. Zero is shown only for a known empty side. Roots remain
+visible with no matches. Clear all filters to return the rows to totals alone.
 
 Changing the search clears that list's selection. Select all operates on matching
 rows only. Queue and playlist drag reordering is unavailable while filtered; clear

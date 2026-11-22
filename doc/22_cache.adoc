@@ -217,8 +217,9 @@ retry preserves valid pages, but obsolete authority requires fresh page reads.
 |===
 |Owner |Retained demand and execution boundary
 |Library browser
-|Separate root-total and search-count slots; configured-root rows are local data
-and remain visible without counts. Root aggregates count each track once.
+|Separate batched root-total, Other Tracks total, and filtered-count slots.
+Configured-root rows remain visible without counts. Root aggregates count each
+track once.
 |Library tree
 |At most four physical reads and four coalesced pending branch demands. Collapsing
 discards queued subtree demand, not submitted slots; repeated demand does not
@@ -339,14 +340,13 @@ Queue reconciliation failures retain occurrences but leave positions unavailable
 Selected-playlist summary failures remain scoped to selection/catalog freshness;
 catalog invalidation forgets counts until a current result restores them.
 
-The GUI issues Library search counts as `LibraryRootPage` with `limit = 0` and
-`sort = Id`. Changing display sort does not change that query, but statistics
-and bitrate changes can stale its row-query stamp and trigger another request,
-even when Store reuses the scalar total. Matching-count reads wait for the
-current unfiltered root-count snapshot rather than querying root totals again.
-Unfiltered root totals and `OtherTracksCount` follow structure freshness and
-are reusable across filter changes. Overlapping configured roots count each
-track once.
+Library matching counts use count-only `LibraryRootPage` and `OtherTracksPage`
+reads (`limit = 0`, `sort = Id`). They follow count membership/search freshness,
+not display order, statistics, or bitrate. They do not wait for unfiltered totals.
+Batched root totals and `OtherTracksCount` follow structure freshness and survive
+filter changes. A failed total leaves its side unavailable without invalidating
+matching counts. The unfiltered view reuses the total without issuing matching
+reads.
 
 Loading text waits 150 ms while placeholders retain geometry; errors and retries
 are immediate. A cancellable per-view wake follows current requests and retires on

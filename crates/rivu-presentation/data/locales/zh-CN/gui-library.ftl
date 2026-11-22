@@ -488,10 +488,6 @@ gl-retry-folder = 重试加载文件夹
 
 gl-empty = 空
 
-gl-retry-root-counts = 重新统计 { $path } 的已扫描曲目
-
-gl-retry-other-counts = 重新统计其它曲目
-
 gl-rescan-path = 重新扫描 { $path }
 
 gl-playlist-name-required = 请输入播放列表名称。

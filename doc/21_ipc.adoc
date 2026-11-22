@@ -720,15 +720,17 @@ commit actually changes the `bitrate_bps`/`bitrate_exact` pair.
 `QueryRevisions.bitrate` participates in stamps for bitrate-bearing row queries:
 Track, library/directory rows, album members, Queue rows, playlist entries, and
 duplicate members. Album representatives do not carry bitrate. A row query
-keeps its stamp when used as a count-only page (`limit = 0`); dedicated counts,
-statistics, summaries without Track payloads, and ID/location-only queries do
-not select bitrate. Bitrate-only publication does not advance structure,
+normally keeps its stamp at `limit = 0`. The exceptions are `LibraryRootPage`
+and `OtherTracksPage`: at zero limit they select `counts` and `structure`
+instead of `library` and `bitrate`. Dedicated counts, statistics, summaries
+without Track payloads, and ID/location-only queries do not select bitrate.
+Bitrate-only publication does not advance structure,
 collection membership, or count revisions, and does not query Queue, album, or
 playlist membership.
 
 `LibrarySnapshot.count_revision` / `QueryRevisions.counts` track catalog matching
 and membership facts independently of row freshness. It supports scalar lookup
-reuse, not freshness of a count-only row-query response. See
+reuse and freshness of those two count-only pages. See
 link:22_cache.adoc#core-owned-lookup-retention[Core lookup retention].
 
 For display reuse, range anchors and consumer publication rights, see

@@ -889,6 +889,103 @@ mod tests {
     }
 
     #[test]
+    fn root_and_other_count_reads_accept_payload_changes_but_reject_changed_membership() {
+        use rivu_protocol::model::{ConfigMutation, LibrarySort};
+
+        let (directory, mut core) = super::super::tests::fixture();
+        let root = directory.path().to_path_buf();
+        core.mutate_config(ConfigMutation::RemoveLibraryRoot(root.clone()))
+            .unwrap();
+        core.publish();
+        let path = root.join("library.db");
+        let fence = Arc::new(ReadFence::default());
+        let mut reader = None;
+        let queries = [
+            Query::LibraryRootPage {
+                path: root.clone(),
+                query: Some("Track 1".into()),
+                favorite: Some(true),
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 0,
+            },
+            Query::OtherTracksPage {
+                query: Some("Track 1".into()),
+                favorite: Some(true),
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 0,
+            },
+        ];
+        let captured = core.shared.read().clone();
+        let stats = core.store.increment_play_count(1).unwrap();
+        core.update_track_stats(1, stats).unwrap();
+        core.publish();
+        let assert_total = |response: QueryResponse, total| {
+            let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+                panic!("expected a count-only library page: {:?}", response.result);
+            };
+            assert_eq!(page.total, total);
+            assert!(page.rows.is_empty());
+        };
+        for query in &queries {
+            let response = execute_read_at(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                ReadState::capture(&captured, query),
+                query.clone(),
+            );
+            assert_total(response, 0);
+        }
+
+        core.command(Command::SetFavorite {
+            track_ids: vec![1],
+            favorite: true,
+        })
+        .unwrap();
+        core.publish();
+        let before_roots = core.shared.read().clone();
+        for query in &queries {
+            let obsolete = execute_read_at(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                ReadState::capture(&captured, query),
+                query.clone(),
+            );
+            assert!(matches!(obsolete.result, Err(QueryError::RevisionChanged)));
+            assert_total(
+                execute_read(&core, &path, &mut reader, &fence, query.clone()),
+                1,
+            );
+        }
+
+        core.mutate_config(ConfigMutation::AddLibraryRoot(root))
+            .unwrap();
+        core.publish();
+        for (query, total) in queries.into_iter().zip([1, 0]) {
+            let obsolete = execute_read_at(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                ReadState::capture(&before_roots, &query),
+                query.clone(),
+            );
+            assert!(matches!(obsolete.result, Err(QueryError::RevisionChanged)));
+            assert_total(
+                execute_read(&core, &path, &mut reader, &fence, query),
+                total,
+            );
+        }
+    }
+
+    #[test]
     fn playback_rows_refresh_without_recounting_catalog_membership() {
         use rivu_protocol::model::{AlbumKey, AlbumSort, LibrarySort};
 

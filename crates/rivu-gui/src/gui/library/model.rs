@@ -3,10 +3,10 @@ use super::{DirectoryTree, LibraryNode, TreeBranch, selection::LibrarySelection}
 use crate::gui::coordination::manual_actions::ManualIntentId;
 use gpui::ScrollStrategy;
 use rivu_presentation::refresh::RefreshDeadline;
-use rivu_protocol::model::{DirectoryRow, LibrarySort, Page, Query};
-use rivu_protocol::query_tracking::QueryTracker;
-use rivu_protocol::response::QueryRevisions;
-use std::{collections::HashSet, ops::Range, sync::Arc, time::Instant};
+use rivu_protocol::model::{DirectoryRow, LibrarySort, Page, Query, QueryStamp};
+use rivu_protocol::query_tracking::{QueryEpoch, QueryTracker};
+use rivu_protocol::response::{QueryError, QueryResponse, QueryRevisions, ViewResponse};
+use std::{collections::HashSet, ops::Range, rc::Rc, time::Instant};
 
 pub(in crate::gui) fn merge_selection(
     tracks: &mut HashSet<i64>,
@@ -33,11 +33,11 @@ pub(in crate::gui) fn merge_selection(
 struct RootCounts {
     owner: QueryTracker,
     roots: Vec<std::path::PathBuf>,
-    counted_roots: Arc<[usize]>,
-    totals: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
-    retained: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
+    totals: std::collections::HashMap<std::path::PathBuf, usize>,
+    aggregate: Option<usize>,
+    retained: std::collections::HashMap<std::path::PathBuf, usize>,
     retention: RefreshDeadline,
-    pending: HashSet<usize>,
+    pending: Option<usize>,
     failed: HashSet<usize>,
     settled: bool,
     retired: bool,
@@ -46,10 +46,11 @@ struct RootCounts {
 impl RootCounts {
     fn invalidate(&mut self) {
         self.owner.cancel();
-        self.totals = Arc::default();
-        self.retained = Arc::default();
+        self.totals.clear();
+        self.aggregate = None;
+        self.retained.clear();
         self.retention.clear();
-        self.pending.clear();
+        self.pending = None;
         self.failed.clear();
         self.settled = false;
         self.retired = false;
@@ -58,36 +59,74 @@ impl RootCounts {
 
 #[derive(Default)]
 struct SearchCounts {
-    pub(super) projection: QueryTracker,
+    epoch: QueryEpoch,
     // Logical cancellation retires the epoch, not the physical worker slot.
     worker: Option<u64>,
-    failed: bool,
-    roots: Vec<std::path::PathBuf>,
-    totals: Option<(usize, usize)>,
-    root_counts: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
-    other_tracks: Option<(usize, usize)>,
-    // Membership is structure-owned, not the current filter's matched count.
-    other_total: Option<usize>,
-    stale: bool,
+    blocked: Option<CountBlock>,
+    scope: Option<Rc<SearchCountScope>>,
+    stamp: QueryStamp,
+    result: Option<(QueryStamp, SearchCountResult)>,
     retention: RefreshDeadline,
 }
 
+#[derive(Default)]
+struct OtherCount {
+    owner: QueryTracker,
+    worker: Option<u64>,
+    total: Option<usize>,
+    blocked: Option<CountBlock>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CountBlock {
+    Failed,
+    Retired,
+}
+
+pub(super) struct OtherCountRequest {
+    pub(super) ticket: rivu_protocol::query_tracking::QueryTicket,
+    generation: u64,
+}
+
+pub(super) struct SearchCountScope {
+    pub(super) roots: Vec<std::path::PathBuf>,
+    pub(super) query: Option<String>,
+    pub(super) favorite: Option<bool>,
+    pub(super) missing: Option<bool>,
+}
+
+impl SearchCountScope {
+    fn matches(&self, roots: &[std::path::PathBuf], buffer: &LibraryViewBuffer) -> bool {
+        self.roots == roots
+            && self.query == buffer.query
+            && self.favorite == buffer.favorite
+            && self.missing == buffer.missing
+    }
+}
+
+// Both count-only page variants select the same dependencies, regardless of filters.
+pub(super) const SEARCH_COUNT_QUERY: Query = Query::OtherTracksPage {
+    query: None,
+    favorite: None,
+    missing: None,
+    sort: LibrarySort::Id,
+    offset: 0,
+    limit: 0,
+};
+
 #[derive(Clone)]
 pub(super) struct SearchCountRequest {
-    pub(super) query: Query,
-    pub(super) roots: Vec<std::path::PathBuf>,
-    pub(super) counted_roots: Arc<[usize]>,
-    pub(super) revisions: QueryRevisions,
-    pub(super) root_totals: Arc<std::collections::HashMap<std::path::PathBuf, usize>>,
-    pub(super) other_total: Option<usize>,
+    pub(super) scope: Rc<SearchCountScope>,
+    pub(super) stamp: QueryStamp,
+    pub(super) other_empty: bool,
     pub(super) ticket: rivu_protocol::query_tracking::QueryTicket,
     generation: u64,
 }
 
 pub(super) struct SearchCountResult {
-    pub(super) totals: (usize, usize),
-    pub(super) roots: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
-    pub(super) other_tracks: (usize, usize),
+    pub(super) matched: usize,
+    pub(super) roots: std::collections::HashMap<std::path::PathBuf, usize>,
+    pub(super) other_matched: usize,
 }
 
 #[derive(Default)]
@@ -101,6 +140,7 @@ pub(super) struct LibraryViewBuffer {
 pub(super) struct LibraryBrowser {
     pub(super) projection: QueryTracker,
     search_counts: SearchCounts,
+    other_count: OtherCount,
     pub(super) buffer: LibraryViewBuffer,
     pub(super) tree: DirectoryTree,
     pub(super) range_selection: LibrarySelection,
@@ -120,6 +160,7 @@ impl Default for LibraryBrowser {
         Self {
             projection: Default::default(),
             search_counts: SearchCounts::default(),
+            other_count: OtherCount::default(),
             buffer: LibraryViewBuffer {
                 sort: LibrarySort::Album,
                 ..Default::default()
@@ -142,25 +183,16 @@ impl Default for LibraryBrowser {
 impl LibraryBrowser {
     fn reset_search_counts(&mut self) {
         let counts = &mut self.search_counts;
-        counts.projection.cancel();
-        counts.totals = None;
-        counts.root_counts.clear();
-        counts.other_tracks = None;
-        counts.failed = false;
-        counts.stale = false;
+        counts.epoch.cancel();
+        counts.result = None;
+        counts.blocked = None;
         counts.retention.clear();
     }
-    fn search_count_query(&self) -> Query {
-        Query::LibraryRootPage {
-            path: Default::default(),
-            query: self.buffer.query.clone(),
-            favorite: self.buffer.favorite,
-            missing: self.buffer.missing,
-            // Counts depend on membership, never the presentation ordering.
-            sort: LibrarySort::Id,
-            offset: 0,
-            limit: 0,
-        }
+
+    pub(super) fn filtered(&self) -> bool {
+        self.buffer.query.is_some()
+            || self.buffer.favorite.is_some()
+            || self.buffer.missing.is_some()
     }
 
     /// Reconcile authority even while hidden, independently of the worker slot.
@@ -171,39 +203,47 @@ impl LibraryBrowser {
         now: Instant,
     ) -> bool {
         self.sync_root_counts_at(roots, revisions.structure, now);
-        let query = self.search_count_query();
         let counts = &mut self.search_counts;
-        let roots_changed = counts.roots != roots;
-        let membership_query = Query::OtherTracksCount;
-        let structure_changed = counts.projection.stamp().is_none_or(|stamp| {
-            membership_query
-                .stamp(stamp.revisions())
-                .impact(membership_query.stamp(revisions))
-                .rows_changed()
-        });
-        let same_query = counts.projection.matches_identity(&query) && !roots_changed;
-        let changed = counts.projection.sync(&query, revisions) || roots_changed;
-        if roots_changed || structure_changed {
-            counts.other_total = None;
+        let roots_changed = counts
+            .scope
+            .as_ref()
+            .map_or(!roots.is_empty(), |scope| scope.roots != roots);
+        let same_scope = counts
+            .scope
+            .as_ref()
+            .is_some_and(|scope| scope.matches(roots, &self.buffer));
+        let stamp = SEARCH_COUNT_QUERY.stamp(revisions);
+        let changed = !same_scope || counts.stamp != stamp;
+        let other = &mut self.other_count;
+        let other_changed = other.owner.sync(&Query::OtherTracksCount, revisions) || roots_changed;
+        if other_changed {
+            if roots_changed {
+                other.owner.cancel();
+            }
+            other.total = None;
+            other.blocked = None;
         }
         if changed {
-            if roots_changed {
-                counts.projection.cancel();
-                counts.roots = roots.to_vec();
-            }
-            if same_query {
-                counts.stale = true;
-                if counts.totals.is_some() {
+            counts.epoch.cancel();
+            counts.stamp = stamp;
+            if same_scope {
+                if counts.result.is_some() {
                     counts.retention.begin(now);
                 }
             } else {
-                counts.totals = None;
-                counts.root_counts.clear();
-                counts.other_tracks = None;
-                counts.stale = false;
+                counts.scope = Some(Rc::new(SearchCountScope {
+                    roots: roots.to_vec(),
+                    query: self.buffer.query.clone(),
+                    favorite: self.buffer.favorite,
+                    missing: self.buffer.missing,
+                }));
+                counts.result = None;
                 counts.retention.clear();
             }
-            counts.failed = false;
+            counts.blocked = None;
+        }
+        if changed || other_changed {
+            self.reconcile_forest(roots);
         }
         changed
     }
@@ -216,33 +256,32 @@ impl LibraryBrowser {
         revisions: QueryRevisions,
     ) -> (bool, Option<SearchCountRequest>) {
         let changed = self.sync_search_counts(roots, revisions, Instant::now());
-        let query = self.search_count_query();
+        if !changed {
+            self.reconcile_forest(roots);
+        }
+        let settled = !self.filtered() || self.total_count() == Some(0);
+        let other_empty = self.other_tracks_empty();
         let counts = &mut self.search_counts;
-        // Only current batched counts may seed a new filtered-count request.
-        let roots_ready = roots
-            .iter()
-            .all(|root| self.counts.totals.contains_key(root));
-        let request = if !roots_ready
-            || (counts.totals.is_some() && !counts.stale)
-            || counts.failed
+        let request = if settled
+            || counts
+                .result
+                .as_ref()
+                .is_some_and(|(stamp, _)| *stamp == counts.stamp)
+            || counts.blocked.is_some()
             || counts.worker.is_some()
         {
             None
         } else {
-            let generation = counts.projection.generation();
+            let generation = counts.epoch.generation();
             counts.worker = Some(generation);
             Some(SearchCountRequest {
-                query,
-                roots: roots.to_vec(),
-                counted_roots: Arc::clone(&self.counts.counted_roots),
-                revisions,
-                root_totals: Arc::clone(&self.counts.totals),
-                other_total: counts.other_total,
-                ticket: counts.projection.ticket(),
+                scope: Rc::clone(counts.scope.as_ref().expect("count scope reconciled")),
+                stamp: counts.stamp,
+                other_empty,
+                ticket: counts.epoch.ticket(),
                 generation,
             })
         };
-        self.reconcile_forest(roots);
         (changed, request)
     }
     pub(super) fn retire_search_counts(&mut self, request: &SearchCountRequest) {
@@ -252,20 +291,17 @@ impl LibraryBrowser {
     }
 
     /// Completion releases its physical slot even when its payload is obsolete.
-    /// A current failure is retained until explicit retry or changed demand.
+    /// Failure or lost authority parks the demand until explicit retry or a new stamp.
     pub(super) fn accept_search_counts(
         &mut self,
         request: SearchCountRequest,
         roots: &[std::path::PathBuf],
         revisions: QueryRevisions,
-        result: Option<SearchCountResult>,
+        result: Result<SearchCountResult, CountBlock>,
     ) -> bool {
-        let counts = &mut self.search_counts;
-        if counts.worker != Some(request.generation) {
-            return false;
-        }
-        counts.worker = None;
-        self.publish_search_counts(&request, roots, revisions, result)
+        let published = self.publish_search_counts(&request, roots, revisions, result);
+        self.retire_search_counts(&request);
+        published
     }
 
     pub(super) fn publish_search_counts(
@@ -273,53 +309,32 @@ impl LibraryBrowser {
         request: &SearchCountRequest,
         roots: &[std::path::PathBuf],
         revisions: QueryRevisions,
-        result: Option<SearchCountResult>,
+        result: Result<SearchCountResult, CountBlock>,
     ) -> bool {
         let counts = &mut self.search_counts;
-        let Query::LibraryRootPage {
-            query,
-            favorite,
-            missing,
-            ..
-        } = &request.query
-        else {
-            unreachable!()
-        };
-        if query != &self.buffer.query
-            || *favorite != self.buffer.favorite
-            || *missing != self.buffer.missing
-            || request.roots != roots
-            || counts.roots != roots
-            || !counts
-                .projection
-                .accepts(&request.query, request.generation, revisions)
+        if counts.worker != Some(request.generation)
+            || request.generation != counts.epoch.generation()
+            || !request.scope.matches(roots, &self.buffer)
+            || request.stamp != SEARCH_COUNT_QUERY.stamp(revisions)
         {
             return false;
         }
-        counts.failed = result.is_none();
-        counts.stale = false;
-        counts.retention.clear();
-        if let Some(result) = result {
-            for (root, (_, total)) in &result.roots {
-                if self.counts.totals.get(root) != Some(total) {
-                    Arc::make_mut(&mut self.counts.totals).insert(root.clone(), *total);
-                }
+        match result {
+            Ok(result) => {
+                counts.blocked = None;
+                counts.retention.clear();
+                counts.result = Some((request.stamp, result));
             }
-            if counts.totals != Some(result.totals)
-                || counts.root_counts != result.roots
-                || counts.other_tracks != Some(result.other_tracks)
-            {
-                counts.totals = Some(result.totals);
-                counts.root_counts = result.roots;
-                counts.other_tracks = Some(result.other_tracks);
+            Err(CountBlock::Retired) => {
+                counts.epoch.cancel();
+                counts.blocked = Some(CountBlock::Retired);
             }
-            counts.other_total = Some(result.other_tracks.1);
-        } else {
-            counts.totals = None;
-            counts.root_counts.clear();
-            counts.other_tracks = None;
+            Err(CountBlock::Failed) => {
+                counts.blocked = Some(CountBlock::Failed);
+                counts.retention.clear();
+                counts.result = None;
+            }
         }
-        self.reconcile_forest(roots);
         true
     }
 
@@ -327,15 +342,114 @@ impl LibraryBrowser {
         self.search_counts.worker.is_some()
     }
 
+    pub(super) fn count_reads_pending(&self) -> bool {
+        self.search_counts_pending() || self.other_count.worker.is_some()
+    }
+
+    #[cfg(test)]
     pub(super) fn search_counts(&self) -> Option<(usize, usize)> {
+        let (matched, total) = self.search_count_parts();
+        Some((matched?, total?))
+    }
+
+    fn total_count(&self) -> Option<usize> {
+        let root_total = if self.counts.roots.is_empty() {
+            Some(0)
+        } else {
+            self.counts.aggregate
+        };
+        root_total
+            .zip(self.other_count.total)
+            .map(|(roots, other)| roots + other)
+    }
+
+    pub(super) fn search_count_parts(&self) -> (Option<usize>, Option<usize>) {
+        self.search_count_parts_at(Instant::now())
+    }
+
+    fn search_count_parts_at(&self, now: Instant) -> (Option<usize>, Option<usize>) {
+        let total = self.total_count();
+        let matched = if !self.filtered() || total == Some(0) {
+            total
+        } else {
+            self.visible_matches_at(total, now)
+                .map(|result| result.matched)
+        };
+        (matched, total)
+    }
+
+    fn visible_matches_at(&self, total: Option<usize>, now: Instant) -> Option<&SearchCountResult> {
         let counts = &self.search_counts;
-        (!counts.stale || counts.retention.visible(Instant::now()))
-            .then_some(counts.totals)
-            .flatten()
+        let (stamp, result) = counts.result.as_ref()?;
+        let current = *stamp == counts.stamp;
+        // A retained numerator can stand on its own, but not next to a
+        // denominator from a different structure revision.
+        (current
+            || (counts.retention.visible(now)
+                && (total.is_none()
+                    || stamp.revisions().structure == counts.stamp.revisions().structure)))
+            .then_some(result)
+    }
+
+    pub(super) fn prepare_other_count(&mut self) -> Option<OtherCountRequest> {
+        let other = &mut self.other_count;
+        if other.total.is_some() || other.blocked.is_some() || other.worker.is_some() {
+            return None;
+        }
+        let generation = other.owner.generation();
+        other.worker = Some(generation);
+        Some(OtherCountRequest {
+            generation,
+            ticket: other.owner.ticket(),
+        })
+    }
+
+    pub(super) fn retire_other_count(&mut self, request: &OtherCountRequest) {
+        if self.other_count.worker == Some(request.generation) {
+            self.other_count.worker = None;
+        }
+    }
+
+    pub(super) fn publish_other_count(
+        &mut self,
+        request: &OtherCountRequest,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+        response: &QueryResponse,
+    ) -> bool {
+        let other = &mut self.other_count;
+        let query = Query::OtherTracksCount;
+        if other.worker != Some(request.generation)
+            || self
+                .search_counts
+                .scope
+                .as_ref()
+                .is_none_or(|scope| scope.roots != roots)
+            || !other.owner.accepts(&query, request.generation, revisions)
+        {
+            return false;
+        }
+        match &response.result {
+            Ok(ViewResponse::OtherTracksCount(total))
+                if query.stamp(response.revisions) == query.stamp(revisions) =>
+            {
+                other.total = Some(*total);
+                self.reconcile_forest(roots);
+            }
+            Ok(ViewResponse::OtherTracksCount(_))
+            | Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
+                // Park this logical demand without releasing the physical worker.
+                other.owner.cancel();
+                other.blocked = Some(CountBlock::Retired);
+                return false;
+            }
+            _ => other.blocked = Some(CountBlock::Failed),
+        }
+        true
     }
 
     pub(super) fn other_tracks_empty(&self) -> bool {
-        self.search_counts.other_total == Some(0)
+        self.other_count.total == Some(0)
     }
 
     pub(super) fn forest_page(
@@ -358,26 +472,34 @@ impl LibraryBrowser {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn other_count_failed(&self) -> bool {
-        self.search_counts.failed
+        self.other_count.blocked == Some(CountBlock::Failed)
+            || (self.filtered() && self.search_counts.blocked == Some(CountBlock::Failed))
+    }
+
+    #[cfg(test)]
+    pub(super) fn other_count_retired(&self) -> bool {
+        self.other_count.blocked == Some(CountBlock::Retired)
     }
 
     pub(super) fn other_count_label(&self) -> String {
-        let counts = &self.search_counts;
-        let visible = !counts.stale || counts.retention.visible(Instant::now());
-        counts.other_tracks.filter(|_| visible).map_or_else(
-            || "—".to_owned(),
-            |(matched, total)| {
-                if self.buffer.query.is_some()
-                    || self.buffer.favorite.is_some()
-                    || self.buffer.missing.is_some()
-                {
-                    format!("{matched} / {total}")
-                } else {
-                    total.to_string()
-                }
-            },
-        )
+        self.other_count_label_at(Instant::now())
+    }
+
+    fn other_count_label_at(&self, now: Instant) -> String {
+        let total = self.other_count.total;
+        if self.filtered() {
+            let matched = if total == Some(0) {
+                total
+            } else {
+                self.visible_matches_at(total, now)
+                    .map(|result| result.other_matched)
+            };
+            super::super::components::search::filtered_count_label(matched, total)
+        } else {
+            total.map_or_else(|| "—".to_owned(), |total| total.to_string())
+        }
     }
 
     pub(super) fn projection_query(&self) -> Query {
@@ -441,13 +563,10 @@ impl LibraryBrowser {
         let mut changed = self.tree.expire_refresh(now);
         if self.counts.retention.expire(now) {
             changed |= !self.counts.retained.is_empty();
-            self.counts.retained = Arc::default();
+            self.counts.retained.clear();
         }
         if self.search_counts.retention.expire(now) {
-            changed |= self.search_counts.totals.is_some();
-            self.search_counts.totals = None;
-            self.search_counts.root_counts.clear();
-            self.search_counts.other_tracks = None;
+            changed |= self.search_counts.result.take().is_some();
         }
         changed
     }
@@ -478,21 +597,7 @@ impl LibraryBrowser {
             roots: roots.to_vec(),
         };
         if self.counts.owner.sync(&query, revisions) {
-            if self.counts.roots != roots {
-                // Coverage is roots-owned, independent of filters and revisions.
-                self.counts.counted_roots = roots
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, root)| {
-                        (!roots.iter().enumerate().any(|(other_index, parent)| {
-                            index != other_index
-                                && root.starts_with(parent)
-                                && (root != parent || other_index < index)
-                        }))
-                        .then_some(index)
-                    })
-                    .collect();
-            }
+            self.counts.aggregate = None;
             if self.counts.roots == roots {
                 self.counts.retention.expire(now);
                 if !self.counts.totals.is_empty() {
@@ -500,18 +605,18 @@ impl LibraryBrowser {
                     if self.counts.retention.visible(now) {
                         self.counts.retained = std::mem::take(&mut self.counts.totals);
                     } else {
-                        self.counts.totals = Arc::default();
+                        self.counts.totals.clear();
                     }
                 }
                 if self.counts.retention.expired(now) {
-                    self.counts.retained = Arc::default();
+                    self.counts.retained.clear();
                 }
             } else {
-                self.counts.totals = Arc::default();
-                self.counts.retained = Arc::default();
+                self.counts.totals.clear();
+                self.counts.retained.clear();
                 self.counts.retention.clear();
             }
-            self.counts.pending.clear();
+            self.counts.pending = None;
             self.counts.failed.clear();
             self.counts.settled = false;
             self.counts.retired = false;
@@ -527,20 +632,28 @@ impl LibraryBrowser {
         self.projection.cancel();
         self.tree.cancel_pending();
         if self.search_counts_pending() {
-            self.search_counts.projection.cancel();
+            self.search_counts.epoch.cancel();
         }
-        if !self.counts.pending.is_empty() {
+        if self.other_count.worker.is_some() {
+            self.other_count.owner.cancel();
+        }
+        if self.counts.pending.is_some() {
             self.counts.owner.cancel();
-            self.counts.pending.clear();
+            self.counts.pending = None;
             self.counts.settled = false;
         }
     }
 
-    pub(super) fn retry_root_counts(&mut self) {
-        self.search_counts.failed = false;
-        self.counts.failed.clear();
-        self.counts.settled = false;
-        self.counts.retired = false;
+    pub(super) fn retry_root_counts(&mut self) -> bool {
+        let search_blocked = self.search_counts.blocked.take().is_some();
+        let other_blocked = self.other_count.blocked.take().is_some();
+        let roots_blocked = self.counts.retired || !self.counts.failed.is_empty();
+        if roots_blocked {
+            self.counts.failed.clear();
+            self.counts.settled = false;
+            self.counts.retired = false;
+        }
+        search_blocked || other_blocked || roots_blocked
     }
 
     pub(super) fn root_counts_settled(&self) -> bool {
@@ -550,26 +663,24 @@ impl LibraryBrowser {
         &mut self,
         roots: &[std::path::PathBuf],
         structure_revision: u64,
-    ) -> (u64, Vec<usize>) {
+    ) -> (u64, Option<usize>) {
         self.sync_root_counts(roots, structure_revision);
-        if self.counts.retired || !self.counts.pending.is_empty() {
-            return (self.counts.owner.generation(), Vec::new());
+        let generation = self.counts.owner.generation();
+        if self.counts.retired || self.counts.pending.is_some() {
+            return (generation, None);
         }
-        let batches = (0..roots.len())
+        let offset = (0..roots.len())
             .step_by(rivu_protocol::model::MAX_QUERY_ROWS)
-            .filter(|offset| {
-                !self.counts.pending.contains(offset)
-                    && !self.counts.failed.contains(offset)
+            .find(|offset| {
+                !self.counts.failed.contains(offset)
                     && roots
                         [*offset..(*offset + rivu_protocol::model::MAX_QUERY_ROWS).min(roots.len())]
                         .iter()
                         .any(|root| !self.counts.totals.contains_key(root))
-            })
-            .take(1)
-            .collect::<Vec<_>>();
-        self.counts.pending.extend(batches.iter().copied());
-        self.counts.settled = batches.is_empty();
-        (self.counts.owner.generation(), batches)
+            });
+        self.counts.pending = offset;
+        self.counts.settled = offset.is_none();
+        (generation, offset)
     }
 
     pub(super) fn counts_current(
@@ -594,24 +705,28 @@ impl LibraryBrowser {
         offset: usize,
         counts: Vec<rivu_protocol::model::LibraryRootCount>,
     ) {
-        if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
-            for count in counts {
-                Arc::make_mut(&mut self.counts.totals).insert(count.path, count.total);
+        if self.counts.owner.generation() == generation && self.counts.pending == Some(offset) {
+            self.counts.pending = None;
+            let totals = &mut self.counts.totals;
+            totals.extend(counts.into_iter().map(|count| (count.path, count.total)));
+            if self.counts.aggregate.is_none() {
+                // Validated roots are disjoint. Publish a total only when every root is known.
+                self.counts.aggregate = self
+                    .counts
+                    .roots
+                    .iter()
+                    .try_fold(0, |total, root| totals.get(root).map(|count| total + count));
             }
-            if self
-                .counts
-                .roots
-                .iter()
-                .all(|root| self.counts.totals.contains_key(root))
-            {
-                self.counts.retained = Arc::default();
+            if self.counts.aggregate.is_some() {
+                self.counts.retained.clear();
                 self.counts.retention.clear();
             }
         }
     }
 
     pub(super) fn fail_root_counts(&mut self, generation: u64, offset: usize) {
-        if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
+        if self.counts.owner.generation() == generation && self.counts.pending == Some(offset) {
+            self.counts.pending = None;
             self.counts.failed.insert(offset);
         }
     }
@@ -619,13 +734,15 @@ impl LibraryBrowser {
     pub(super) fn retire_root_counts(&mut self, generation: u64) {
         if self.counts.owner.generation() == generation {
             self.counts.owner.cancel();
-            self.counts.pending.clear();
+            self.counts.pending = None;
             self.counts.retired = true;
         }
     }
 
+    #[cfg(test)]
     pub(super) fn root_counts_retired(&self) -> bool {
         self.counts.retired
+            || (self.filtered() && self.search_counts.blocked == Some(CountBlock::Retired))
     }
 
     pub(super) fn root_count(&self, path: &std::path::Path) -> Option<usize> {
@@ -643,30 +760,30 @@ impl LibraryBrowser {
     }
 
     pub(super) fn root_count_label(&self, path: &std::path::Path) -> String {
-        if self.buffer.query.is_some()
-            || self.buffer.favorite.is_some()
-            || self.buffer.missing.is_some()
-        {
-            let counts = &self.search_counts;
-            counts
-                .root_counts
-                .get(path)
-                .filter(|_| !counts.stale || counts.retention.visible(Instant::now()))
-                .map_or_else(
-                    || "—".to_owned(),
-                    |(matched, total)| format!("{matched} / {total}"),
-                )
+        self.root_count_label_at(path, Instant::now())
+    }
+
+    fn root_count_label_at(&self, path: &std::path::Path, now: Instant) -> String {
+        if self.filtered() {
+            let total = self.root_count(path);
+            super::super::components::search::filtered_count_label(
+                if total == Some(0) {
+                    total
+                } else {
+                    self.visible_matches_at(total, now)
+                        .and_then(|result| result.roots.get(path).copied())
+                },
+                total,
+            )
         } else {
-            self.root_count_display_at(path, Instant::now())
+            self.root_count_display_at(path, now)
                 .map_or_else(|| "—".to_owned(), |total| total.to_string())
         }
     }
 
+    #[cfg(test)]
     pub(super) fn root_count_failed(&self, path: &std::path::Path) -> bool {
-        let filtered = self.buffer.query.is_some()
-            || self.buffer.favorite.is_some()
-            || self.buffer.missing.is_some();
-        (filtered && self.search_counts.failed)
+        (self.filtered() && self.search_counts.blocked == Some(CountBlock::Failed))
             || self.counts.failed.iter().any(|&offset| {
                 self.counts.roots[offset
                     ..(offset + rivu_protocol::model::MAX_QUERY_ROWS).min(self.counts.roots.len())]
@@ -957,7 +1074,9 @@ impl LibraryBrowser {
         self.reset_search_counts();
         self.tree.clear();
         self.counts.invalidate();
-        self.search_counts.other_total = None;
+        self.other_count.owner.cancel();
+        self.other_count.total = None;
+        self.other_count.blocked = None;
         self.selected_nodes = HashSet::new();
     }
 
@@ -1036,6 +1155,7 @@ mod tests {
         let roots = vec![std::path::PathBuf::from("/music")];
         let mut library = LibraryBrowser::default();
         let mut revisions = QueryRevisions::default();
+        library.refresh_search("needle".into());
         load_root_totals(&mut library, &roots, revisions);
         let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
         let old = request.clone();
@@ -1043,9 +1163,8 @@ mod tests {
             request,
             &roots,
             revisions,
-            Some(search_count_result(&roots[0], (2, 3)))
+            Ok(search_count_result(&roots[0], 2))
         ));
-        revisions.library += 1;
         revisions.structure += 1;
         library.sync_search_counts(&roots, revisions, start);
         assert_eq!(library.root_count(&roots[0]), None);
@@ -1053,20 +1172,17 @@ mod tests {
             library.root_count_display_at(&roots[0], start + Duration::from_millis(199)),
             Some(3)
         );
-        assert!(
-            library.prepare_search_counts(&roots, revisions).1.is_none(),
-            "retained totals must not seed a fresh filtered read"
-        );
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_some());
         let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
-        assert_eq!(offsets, vec![0]);
+        assert_eq!(offsets, Some(0));
         let ticket = library.root_count_ticket();
-        revisions.library += 1;
+        revisions.counts += 1;
         library.sync_search_counts(&roots, revisions, start + Duration::from_millis(150));
         assert!(!library.publish_search_counts(
             &old,
             &roots,
             revisions,
-            Some(search_count_result(&roots[0], (99, 99)))
+            Ok(search_count_result(&roots[0], 99))
         ));
         assert!(!library.expire_refresh(start + Duration::from_millis(199)));
         assert!(library.expire_refresh(start + Duration::from_millis(200)));
@@ -1074,10 +1190,10 @@ mod tests {
             library.root_count_display_at(&roots[0], start + Duration::from_millis(200)),
             None
         );
-        assert_eq!(library.search_counts(), None);
+        assert_eq!(library.search_count_parts(), (None, None));
         assert!(library.counts_current(generation, &roots, revisions.structure));
         assert!(ticket.is_current());
-        assert!(library.counts.pending.contains(&0));
+        assert_eq!(library.counts.pending, Some(0));
     }
 
     #[test]
@@ -1091,29 +1207,24 @@ mod tests {
         for revision in [0, 2] {
             loop {
                 let (generation, offsets) = library.begin_root_counts(&roots, revision);
-                if offsets.is_empty() {
-                    break;
-                }
-                for offset in offsets {
-                    library.accept_root_counts(
-                        generation,
-                        offset,
-                        roots[offset
-                            ..(offset + rivu_protocol::model::MAX_QUERY_ROWS).min(roots.len())]
-                            .iter()
-                            .map(|path| rivu_protocol::model::LibraryRootCount {
-                                path: path.clone(),
-                                total: 3,
-                            })
-                            .collect(),
-                    );
-                }
+                let Some(offset) = offsets else { break };
+                library.accept_root_counts(
+                    generation,
+                    offset,
+                    roots[offset..(offset + rivu_protocol::model::MAX_QUERY_ROWS).min(roots.len())]
+                        .iter()
+                        .map(|path| rivu_protocol::model::LibraryRootCount {
+                            path: path.clone(),
+                            total: 3,
+                        })
+                        .collect(),
+                );
             }
             if revision == 0 {
                 library.sync_root_counts_at(&roots, 1, start);
                 assert!(library.expire_refresh(deadline));
                 let (generation, offsets) = library.begin_root_counts(&roots, 1);
-                assert_eq!(offsets, vec![0]);
+                assert_eq!(offsets, Some(0));
                 library.accept_root_counts(
                     generation,
                     0,
@@ -1141,32 +1252,31 @@ mod tests {
     }
 
     #[test]
-    fn equal_refreshed_counts_restore_authority_and_reuse_the_payload() {
+    fn equal_refreshed_counts_clear_retention_and_settle() {
         let roots = vec![std::path::PathBuf::from("/music")];
         let mut library = LibraryBrowser::default();
         let mut revisions = QueryRevisions::default();
+        library.refresh_search("needle".into());
         load_root_totals(&mut library, &roots, revisions);
         let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
         assert!(library.accept_search_counts(
             request,
             &roots,
             revisions,
-            Some(search_count_result(&roots[0], (2, 3)))
+            Ok(search_count_result(&roots[0], 2))
         ));
-        revisions.library += 1;
+        revisions.counts += 1;
+        let now = Instant::now();
+        library.sync_search_counts(&roots, revisions, now);
         let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        let pointer = library.search_counts.root_counts.get(&roots[0]).unwrap() as *const _;
-        assert_eq!(library.search_counts(), Some((2, 3)));
+        assert_eq!(library.search_count_parts_at(now), (Some(2), Some(3)));
         assert!(library.accept_search_counts(
             request,
             &roots,
             revisions,
-            Some(search_count_result(&roots[0], (2, 3)))
+            Ok(search_count_result(&roots[0], 2))
         ));
-        assert_eq!(
-            library.search_counts.root_counts.get(&roots[0]).unwrap() as *const _,
-            pointer
-        );
+        assert_eq!(library.root_count_label(&roots[0]), "2 / 3");
         assert!(library.refresh_deadline().is_none());
         assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
     }
@@ -1177,7 +1287,7 @@ mod tests {
         revisions: QueryRevisions,
     ) {
         let (generation, offsets) = library.begin_root_counts(roots, revisions.structure);
-        for offset in offsets {
+        if let Some(offset) = offsets {
             library.accept_root_counts(
                 generation,
                 offset,
@@ -1190,10 +1300,11 @@ mod tests {
                     .collect(),
             );
         }
+        load_other_total(library, roots, revisions, Some(0));
     }
 
     #[test]
-    fn filtered_counts_expose_dependency_failure_until_explicit_retry() {
+    fn filtered_counts_survive_failed_root_totals_until_explicit_retry() {
         for filter in 0..3 {
             let mut library = LibraryBrowser::default();
             let roots = vec![std::path::PathBuf::from("/music")];
@@ -1205,68 +1316,112 @@ mod tests {
                 1 => library.buffer.favorite = Some(true),
                 _ => library.buffer.missing = Some(true),
             }
-            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+            assert_eq!(library.root_count_label(&roots[0]), "- / -");
+            load_other_total(&mut library, &roots, revisions, Some(0));
+            assert!(library.accept_search_counts(
+                request,
+                &roots,
+                revisions,
+                Ok(search_count_result(&roots[0], 1))
+            ));
+            assert_eq!(library.root_count_label(&roots[0]), "1 / -");
             let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
-            library.fail_root_counts(generation, offsets[0]);
+            library.fail_root_counts(generation, offsets.unwrap());
+            assert_eq!(library.search_count_parts(), (Some(1), None));
+            assert_eq!(library.root_count_label(&roots[0]), "1 / -");
             assert!(library.root_count_failed(&roots[0]));
             assert!(!library.root_count_failed(std::path::Path::new("/unrelated")));
             assert!(
                 library
                     .begin_root_counts(&roots, revisions.structure)
                     .1
-                    .is_empty()
+                    .is_none()
             );
-            library.refresh_search("changed".into());
-            assert!(library.root_count_failed(&roots[0]));
-            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
             library.retry_root_counts();
             load_root_totals(&mut library, &roots, revisions);
-            let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-            assert!(library.accept_search_counts(
-                request,
-                &roots,
-                revisions,
-                Some(search_count_result(&roots[0], (1, 3))),
-            ));
+            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            assert_eq!(library.root_count_label(&roots[0]), "1 / 3");
             assert!(!library.root_count_failed(&roots[0]));
             assert_eq!(library.search_counts(), Some((1, 3)));
         }
     }
 
     #[test]
-    fn search_counts_wait_for_current_batched_totals_across_filter_and_structure_changes() {
+    fn late_totals_and_superseded_filter_results_cannot_publish() {
         let mut library = LibraryBrowser::default();
         let roots = vec![std::path::PathBuf::from("/music")];
         let mut revisions = QueryRevisions::default();
         assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
         assert!(!library.search_counts_pending());
         let (old_generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+        let old_other = library.prepare_other_count().unwrap();
         library.refresh_search("needle".into());
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        let old = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        library.refresh_search("changed".into());
         revisions.structure += 1;
         assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(library.prepare_other_count().is_none());
+        assert!(!library.publish_other_count(
+            &old_other,
+            &roots,
+            revisions,
+            &other_response(revisions, Some(99)),
+        ));
+        library.retire_other_count(&old_other);
         library.accept_root_counts(
             old_generation,
-            offsets[0],
+            offsets.unwrap(),
             vec![rivu_protocol::model::LibraryRootCount {
                 path: roots[0].clone(),
                 total: 99,
             }],
         );
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(!library.accept_search_counts(
+            old,
+            &roots,
+            revisions,
+            Ok(search_count_result(&roots[0], 99))
+        ));
+        assert_eq!(library.search_count_parts(), (None, None));
         load_root_totals(&mut library, &roots, revisions);
         let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        assert_eq!(request.root_totals.get(&roots[0]), Some(&3));
-        assert!(matches!(
-            request.query,
-            Query::LibraryRootPage { query: Some(_), .. }
-        ));
+        assert_eq!(library.search_count_parts(), (None, Some(3)));
+        assert_eq!(library.root_count_label(&roots[0]), "- / 3");
+        assert_eq!(request.scope.query.as_deref(), Some("changed"));
     }
-    fn search_count_result(root: &std::path::Path, totals: (usize, usize)) -> SearchCountResult {
+    fn load_other_total(
+        library: &mut LibraryBrowser,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+        total: Option<usize>,
+    ) {
+        library.sync_search_counts(roots, revisions, Instant::now());
+        if let Some(request) = library.prepare_other_count() {
+            assert!(library.publish_other_count(
+                &request,
+                roots,
+                revisions,
+                &other_response(revisions, total),
+            ));
+            library.retire_other_count(&request);
+        }
+    }
+
+    fn other_response(revisions: QueryRevisions, total: Option<usize>) -> QueryResponse {
+        QueryResponse {
+            revisions,
+            result: total
+                .map(ViewResponse::OtherTracksCount)
+                .ok_or_else(|| QueryError::Message("Other Tracks total unavailable".into())),
+        }
+    }
+
+    fn search_count_result(root: &std::path::Path, matched: usize) -> SearchCountResult {
         SearchCountResult {
-            totals,
-            roots: [(root.to_path_buf(), totals)].into_iter().collect(),
-            other_tracks: (0, 0),
+            matched,
+            roots: [(root.to_path_buf(), matched)].into_iter().collect(),
+            other_matched: 0,
         }
     }
 
@@ -1278,42 +1433,93 @@ mod tests {
         let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
         library.accept_root_counts(
             generation,
-            offsets[0],
+            offsets.unwrap(),
             vec![rivu_protocol::model::LibraryRootCount {
                 path: roots[0].clone(),
                 total: 4,
             }],
         );
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        load_other_total(&mut library, &roots, revisions, Some(0));
+        assert_eq!(library.search_counts(), Some((4, 4)));
+        library.refresh_search("needle".into());
         let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        assert_eq!(request.root_totals.get(&roots[0]), Some(&4));
         library.buffer.sort = LibrarySort::MostPlayed;
+        revisions.library += 1;
+        revisions.bitrate += 1;
         assert!(!library.prepare_search_counts(&roots, revisions).0);
         assert!(request.ticket.is_current());
+        assert_eq!(library.search_count_parts(), (None, Some(4)));
         assert!(library.accept_search_counts(
             request,
             &roots,
             revisions,
-            Some(search_count_result(&roots[0], (4, 4)))
-        ));
-        library.refresh_search("needle".into());
-        revisions.library += 1;
-        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        assert_eq!(request.root_totals.get(&roots[0]), Some(&4));
-        assert_eq!(request.other_total, Some(0));
-        assert!(library.accept_search_counts(
-            request,
-            &roots,
-            revisions,
-            Some(search_count_result(&roots[0], (1, 4)))
+            Ok(search_count_result(&roots[0], 1))
         ));
         library.buffer.sort = LibrarySort::Album;
         assert!(!library.prepare_search_counts(&roots, revisions).0);
         assert_eq!(library.search_counts(), Some((1, 4)));
         revisions.structure += 1;
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        let now = Instant::now();
+        library.sync_search_counts(&roots, revisions, now);
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_some());
         assert!(library.counts.totals.is_empty());
-        assert_eq!(library.search_counts.other_total, None);
-        assert_eq!(library.search_counts(), Some((1, 4)));
+        assert_eq!(library.search_count_parts_at(now), (Some(1), None));
+    }
+
+    #[test]
+    fn newer_structure_totals_do_not_pair_with_retained_matches() {
+        let mut library = LibraryBrowser::default();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let mut revisions = QueryRevisions::default();
+        library.refresh_search("needle".into());
+        let load_root = |library: &mut LibraryBrowser, revisions: QueryRevisions, total| {
+            let (generation, offset) = library.begin_root_counts(&roots, revisions.structure);
+            library.accept_root_counts(
+                generation,
+                offset.unwrap(),
+                vec![rivu_protocol::model::LibraryRootCount {
+                    path: roots[0].clone(),
+                    total,
+                }],
+            );
+        };
+        load_root(&mut library, revisions, 10);
+        load_other_total(&mut library, &roots, revisions, Some(4));
+        let read = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert!(library.accept_search_counts(
+            read,
+            &roots,
+            revisions,
+            Ok(SearchCountResult {
+                matched: 11,
+                roots: [(roots[0].clone(), 8)].into_iter().collect(),
+                other_matched: 3,
+            }),
+        ));
+        assert_eq!(library.search_count_parts(), (Some(11), Some(14)));
+
+        revisions.structure += 1;
+        let now = Instant::now();
+        library.sync_search_counts(&roots, revisions, now);
+        let read = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert_eq!(library.search_count_parts_at(now), (Some(11), None));
+        load_root(&mut library, revisions, 2);
+        assert_eq!(library.root_count_label_at(&roots[0], now), "- / 2");
+        assert_eq!(library.other_count_label_at(now), "3 / -");
+        load_other_total(&mut library, &roots, revisions, Some(1));
+        assert_eq!(library.other_count_label_at(now), "- / 1");
+        assert_eq!(library.search_count_parts_at(now), (None, Some(3)));
+
+        assert!(library.accept_search_counts(
+            read,
+            &roots,
+            revisions,
+            Ok(search_count_result(&roots[0], 1)),
+        ));
+        assert_eq!(library.search_count_parts(), (Some(1), Some(3)));
+        assert_eq!(library.root_count_label(&roots[0]), "1 / 2");
+        assert_eq!(library.other_count_label(), "0 / 1");
     }
 
     #[test]
@@ -1321,28 +1527,29 @@ mod tests {
         let mut library = LibraryBrowser::default();
         let roots = vec![std::path::PathBuf::from("/music")];
         let revisions = QueryRevisions::default();
+        library.refresh_search("needle".into());
         load_root_totals(&mut library, &roots, revisions);
         let old = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        assert!(library.publish_search_counts(&old, &roots, revisions, None));
+        assert!(library.publish_search_counts(&old, &roots, revisions, Err(CountBlock::Failed)));
         assert!(library.search_counts_pending());
         assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
         for query in ["one", "latest"] {
             library.refresh_search(query.into());
             assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
         }
-        assert!(!library.publish_search_counts(&old, &roots, revisions, None));
+        assert!(!library.publish_search_counts(&old, &roots, revisions, Err(CountBlock::Failed)));
         assert!(!library.accept_search_counts(
             old,
             &roots,
             revisions,
-            Some(search_count_result(&roots[0], (99, 99)))
+            Ok(search_count_result(&roots[0], 99))
         ));
         let latest = library.prepare_search_counts(&roots, revisions).1.unwrap();
         assert!(library.accept_search_counts(
             latest,
             &roots,
             revisions,
-            Some(search_count_result(&roots[0], (2, 3)))
+            Ok(search_count_result(&roots[0], 2))
         ));
         assert_eq!(library.search_counts(), Some((2, 3)));
         assert!(!library.search_counts_pending());
@@ -1356,7 +1563,7 @@ mod tests {
                 let mut library = LibraryBrowser::default();
                 let mut roots = vec![std::path::PathBuf::from("/music")];
                 let mut revisions = QueryRevisions::default();
-                load_root_totals(&mut library, &roots, revisions);
+                library.refresh_search("initial".into());
                 let (changed, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(changed);
                 let request = request.unwrap();
@@ -1369,7 +1576,7 @@ mod tests {
                         library.toggle_missing();
                         library.refresh_filter();
                     }
-                    4 => revisions.library += 1,
+                    4 => revisions.counts += 1,
                     5 => revisions.structure += 1,
                     _ => unreachable!(),
                 }
@@ -1380,8 +1587,8 @@ mod tests {
                     assert!(!request.ticket.is_current());
                     assert!(library.search_counts_pending());
                 }
-                let stale = search_count_result(&request.roots[0], (99, 99));
-                assert!(!library.accept_search_counts(request, &roots, revisions, Some(stale)));
+                let stale = search_count_result(&request.scope.roots[0], 99);
+                assert!(!library.accept_search_counts(request, &roots, revisions, Ok(stale)));
                 assert!(!library.search_counts_pending());
                 load_root_totals(&mut library, &roots, revisions);
                 assert_eq!(library.search_counts(), None);
@@ -1391,7 +1598,7 @@ mod tests {
                     current.unwrap(),
                     &roots,
                     revisions,
-                    Some(search_count_result(&roots[0], (2, 3))),
+                    Ok(search_count_result(&roots[0], 2)),
                 ));
                 assert_eq!(library.search_counts(), Some((2, 3)));
                 assert!(!library.search_counts_pending());
@@ -1415,7 +1622,9 @@ mod tests {
             assert!(library.search_counts_pending());
             // Revealing before physical completion cannot submit another worker.
             assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
-            let result = (!failed_completion).then(|| search_count_result(&roots[0], (99, 99)));
+            let result = (!failed_completion)
+                .then(|| search_count_result(&roots[0], 99))
+                .ok_or(CountBlock::Failed);
             assert!(!library.accept_search_counts(request, &roots, revisions, result));
             assert!(!library.search_counts_pending());
             assert_eq!(library.search_counts(), None);
@@ -1425,7 +1634,7 @@ mod tests {
                 request.unwrap(),
                 &roots,
                 revisions,
-                Some(search_count_result(&roots[0], (1, 3))),
+                Ok(search_count_result(&roots[0], 1)),
             ));
             library.cancel_pending_reads();
             assert_eq!(library.search_counts(), Some((1, 3)));
@@ -1441,9 +1650,16 @@ mod tests {
         library.refresh_search("needle".into());
         load_root_totals(&mut library, &roots, revisions);
         let (_, request) = library.prepare_search_counts(&roots, revisions);
-        assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
+        assert!(library.accept_search_counts(
+            request.unwrap(),
+            &roots,
+            revisions,
+            Err(CountBlock::Failed),
+        ));
         assert!(!library.search_counts_pending());
         assert_eq!(library.search_counts(), None);
+        assert_eq!(library.search_count_parts(), (None, Some(3)));
+        assert_eq!(library.root_count_label(&roots[0]), "- / 3");
         assert!(library.root_count_failed(&roots[0]));
         library.cancel_pending_reads();
         assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
@@ -1454,7 +1670,12 @@ mod tests {
         // Retrying again while pending cannot release the worker slot.
         library.retry_root_counts();
         assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
-        assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
+        assert!(library.accept_search_counts(
+            request.unwrap(),
+            &roots,
+            revisions,
+            Err(CountBlock::Failed),
+        ));
         library.refresh_search("other".into());
         let (changed, request) = library.prepare_search_counts(&roots, revisions);
         assert!(changed);
@@ -1463,7 +1684,7 @@ mod tests {
             request.unwrap(),
             &roots,
             revisions,
-            Some(search_count_result(&roots[0], (0, 3))),
+            Ok(search_count_result(&roots[0], 0)),
         ));
         assert_eq!(library.search_counts(), Some((0, 3)));
         // An accepted payload is invalidated together with its per-root counts.
@@ -1471,7 +1692,7 @@ mod tests {
         let (changed, request) = library.prepare_search_counts(&roots, revisions);
         assert!(changed);
         assert!(request.is_some());
-        assert_eq!(library.search_counts(), None);
+        assert_eq!(library.search_count_parts(), (None, Some(3)));
     }
 
     #[test]
@@ -1483,32 +1704,41 @@ mod tests {
                 if filtered {
                     library.refresh_search("needle".into());
                 }
-                load_root_totals(&mut library, &roots, revisions);
-                let (_, request) = library.prepare_search_counts(&roots, revisions);
-                assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
+                library.sync_search_counts(&roots, revisions, Instant::now());
+                load_other_total(&mut library, &roots, revisions, None);
                 assert!(library.other_count_failed());
-                assert!(!library.search_counts_pending());
-                library.cancel_pending_reads();
-                assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
-                assert!(library.other_count_failed());
-
+                assert_eq!(library.search_count_parts(), (None, None));
+                if filtered {
+                    let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+                    assert!(library.accept_search_counts(
+                        request,
+                        &roots,
+                        revisions,
+                        Ok(SearchCountResult {
+                            matched: 2,
+                            roots: Default::default(),
+                            other_matched: 2,
+                        })
+                    ));
+                    assert_eq!(library.other_count_label(), "2 / -");
+                }
+                assert!(library.prepare_other_count().is_none());
                 library.retry_root_counts();
                 assert!(!library.other_count_failed());
-                let (_, request) = library.prepare_search_counts(&roots, revisions);
-                assert!(library.search_counts_pending());
+                let read = library.prepare_other_count().unwrap();
                 library.retry_root_counts();
-                assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
-                let other_tracks = if filtered { (2, 3) } else { (3, 3) };
-                assert!(library.accept_search_counts(
-                    request.unwrap(),
+                assert!(library.prepare_other_count().is_none());
+                assert!(library.publish_other_count(
+                    &read,
                     &roots,
                     revisions,
-                    Some(SearchCountResult {
-                        totals: other_tracks,
-                        roots: roots.iter().cloned().map(|root| (root, (0, 0))).collect(),
-                        other_tracks,
-                    }),
+                    &other_response(revisions, Some(3)),
                 ));
+                library.retire_other_count(&read);
+                assert_eq!(
+                    library.other_count_label(),
+                    if filtered { "2 / 3" } else { "3" }
+                );
                 assert!(!library.other_count_failed());
                 assert!(!library.search_counts_pending());
                 assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
@@ -1526,7 +1756,6 @@ mod tests {
                 }
                 library.refresh_search("needle".into());
                 let mut revisions = QueryRevisions::default();
-                load_root_totals(&mut library, &roots, revisions);
                 let (_, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(!library.other_tracks_empty());
                 assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
@@ -1534,31 +1763,24 @@ mod tests {
                     request.unwrap(),
                     &roots,
                     revisions,
-                    Some(SearchCountResult {
-                        totals: (0, 3),
+                    Ok(SearchCountResult {
+                        matched: 0,
                         roots: Default::default(),
-                        other_tracks: (0, 3),
+                        other_matched: 0,
                     }),
                 ));
+                assert_eq!(library.other_count_label(), "0 / -");
+                load_other_total(&mut library, &roots, revisions, Some(3));
+                assert_eq!(library.other_count_label(), "0 / 3");
                 assert!(!library.other_tracks_empty());
                 assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
                 library.select_node(&LibraryNode::Track(41), false);
                 library.select_node(&LibraryNode::OtherTracks, true);
 
                 revisions.structure += 1;
-                load_root_totals(&mut library, &roots, revisions);
-                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                library.sync_search_counts(&roots, revisions, Instant::now());
                 assert!(!library.other_tracks_empty());
-                assert!(library.accept_search_counts(
-                    request.unwrap(),
-                    &roots,
-                    revisions,
-                    Some(SearchCountResult {
-                        totals: (0, 0),
-                        roots: Default::default(),
-                        other_tracks: (0, 0),
-                    }),
-                ));
+                load_other_total(&mut library, &roots, revisions, Some(0));
                 assert!(library.other_tracks_empty());
                 assert_eq!(library.tree.root_total(), Some(roots.len()));
                 assert!(!library.selected_nodes().contains(&LibraryNode::OtherTracks));
@@ -1573,27 +1795,105 @@ mod tests {
                 let (_, request) = library.prepare_search_counts(&roots, revisions);
                 assert!(library.other_tracks_empty());
                 assert_eq!(library.tree.root_total(), Some(roots.len()));
-                assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
+                if let Some(request) = request {
+                    assert!(!roots.is_empty());
+                    assert!(library.accept_search_counts(
+                        request,
+                        &roots,
+                        revisions,
+                        Err(CountBlock::Failed),
+                    ));
+                } else {
+                    assert!(roots.is_empty());
+                    assert_eq!(library.search_count_parts(), (Some(0), Some(0)));
+                }
                 assert!(library.other_tracks_empty());
 
                 revisions.structure += 1;
-                load_root_totals(&mut library, &roots, revisions);
-                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                library.sync_search_counts(&roots, revisions, Instant::now());
                 assert!(!library.other_tracks_empty());
-                assert!(library.accept_search_counts(
-                    request.unwrap(),
-                    &roots,
-                    revisions,
-                    Some(SearchCountResult {
-                        totals: (0, 1),
-                        roots: Default::default(),
-                        other_tracks: (0, 1),
-                    }),
-                ));
+                load_other_total(&mut library, &roots, revisions, Some(1));
                 assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
                 assert!(!library.other_tracks_empty());
             }
         }
+    }
+
+    #[test]
+    fn ahead_other_total_waits_for_structure_or_explicit_retry() {
+        for retry in [false, true] {
+            let roots = [];
+            let mut library = LibraryBrowser::default();
+            let mut revisions = QueryRevisions::default();
+            library.sync_search_counts(&roots, revisions, Instant::now());
+            let read = library.prepare_other_count().unwrap();
+            let ahead = other_response(
+                QueryRevisions {
+                    structure: 1,
+                    ..revisions
+                },
+                Some(0),
+            );
+            assert!(!library.publish_other_count(&read, &roots, revisions, &ahead));
+            assert!(library.other_count_retired());
+            assert!(!library.other_count_failed());
+            assert_eq!(library.tree().root_total(), Some(1));
+            assert_eq!(library.search_count_parts(), (None, None));
+            assert!(library.count_reads_pending());
+            assert!(library.prepare_other_count().is_none());
+            if !retry {
+                library.retire_other_count(&read);
+                assert!(!library.count_reads_pending());
+            }
+
+            // More viewport demand and unrelated revisions must not resubmit it.
+            revisions.counts += 1;
+            library.sync_search_counts(&roots, revisions, Instant::now());
+            assert!(library.prepare_other_count().is_none());
+            if retry {
+                library.retry_root_counts();
+                assert!(library.prepare_other_count().is_none());
+                library.retire_other_count(&read);
+                assert!(!library.count_reads_pending());
+            } else {
+                revisions.structure += 1;
+                library.sync_search_counts(&roots, revisions, Instant::now());
+            }
+            assert!(!library.other_count_retired());
+            let current = library.prepare_other_count().unwrap();
+            assert!(!library.publish_other_count(&read, &roots, revisions, &ahead));
+            assert!(library.publish_other_count(
+                &current,
+                &roots,
+                revisions,
+                &other_response(revisions, Some(2)),
+            ));
+            library.retire_other_count(&current);
+            assert_eq!(library.search_count_parts(), (Some(2), Some(2)));
+            assert!(library.prepare_other_count().is_none());
+        }
+    }
+
+    #[test]
+    fn empty_library_resolves_filtered_caption_after_matching_count_failure() {
+        let mut library = LibraryBrowser::default();
+        let roots = [];
+        let mut revisions = QueryRevisions::default();
+        library.refresh_search("needle".into());
+        let read = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert!(library.accept_search_counts(read, &roots, revisions, Err(CountBlock::Failed)));
+        assert!(library.other_count_failed());
+        assert_eq!(library.search_count_parts(), (None, None));
+        load_other_total(&mut library, &roots, revisions, Some(0));
+        assert_eq!(library.search_count_parts(), (Some(0), Some(0)));
+        assert_eq!(library.tree().row_count(), 0);
+        library.refresh_search("another filter".into());
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert_eq!(library.search_count_parts(), (Some(0), Some(0)));
+
+        revisions.structure += 1;
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_some());
+        assert_eq!(library.search_count_parts(), (None, None));
     }
 
     #[test]
@@ -1604,18 +1904,9 @@ mod tests {
                 library.toggle_view();
             }
             let revisions = QueryRevisions::default();
-            let (_, request) = library.prepare_search_counts(&[], revisions);
+            assert!(library.prepare_search_counts(&[], revisions).1.is_none());
             assert_eq!(library.tree.root_total(), Some(1));
-            assert!(library.accept_search_counts(
-                request.unwrap(),
-                &[],
-                revisions,
-                Some(SearchCountResult {
-                    totals: (0, 0),
-                    roots: Default::default(),
-                    other_tracks: (0, 0),
-                }),
-            ));
+            load_other_total(&mut library, &[], revisions, Some(0));
             assert_eq!(library.tree.root_total(), Some(0));
             assert_eq!(library.tree.row_count(), 0);
             assert!(library.demand_directories(0..1).is_empty());
@@ -1952,7 +2243,7 @@ mod tests {
             .map(|index| std::path::PathBuf::from(format!("/root/{index}")))
             .collect();
         let (generation, batches) = library.begin_root_counts(&roots, 7);
-        assert_eq!(batches, vec![0]);
+        assert_eq!(batches, Some(0));
         assert_eq!(library.root_count(&roots[0]), None);
         library.accept_root_counts(
             generation,
@@ -1968,24 +2259,24 @@ mod tests {
         assert_eq!(library.root_count(&roots[0]), Some(0));
         assert_eq!(
             library.begin_root_counts(&roots, 7).1,
-            vec![rivu_protocol::model::MAX_QUERY_ROWS]
+            Some(rivu_protocol::model::MAX_QUERY_ROWS)
         );
         library.fail_root_counts(generation, rivu_protocol::model::MAX_QUERY_ROWS);
         assert!(!library.root_count_failed(&roots[0]));
         assert!(library.root_count_failed(roots.last().unwrap()));
         assert!(!library.root_count_failed(std::path::Path::new("/other")));
         assert_eq!(library.root_count(roots.last().unwrap()), None);
-        assert!(library.begin_root_counts(&roots, 7).1.is_empty());
+        assert!(library.begin_root_counts(&roots, 7).1.is_none());
         assert!(library.root_counts_settled());
         assert!(library.root_count_failed(roots.last().unwrap()));
         library.retry_root_counts();
         assert!(!library.root_counts_settled());
         assert_eq!(
             library.begin_root_counts(&roots, 7).1,
-            vec![rivu_protocol::model::MAX_QUERY_ROWS]
+            Some(rivu_protocol::model::MAX_QUERY_ROWS)
         );
         assert!(!library.root_count_failed(roots.last().unwrap()));
-        assert!(library.begin_root_counts(&roots, 7).1.is_empty());
+        assert!(library.begin_root_counts(&roots, 7).1.is_none());
         library.accept_root_counts(
             generation,
             rivu_protocol::model::MAX_QUERY_ROWS,
@@ -1995,7 +2286,7 @@ mod tests {
             }],
         );
         assert_eq!(library.root_count(roots.last().unwrap()), Some(2));
-        assert!(library.begin_root_counts(&roots, 7).1.is_empty());
+        assert!(library.begin_root_counts(&roots, 7).1.is_none());
         assert!(library.root_counts_settled());
         library.refresh_search("needle".into());
         assert_eq!(library.root_count(&roots[0]), Some(0));
@@ -2025,7 +2316,7 @@ mod tests {
         assert!(!library.counts_current(scanned, &roots, 8));
         assert_eq!(library.root_count(&roots[0]), None);
         let empty = library.begin_root_counts(&[], 8);
-        assert!(empty.1.is_empty());
+        assert!(empty.1.is_none());
         assert!(library.root_counts_settled());
     }
 
@@ -2034,7 +2325,7 @@ mod tests {
         let mut library = LibraryBrowser::default();
         let roots = vec![std::path::PathBuf::from("/music")];
         let (generation, batches) = library.begin_root_counts(&roots, 7);
-        assert_eq!(batches, vec![0]);
+        assert_eq!(batches, Some(0));
         library.accept_root_counts(
             generation,
             0,
@@ -2049,7 +2340,7 @@ mod tests {
         assert!(!library.counts_current(generation, &replacement, 7));
         let (next, batches) = library.begin_root_counts(&replacement, 7);
         assert_ne!(next, generation);
-        assert_eq!(batches, vec![0]);
+        assert_eq!(batches, Some(0));
         library.fail_root_counts(generation, 0);
         library.accept_root_counts(
             generation,
@@ -2061,7 +2352,7 @@ mod tests {
         );
         assert!(!library.root_count_failed(&replacement[0]));
         assert_eq!(library.root_count(&roots[0]), None);
-        assert!(library.begin_root_counts(&replacement, 7).1.is_empty());
+        assert!(library.begin_root_counts(&replacement, 7).1.is_none());
         library.accept_root_counts(
             next,
             0,

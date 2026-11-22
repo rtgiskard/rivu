@@ -553,7 +553,7 @@ impl ReadSpec {
                 (ReadKind::Directory(path), filter.as_deref())
             }
             QueryIdentity::OtherTracksCount => (ReadKind::OtherTracksCount, None),
-            QueryIdentity::OtherTracksPage(filter, favorite, missing, sort) => (
+            QueryIdentity::OtherTracksPage(filter, favorite, missing, sort, _) => (
                 ReadKind::OtherTracks {
                     favorite,
                     missing,

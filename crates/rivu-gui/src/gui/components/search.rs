@@ -56,3 +56,29 @@ pub(in crate::gui) fn set_search_counts(
         cx,
     );
 }
+
+pub(in crate::gui) fn set_search_count_parts(
+    search: &mut SearchField,
+    matched: Option<usize>,
+    total: Option<usize>,
+    i18n: &Localizer,
+    cx: &mut Context<SearchField>,
+) {
+    if let (Some(matched), Some(total)) = (matched, total) {
+        set_search_counts(search, matched, total, i18n, cx);
+    } else {
+        search.set_count_parts(
+            matched,
+            total,
+            |matched, total| filtered_count_label(matched, total).into(),
+            cx,
+        );
+    }
+}
+
+pub(in crate::gui) fn filtered_count_label(matched: Option<usize>, total: Option<usize>) -> String {
+    fn count(value: Option<usize>) -> String {
+        value.map_or_else(|| "-".into(), |value| value.to_string())
+    }
+    format!("{} / {}", count(matched), count(total))
+}

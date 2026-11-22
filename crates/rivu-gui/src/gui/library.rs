@@ -43,7 +43,7 @@ use crate::{
 };
 use gpui::{App, Context, SharedString, Window, prelude::*};
 use rivu_protocol::model::{Command, DirectoryRow};
-use rivu_ui::search::SearchEvent;
+use rivu_ui::search::{SearchEvent, SearchSubmitted};
 use std::path::Path;
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 
@@ -93,6 +93,7 @@ pub(in crate::gui) struct Library {
     focused: bool,
     selection_intent: Option<super::coordination::manual_actions::ManualIntentId>,
     _search_subscription: gpui::Subscription,
+    _search_submit_subscription: gpui::Subscription,
 }
 
 impl gpui::EventEmitter<LibraryEvent> for Library {}
@@ -137,6 +138,12 @@ impl Library {
             let SearchEvent::Changed(query) = event;
             this.apply_library_search(query.clone(), cx);
         });
+        let submit_subscription =
+            cx.subscribe(&library_search, |this, _, _: &SearchSubmitted, cx| {
+                if this.library.retry_root_counts() {
+                    this.request_root_counts(cx);
+                }
+            });
         let mut library = LibraryBrowser::default();
         library.refresh_tree(state.system.config.query_batch_size as usize);
         library.sync_projection(state.query_revisions(None));
@@ -159,6 +166,7 @@ impl Library {
             focused: false,
             selection_intent: None,
             _search_subscription: subscription,
+            _search_submit_subscription: submit_subscription,
         }
     }
 
@@ -185,14 +193,13 @@ impl Library {
         {
             self.fail_selection(intent, cx);
         }
-        self.library.sync_search_counts(
+        let counts_changed = self.library.sync_search_counts(
             &state.system.config.library_roots,
             state.query_revisions(None),
             now,
         );
-        if self.library.search_counts().is_none() {
-            self.library_search
-                .update(cx, |search, cx| search.clear_counts(cx));
+        if counts_changed || expired {
+            self.sync_search_caption(cx);
         }
         self.state = state;
         if !self.demanded() {
@@ -203,7 +210,7 @@ impl Library {
         }
         self.sync_loading_text(cx);
         self.schedule_refresh_wake(cx);
-        if display_changed || projection_changed || expired {
+        if display_changed || projection_changed || counts_changed || expired {
             cx.notify();
         }
     }
@@ -212,9 +219,8 @@ impl Library {
         self.refresh_wake
             .schedule(self.library.refresh_deadline(), cx, |this, now, cx| {
                 let changed = this.library.expire_refresh(now);
-                if changed && this.library.search_counts().is_none() {
-                    this.library_search
-                        .update(cx, |search, cx| search.clear_counts(cx));
+                if changed {
+                    this.sync_search_caption(cx);
                 }
                 this.schedule_refresh_wake(cx);
                 changed
@@ -258,7 +264,7 @@ impl Library {
     pub(in crate::gui) fn cancel_reads(&mut self) {
         self.library.locate.invalidate();
         self.requests.cancel_directory_demand();
-        if self.requests.reads_pending() || self.library.search_counts_pending() {
+        if self.requests.reads_pending() || self.library.count_reads_pending() {
             self.library.cancel_pending_reads();
         }
     }

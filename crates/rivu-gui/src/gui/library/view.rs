@@ -330,53 +330,29 @@ impl Library {
                             node => this.library.selected_nodes().contains(node),
                         };
                         let id = node;
-                        let count_failed = match entry {
-                            DirectoryRow::OtherTracks => this.library.other_count_failed(),
-                            DirectoryRow::Directory { path } => this.library.root_count_failed(path),
-                            DirectoryRow::Track(_) => false,
-                        };
-                        let retry_counts = count_failed || this.library.root_counts_retired();
                         let scan = path.map(|scan_path| {
                             let scan_path = scan_path.clone();
-                            let hint = if retry_counts {
-                                this.i18n.format("gl-retry-root-counts", &[("path", scan_path.display().to_string().into())])
-                            } else {
-                                this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
-                            };
+                            let hint = this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())]);
                             IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).surface(crate::gui::appearance::material::surface(cx)).build_with(IconButtonStyle::RowAction, IconButtonDensity::Regular, cx, move |this, _, cx| {
-                                if this.library.root_count_failed(&scan_path) || this.library.root_counts_retired() {
-                                    this.library.retry_root_counts();
-                                    this.request_root_counts(cx);
-                                } else {
-                                    this.send(
-                                        Command::Scan {
-                                            paths: vec![scan_path.clone()],
-                                            force: this.library.force_scan(),
-                                        },
-                                        cx,
-                                    );
-                                }
+                                this.send(
+                                    Command::Scan {
+                                        paths: vec![scan_path.clone()],
+                                        force: this.library.force_scan(),
+                                    },
+                                    cx,
+                                );
                             }, inline_action)
-                            .when(count_failed, |view| view.text_color(gpui::rgb(theme.error)))
                         }).or_else(|| matches!(entry, DirectoryRow::OtherTracks).then(|| {
-                            let hint = if retry_counts {
-                                "gl-retry-other-counts"
-                            } else if this.library.force_scan() {
+                            let hint = if this.library.force_scan() {
                                 "library-other-force"
                             } else {
                                 "library-other-check"
                             };
                             IconButton::new(gpui::ElementId::named_usize("library-check-other", index), "󰑐", this.tr(hint)).surface(crate::gui::appearance::material::surface(cx))
-                                .enabled(retry_counts || !this.state.system.scanning)
+                                .enabled(!this.state.system.scanning)
                                 .build_with(IconButtonStyle::RowAction, IconButtonDensity::Regular, cx, |this, _, cx| {
-                                    if this.library.other_count_failed() || this.library.root_counts_retired() {
-                                        this.library.retry_root_counts();
-                                        this.request_root_counts(cx);
-                                    } else {
-                                        this.send(Command::CheckOtherTracks { force: this.library.force_scan() }, cx);
-                                    }
+                                    this.send(Command::CheckOtherTracks { force: this.library.force_scan() }, cx);
                                 }, inline_action)
-                                .when(count_failed, |view| view.text_color(gpui::rgb(theme.error)))
                         }));
                         let title = gpui::SharedString::from(title);
                         let name_content = row()
@@ -515,7 +491,6 @@ impl Library {
                                     .when(located, |actions| {
                                         rivu_ui::floating_action_surface(crate::gui::appearance::material::surface(cx), theme.highlight, actions)
                                     })
-                                    .when(retry_counts, |view| view.opacity(1.))
                                     .on_click(|_, _, cx| cx.stop_propagation())
                                     .child(scan),
                                 )
@@ -899,13 +874,12 @@ impl Library {
         );
         // Track counts describe contents, not the configured root projection.
         // Keep its viewport mounted so root changes can demand a fresh forest.
-        if let Some((0, total)) = self.library.search_counts()
-            && (total != 0 || self.library.tree().row_count() == 0)
-        {
+        let (matched, total) = self.library.search_count_parts();
+        if matched == Some(0) && (total != Some(0) || self.library.tree().row_count() == 0) {
             panel = panel.child(caption(
                 theme,
                 self.i18n
-                    .text(if total == 0 {
+                    .text(if total == Some(0) {
                         "search-empty"
                     } else {
                         "search-no-matches"

@@ -34,10 +34,10 @@ See link:23_visuals.adoc#ingestion-and-publication[analysis publication].
 
 Status: implemented, 2026-11-06.
 
-Filtered counts depend on unfiltered root totals. Keep failed dependencies
-retryable under filters; explicit recovery retries counts, while filter changes
-must not automatically retry persistent failures or bypass physical-worker
-ownership. See link:02_library.adoc[Library recovery].
+Matching counts and unfiltered totals load independently. Keep a failed total
+retryable without blocking filtered counts; changing filters does not retry the
+failed total or bypass physical-worker ownership. Explicit recovery retries the
+failed count rather than scanning. See link:02_library.adoc[Library recovery].
 
 [[DEC-003]]
 === DEC-003: Admit denoise state at the allocation boundary
