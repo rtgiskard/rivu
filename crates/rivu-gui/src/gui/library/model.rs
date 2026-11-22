@@ -104,14 +104,12 @@ impl SearchCountScope {
     }
 }
 
-// Both count-only page variants select the same dependencies, regardless of filters.
-pub(super) const SEARCH_COUNT_QUERY: Query = Query::OtherTracksPage {
+pub(super) const SEARCH_COUNT_QUERY: Query = Query::LibraryMatchCounts {
+    roots: Vec::new(),
     query: None,
     favorite: None,
     missing: None,
-    sort: LibrarySort::Id,
-    offset: 0,
-    limit: 0,
+    include_other: false,
 };
 
 #[derive(Clone)]

@@ -352,10 +352,13 @@ mod other_tracks_tests {
             vec!["queue", "add-paths", "a.wav", "--expected-revision", "1"],
             vec!["library", "other", "list", "--sort", "title"],
             vec!["library", "other", "list", "--favorite", "yes"],
-            vec!["library", "other", "count", "--query", "x"],
+            vec!["library", "other", "count", "--limit", "1"],
             vec!["library", "other", "check", "/not-a-root"],
         ] {
             assert!(Args::try_parse_from(std::iter::once("rivu").chain(arguments)).is_err());
         }
+        assert!(
+            Args::try_parse_from(["rivu", "library", "other", "count", "--query", "x"]).is_ok()
+        );
     }
 }

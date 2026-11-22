@@ -337,9 +337,9 @@ Queue reconciliation failures retain occurrences but leave positions unavailable
 Selected-playlist summary failures remain scoped to selection/catalog freshness;
 catalog invalidation forgets counts until a current result restores them.
 
-Library matching counts use count-only `LibraryRootPage` and `OtherTracksPage`
-reads (`limit = 0`, `sort = Id`). They follow count membership/search freshness,
-not display order, statistics, or bitrate. They do not wait for unfiltered totals.
+Library matching counts read configured root batches and Other Tracks under one
+snapshot per batch. A result is published only when every batch matches the
+current count and structure revisions, independently of unfiltered totals.
 Batched root totals and `OtherTracksCount` follow structure freshness and survive
 filter changes. A failed total leaves its side unavailable without invalidating
 matching counts. The unfiltered view reuses the total without issuing matching

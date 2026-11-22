@@ -89,7 +89,7 @@ fn projection_totals_and_rows_follow_filters_and_writer_changes() {
     assert_eq!(counts[3](), 146);
     assert_eq!(
         store
-            .other_tracks_count(&[PathBuf::from("/outside")])
+            .other_tracks_match_count(&[PathBuf::from("/outside")], None, None, None)
             .unwrap(),
         0
     );

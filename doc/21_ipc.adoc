@@ -719,18 +719,16 @@ cache, and retained metadata cannot recreate a deleted playlist's scope.
 commit actually changes the `bitrate_bps`/`bitrate_exact` pair.
 `QueryRevisions.bitrate` participates in stamps for bitrate-bearing row queries:
 Track, library/directory rows, album members, Queue rows, playlist entries, and
-duplicate members. Album representatives do not carry bitrate. A row query
-normally keeps its stamp at `limit = 0`. The exceptions are `LibraryRootPage`
-and `OtherTracksPage`: at zero limit they select `counts` and `structure`
-instead of `library` and `bitrate`. Dedicated counts, statistics, summaries
-without Track payloads, and ID/location-only queries do not select bitrate.
+duplicate members. Album representatives do not carry bitrate. Row queries
+retain their row stamp. Dedicated counts, statistics, summaries without Track
+payloads, and ID/location-only queries do not select bitrate.
 Bitrate-only publication does not advance structure,
 collection membership, or count revisions, and does not query Queue, album, or
 playlist membership.
 
 `LibrarySnapshot.count_revision` / `QueryRevisions.counts` track catalog matching
-and membership facts independently of row freshness. It supports scalar lookup
-reuse and freshness of those two count-only pages. See
+and membership facts independently of row freshness. `LibraryMatchCounts`
+depends on `counts` and `structure`, not on row freshness. See
 link:22_cache.adoc#core-owned-lookup-retention[Core lookup retention].
 
 For display reuse, range anchors and consumer publication rights, see
@@ -885,6 +883,11 @@ and target identity/content verification.
 favorite/missing filters, and sort order. Root paths use the existing lexical
 directory normalization and component boundary: `/home/a` never includes
 `/home/ab`; `/` includes the whole absolute-path library.
+
+`LibraryRootPage` and `OtherTracksPage` require a positive limit. Use
+`LibraryMatchCounts` for filtered counts without rows. It accepts up to 256 root
+paths, returns their counts in input order, and optionally returns the filtered
+Other Tracks count from the same read snapshot.
 
 `LibraryRootCounts` accepts up to 256 root paths and returns one `{path, total}`
 per input, in input order, using a single batched query. Larger input batches

@@ -38,7 +38,12 @@ fn other_projection_is_root_complement_without_membership_or_reference_mutation(
     assert_eq!(ids(&store, &[], LibrarySort::Id), [1, 2, 3, 4, 5, 6, 7]);
     let roots = ["/music/./", "/music/deep/../", "/音楽"].map(PathBuf::from);
     assert_eq!(ids(&store, &roots, LibrarySort::Id), [3, 5, 6, 7]);
-    assert_eq!(store.other_tracks_count(&roots).unwrap(), 4);
+    assert_eq!(
+        store
+            .other_tracks_match_count(&roots, None, None, None)
+            .unwrap(),
+        4
+    );
     assert_eq!(
         store.other_tracks_sources(&roots).unwrap(),
         [

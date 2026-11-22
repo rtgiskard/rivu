@@ -288,6 +288,10 @@ pub enum ViewResponse {
     PlaylistEntryLocations(Vec<PlaylistEntryLocation>),
     ProcessingTask(Option<Box<crate::model::ProcessingTaskStatus>>),
     PlaylistSummary(Option<PlaylistSummary>),
+    LibraryMatchCounts {
+        roots: Vec<LibraryRootCount>,
+        other: Option<usize>,
+    },
 }
 /// Final task status, returned only after the owner commits its outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]

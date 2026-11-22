@@ -40,10 +40,11 @@ rivu library other check --wait
 rivu library other check --force --wait
 ----
 
-`library other list` returns one page (100 rows by default, at most 256); use
-`--offset` and `--limit` to read more. List and locate accept `--query`, `--favorite true|false`,
-`--missing true|false`, and `--sort id|album|most-played`. Omit a boolean filter to
-include both states. Count always returns the unfiltered collection total.
+`library other list` returns one page (1–256 rows requested, default 100); use
+`--offset` and `--limit` to read more. List, count, and locate accept `--query`,
+`--favorite true|false`, and `--missing true|false`. Omit a filter to include both
+states. To get a filtered total without rows, use `library other count` instead
+of `list --limit 0`. List and locate also accept `--sort id|album|most-played`.
 `rivu queue add-other` appends the complete collection without starting playback,
 independently of browsing filters. Terminal browsing and keys are documented in
 link:08_tui.adoc#terminal-client[Terminal client].
@@ -852,9 +853,9 @@ link:09_cli.adoc#cli-command-conventions[CLI conventions]. Library result shapes
   status is observational and must not be mistaken for a failed command's result.
 * `library other list` and both `library duplicates` variants return one
   `{total, rows}` page. `--fingerprint` selects duplicate members instead of group
-  summaries. Page size is `0..256`, default 100; `--offset` defaults to zero.
-  `library other count` returns a number; `library other locate` returns its
-  tagged location result.
+  summaries. Other Tracks page size is `1..256`; duplicate page size is `0..256`.
+  Both default to 100 rows and offset zero. `library other count` returns a JSON
+  number; `library other locate` returns its tagged location result.
 * `library stats` returns aggregate statistics; `library probe` returns metadata
   and decoder status.
 

@@ -6,90 +6,72 @@ use super::{
 use crate::gui::components::search::set_search_count_parts;
 use gpui::Context;
 use rivu_protocol::{
-    model::{LibrarySort, Query},
+    model::Query,
     response::{QueryError, ViewResponse},
 };
 use std::rc::Rc;
-
-async fn library_match_count(
-    handle: &crate::frontend::FrontendHandle,
-    request: &model::SearchCountRequest,
-    query: Query,
-) -> Result<usize, CountBlock> {
-    let response = handle.query_if_current(query, request.ticket.clone()).await;
-    match response.result {
-        Ok(ViewResponse::LibraryPage(page))
-            if SEARCH_COUNT_QUERY.stamp(response.revisions) == request.stamp =>
-        {
-            Ok(page.total)
-        }
-        Ok(ViewResponse::LibraryPage(_))
-        | Err(QueryError::RevisionChanged | QueryError::Cancelled) => Err(CountBlock::Retired),
-        _ => Err(CountBlock::Failed),
-    }
-}
 
 async fn library_search_counts(
     handle: &crate::frontend::FrontendHandle,
     request: &model::SearchCountRequest,
 ) -> Result<model::SearchCountResult, CountBlock> {
-    let model::SearchCountRequest {
-        scope,
-        ticket,
-        other_empty,
-        ..
-    } = request;
-    let model::SearchCountScope {
-        roots,
-        query,
-        favorite,
-        missing,
-    } = scope.as_ref();
-    if !ticket.is_current() {
+    if !request.ticket.is_current() {
         return Err(CountBlock::Retired);
     }
-    let mut matched = 0;
-    let mut root_counts = std::collections::HashMap::new();
-    for root in roots {
-        let total = library_match_count(
-            handle,
-            request,
-            Query::LibraryRootPage {
-                path: root.clone(),
-                query: query.clone(),
-                favorite: *favorite,
-                missing: *missing,
-                sort: LibrarySort::Id,
-                offset: 0,
-                limit: 0,
-            },
-        )
-        .await?;
-        matched += total;
-        root_counts.insert(root.clone(), total);
-    }
-    let other_matched = if *other_empty {
-        0
-    } else {
-        library_match_count(
-            handle,
-            request,
-            Query::OtherTracksPage {
-                query: query.clone(),
-                favorite: *favorite,
-                missing: *missing,
-                sort: LibrarySort::Id,
-                offset: 0,
-                limit: 0,
-            },
-        )
-        .await?
+    let scope = &request.scope;
+    let mut result = model::SearchCountResult {
+        matched: 0,
+        roots: std::collections::HashMap::with_capacity(scope.roots.len()),
+        other_matched: 0,
     };
-    Ok(model::SearchCountResult {
-        matched: matched + other_matched,
-        roots: root_counts,
-        other_matched,
-    })
+    let batches = scope.roots.chunks(rivu_protocol::model::MAX_QUERY_ROWS);
+    let batch_count = batches.len().max(1);
+    for (index, roots) in batches
+        .chain((scope.roots.is_empty() && !request.other_empty).then_some(&[][..]))
+        .enumerate()
+    {
+        let include_other = index + 1 == batch_count && !request.other_empty;
+        let response = handle
+            .query_if_current(
+                Query::LibraryMatchCounts {
+                    roots: roots.to_vec(),
+                    query: scope.query.clone(),
+                    favorite: scope.favorite,
+                    missing: scope.missing,
+                    include_other,
+                },
+                request.ticket.clone(),
+            )
+            .await;
+        match response.result {
+            Ok(ViewResponse::LibraryMatchCounts {
+                roots: counts,
+                other,
+            }) => {
+                if SEARCH_COUNT_QUERY.stamp(response.revisions) != request.stamp {
+                    return Err(CountBlock::Retired);
+                }
+                if other.is_some() != include_other
+                    || !counts.iter().map(|count| &count.path).eq(roots)
+                {
+                    return Err(CountBlock::Failed);
+                }
+                for count in counts {
+                    result.matched += count.total;
+                    result.roots.insert(count.path, count.total);
+                }
+                if let Some(other) = other {
+                    result.other_matched = other;
+                    result.matched += other;
+                }
+            }
+            Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
+                return Err(CountBlock::Retired);
+            }
+            _ => return Err(CountBlock::Failed),
+        }
+    }
+    Ok(result)
 }
 
 impl Library {

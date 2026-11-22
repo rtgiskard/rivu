@@ -264,13 +264,11 @@ pub(super) fn run(
         } => list_library(i18n, data_dir, json, query, favorite, missing),
         LibraryAction::Other(
             action @ (OtherTracksAction::List { .. }
-            | OtherTracksAction::Count
+            | OtherTracksAction::Count { .. }
             | OtherTracksAction::Locate { .. }),
         ) => {
             let query = other_tracks_query(action)?;
-            let view = rivu_client::query(data_dir, query)?
-                .result
-                .map_err(anyhow::Error::from)?;
+            let view = rivu_client::query(data_dir, query)?.result?;
             output::show_other_tracks(i18n, view, json)
         }
         LibraryAction::Stats => {
@@ -527,25 +525,36 @@ pub(super) fn run(
 
 pub(super) fn other_tracks_query(action: OtherTracksAction) -> Result<Query> {
     Ok(match action {
+        OtherTracksAction::Count { filter } => Query::LibraryMatchCounts {
+            roots: Vec::new(),
+            query: filter.query,
+            favorite: filter.favorite,
+            missing: filter.missing,
+            include_other: true,
+        },
         OtherTracksAction::List {
             filter,
+            sort,
             offset,
             limit,
         } => Query::OtherTracksPage {
             query: filter.query,
             favorite: filter.favorite,
             missing: filter.missing,
-            sort: filter.sort.into(),
+            sort: sort.into(),
             offset,
             limit,
         },
-        OtherTracksAction::Count => Query::OtherTracksCount,
-        OtherTracksAction::Locate { track_id, filter } => Query::OtherTracksLocate {
+        OtherTracksAction::Locate {
+            track_id,
+            filter,
+            sort,
+        } => Query::OtherTracksLocate {
             track_id,
             query: filter.query,
             favorite: filter.favorite,
             missing: filter.missing,
-            sort: filter.sort.into(),
+            sort: sort.into(),
         },
         OtherTracksAction::Check { .. } => bail!("File checks are commands, not queries"),
     })

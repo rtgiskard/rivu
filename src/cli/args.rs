@@ -407,8 +407,6 @@ pub(super) struct OtherTracksFilter {
     /// Match missing or present tracks; omit to include both.
     #[arg(long, action = clap::ArgAction::Set)]
     pub(super) missing: Option<bool>,
-    #[arg(long, value_enum, default_value = "id")]
-    pub(super) sort: LibraryOrder,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -434,18 +432,25 @@ pub(super) enum OtherTracksAction {
     List {
         #[command(flatten)]
         filter: OtherTracksFilter,
+        #[arg(long, value_enum, default_value = "id")]
+        sort: LibraryOrder,
         #[arg(long, default_value_t = 0)]
         offset: usize,
-        #[arg(long, default_value_t = 100, value_parser = parse_page_limit)]
+        #[arg(long, default_value_t = 100, value_parser = parse_positive_page_limit)]
         limit: usize,
     },
-    /// Count tracks not covered by current configured roots; with no roots, counts all registered tracks.
-    Count,
+    /// Count matching tracks not covered by current configured roots.
+    Count {
+        #[command(flatten)]
+        filter: OtherTracksFilter,
+    },
     /// Locate a track outside current configured roots in the filtered and sorted Other view; with no roots, searches all registered tracks.
     Locate {
         track_id: i64,
         #[command(flatten)]
         filter: OtherTracksFilter,
+        #[arg(long, value_enum, default_value = "id")]
+        sort: LibraryOrder,
     },
     /// Check registered files not covered by current configured roots; with no roots, checks all registered tracks.
     Check {
@@ -599,6 +604,15 @@ fn parse_page_limit(value: &str) -> Result<usize, String> {
         Ok(limit)
     } else {
         Err("page limit must not exceed 256".to_owned())
+    }
+}
+
+fn parse_positive_page_limit(value: &str) -> Result<usize, String> {
+    match parse_page_limit(value)? {
+        0 => Err(
+            "page limit must be positive; use `library other count` to count matches".to_owned(),
+        ),
+        limit => Ok(limit),
     }
 }
 
@@ -922,11 +936,16 @@ mod tests {
             ])
             .is_ok()
         );
-        for command in [
-            vec!["library", "duplicates"],
-            vec!["library", "other", "list"],
+        for (command, accepts_zero) in [
+            (vec!["library", "duplicates"], true),
+            (vec!["library", "other", "list"], false),
         ] {
-            for (value, accepted) in [("0", true), ("256", true), ("257", false)] {
+            for (value, accepted) in [
+                ("0", accepts_zero),
+                ("1", true),
+                ("256", true),
+                ("257", false),
+            ] {
                 let argv = ["rivu"]
                     .into_iter()
                     .chain(command.iter().copied())

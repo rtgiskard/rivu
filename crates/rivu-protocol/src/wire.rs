@@ -18,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 51;
+pub const PROTOCOL_VERSION: u8 = 52;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -266,6 +266,13 @@ pub enum WireQuery {
     OtherTracksCount,
     PlaylistSummary {
         playlist_id: i64,
+    },
+    LibraryMatchCounts {
+        roots: Vec<PathBuf>,
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        include_other: bool,
     },
 }
 
@@ -626,6 +633,19 @@ impl From<Query> for WireQuery {
                 limit: limit as u64,
             },
             Query::PlaylistSummary { playlist_id } => Self::PlaylistSummary { playlist_id },
+            Query::LibraryMatchCounts {
+                roots,
+                query,
+                favorite,
+                missing,
+                include_other,
+            } => Self::LibraryMatchCounts {
+                roots,
+                query,
+                favorite,
+                missing,
+                include_other,
+            },
             Query::AlbumTracks {
                 key,
                 query,
@@ -1060,6 +1080,19 @@ impl TryFrom<WireQuery> for Query {
             WireQuery::RelocationTask { id } => Self::RelocationTask { id },
             WireQuery::ProcessingTask { id } => Self::ProcessingTask { id },
             WireQuery::PlaylistSummary { playlist_id } => Self::PlaylistSummary { playlist_id },
+            WireQuery::LibraryMatchCounts {
+                roots,
+                query,
+                favorite,
+                missing,
+                include_other,
+            } => Self::LibraryMatchCounts {
+                roots,
+                query,
+                favorite,
+                missing,
+                include_other,
+            },
         })
     }
 }

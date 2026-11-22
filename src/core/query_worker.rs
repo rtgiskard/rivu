@@ -136,6 +136,11 @@ impl ReadView<'_> {
                 ViewResponse::QueueEntries(self.store.queue_entries(query.as_deref(), queue_ids)?)
             }
             Query::ScanTask { .. } => unreachable!("task status stays on Core"),
+            Query::OtherTracksPage { limit: 0, .. } | Query::LibraryRootPage { limit: 0, .. } => {
+                return Err(QueryError::Message(
+                    "Library page limit must be positive; use LibraryMatchCounts for counts".into(),
+                ));
+            }
             Query::OtherTracksPage {
                 query,
                 favorite,
@@ -152,10 +157,14 @@ impl ReadView<'_> {
                 *offset,
                 *limit,
             )?),
-            Query::OtherTracksCount => ViewResponse::OtherTracksCount(
-                self.store
-                    .other_tracks_count(&self.state.config.library_roots)?,
-            ),
+            Query::OtherTracksCount => {
+                ViewResponse::OtherTracksCount(self.store.other_tracks_match_count(
+                    &self.state.config.library_roots,
+                    None,
+                    None,
+                    None,
+                )?)
+            }
             Query::OtherTracksLocate {
                 track_id,
                 query,
@@ -204,6 +213,31 @@ impl ReadView<'_> {
             )?),
             Query::LibraryRootCounts { roots } => {
                 ViewResponse::LibraryRootCounts(self.store.library_root_counts(roots)?)
+            }
+            Query::LibraryMatchCounts {
+                roots,
+                query,
+                favorite,
+                missing,
+                include_other,
+            } => {
+                let roots = self.store.library_root_match_counts(
+                    roots,
+                    query.as_deref(),
+                    *favorite,
+                    *missing,
+                )?;
+                let other = include_other
+                    .then(|| {
+                        self.store.other_tracks_match_count(
+                            &self.state.config.library_roots,
+                            query.as_deref(),
+                            *favorite,
+                            *missing,
+                        )
+                    })
+                    .transpose()?;
+                ViewResponse::LibraryMatchCounts { roots, other }
             }
             Query::LibraryRootStats { roots } => {
                 ViewResponse::LibraryRootStats(self.store.library_root_stats(roots)?)
@@ -890,7 +924,7 @@ mod tests {
 
     #[test]
     fn root_and_other_count_reads_accept_payload_changes_but_reject_changed_membership() {
-        use rivu_protocol::model::{ConfigMutation, LibrarySort};
+        use rivu_protocol::model::ConfigMutation;
 
         let (directory, mut core) = super::super::tests::fixture();
         let root = directory.path().to_path_buf();
@@ -900,47 +934,39 @@ mod tests {
         let path = root.join("library.db");
         let fence = Arc::new(ReadFence::default());
         let mut reader = None;
-        let queries = [
-            Query::LibraryRootPage {
-                path: root.clone(),
-                query: Some("Track 1".into()),
-                favorite: Some(true),
-                missing: None,
-                sort: LibrarySort::Id,
-                offset: 0,
-                limit: 0,
-            },
-            Query::OtherTracksPage {
-                query: Some("Track 1".into()),
-                favorite: Some(true),
-                missing: None,
-                sort: LibrarySort::Id,
-                offset: 0,
-                limit: 0,
-            },
-        ];
+        let query = Query::LibraryMatchCounts {
+            roots: vec![root.clone()],
+            query: Some("Track 1".into()),
+            favorite: Some(true),
+            missing: None,
+            include_other: true,
+        };
         let captured = core.shared.read().clone();
         let stats = core.store.increment_play_count(1).unwrap();
         core.update_track_stats(1, stats).unwrap();
         core.publish();
-        let assert_total = |response: QueryResponse, total| {
-            let Ok(ViewResponse::LibraryPage(page)) = response.result else {
-                panic!("expected a count-only library page: {:?}", response.result);
+        let assert_totals = |response: QueryResponse, root, outside| {
+            let Ok(ViewResponse::LibraryMatchCounts { roots, other }) = response.result else {
+                panic!("expected grouped counts: {:?}", response.result);
             };
-            assert_eq!(page.total, total);
-            assert!(page.rows.is_empty());
+            assert_eq!(
+                roots.iter().map(|count| count.total).collect::<Vec<_>>(),
+                [root]
+            );
+            assert_eq!(other, Some(outside));
         };
-        for query in &queries {
-            let response = execute_read_at(
+        assert_totals(
+            execute_read_at(
                 &core,
                 &path,
                 &mut reader,
                 &fence,
-                ReadState::capture(&captured, query),
+                ReadState::capture(&captured, &query),
                 query.clone(),
-            );
-            assert_total(response, 0);
-        }
+            ),
+            0,
+            0,
+        );
 
         core.command(Command::SetFavorite {
             track_ids: vec![1],
@@ -949,40 +975,34 @@ mod tests {
         .unwrap();
         core.publish();
         let before_roots = core.shared.read().clone();
-        for query in &queries {
-            let obsolete = execute_read_at(
-                &core,
-                &path,
-                &mut reader,
-                &fence,
-                ReadState::capture(&captured, query),
-                query.clone(),
-            );
-            assert!(matches!(obsolete.result, Err(QueryError::RevisionChanged)));
-            assert_total(
-                execute_read(&core, &path, &mut reader, &fence, query.clone()),
-                1,
-            );
-        }
+        let obsolete = execute_read_at(
+            &core,
+            &path,
+            &mut reader,
+            &fence,
+            ReadState::capture(&captured, &query),
+            query.clone(),
+        );
+        assert!(matches!(obsolete.result, Err(QueryError::RevisionChanged)));
+        assert_totals(
+            execute_read(&core, &path, &mut reader, &fence, query.clone()),
+            1,
+            1,
+        );
 
         core.mutate_config(ConfigMutation::AddLibraryRoot(root))
             .unwrap();
         core.publish();
-        for (query, total) in queries.into_iter().zip([1, 0]) {
-            let obsolete = execute_read_at(
-                &core,
-                &path,
-                &mut reader,
-                &fence,
-                ReadState::capture(&before_roots, &query),
-                query.clone(),
-            );
-            assert!(matches!(obsolete.result, Err(QueryError::RevisionChanged)));
-            assert_total(
-                execute_read(&core, &path, &mut reader, &fence, query),
-                total,
-            );
-        }
+        let obsolete = execute_read_at(
+            &core,
+            &path,
+            &mut reader,
+            &fence,
+            ReadState::capture(&before_roots, &query),
+            query.clone(),
+        );
+        assert!(matches!(obsolete.result, Err(QueryError::RevisionChanged)));
+        assert_totals(execute_read(&core, &path, &mut reader, &fence, query), 1, 0);
     }
 
     #[test]
@@ -1015,13 +1035,12 @@ mod tests {
                 offset: 0,
                 limit: 0,
             },
-            Query::OtherTracksPage {
+            Query::LibraryMatchCounts {
+                roots: Vec::new(),
                 query: Some("Needle".into()),
                 favorite: None,
                 missing: None,
-                sort: LibrarySort::Id,
-                offset: 0,
-                limit: 0,
+                include_other: true,
             },
             Query::DirectoryPage {
                 path: directory.path().to_path_buf(),
@@ -1051,6 +1070,9 @@ mod tests {
             ViewResponse::LibraryPage(page) | ViewResponse::AlbumTracks(page) => page.total,
             ViewResponse::DirectoryPage(page) => page.total,
             ViewResponse::Albums(page) => page.total,
+            ViewResponse::LibraryMatchCounts {
+                other: Some(total), ..
+            } => total,
             other => panic!("unexpected count response: {other:?}"),
         };
         for query in &queries {

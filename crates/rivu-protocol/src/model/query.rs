@@ -160,6 +160,13 @@ pub enum Query {
     PlaylistSummary {
         playlist_id: i64,
     },
+    LibraryMatchCounts {
+        roots: Vec<PathBuf>,
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        include_other: bool,
+    },
 }
 
 /// Selected equality tokens, owned by the query rather than its consumers.
@@ -247,13 +254,7 @@ impl QueryStamp {
 /// Borrowed projection identity: demand never allocates or changes the data key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryIdentity<'a> {
-    OtherTracksPage(
-        &'a Option<String>,
-        Option<bool>,
-        Option<bool>,
-        LibrarySort,
-        bool,
-    ),
+    OtherTracksPage(&'a Option<String>, Option<bool>, Option<bool>, LibrarySort),
     OtherTracksLocate(
         i64,
         &'a Option<String>,
@@ -285,7 +286,6 @@ pub enum QueryIdentity<'a> {
         Option<bool>,
         Option<bool>,
         LibrarySort,
-        bool,
     ),
     LibraryLocate(
         i64,
@@ -309,6 +309,13 @@ pub enum QueryIdentity<'a> {
     DuplicateMemberSelection(&'a str, &'a [i64]),
     ProcessingTask(u64),
     PlaylistSummary(i64),
+    LibraryMatchCounts(
+        &'a [PathBuf],
+        &'a Option<String>,
+        Option<bool>,
+        Option<bool>,
+        bool,
+    ),
 }
 
 impl Query {
@@ -333,8 +340,8 @@ impl Query {
                 stamp.library = revisions.library;
                 stamp.album = revisions.album;
             }
-            Self::OtherTracksPage { limit: 0, .. } | Self::LibraryRootPage { limit: 0, .. } => {
-                // Count-only pages do not depend on row payload or display order.
+            Self::LibraryMatchCounts { .. } => {
+                // Matching counts do not depend on row payload or display order.
                 stamp.counts = revisions.counts;
                 stamp.structure = revisions.structure;
             }
@@ -400,8 +407,8 @@ impl Query {
                 | Self::Track { .. }
                 | Self::AlbumTracks { .. }
                 | Self::DirectoryPage { .. }
-                | Self::OtherTracksPage { limit: 1.., .. }
-                | Self::LibraryRootPage { limit: 1.., .. }
+                | Self::OtherTracksPage { .. }
+                | Self::LibraryRootPage { .. }
                 | Self::PlaylistEntries { .. }
                 | Self::PlaylistEntryBatch { .. }
                 | Self::QueuePage { .. }
@@ -422,7 +429,7 @@ impl Query {
         }
     }
 
-    /// Demand is not identity, except where a zero limit selects a count-only stamp.
+    /// Pagination demand does not affect query identity.
     pub fn identity(&self) -> QueryIdentity<'_> {
         match self {
             Self::OtherTracksPage {
@@ -430,9 +437,8 @@ impl Query {
                 favorite,
                 missing,
                 sort,
-                limit,
                 ..
-            } => QueryIdentity::OtherTracksPage(query, *favorite, *missing, *sort, *limit == 0),
+            } => QueryIdentity::OtherTracksPage(query, *favorite, *missing, *sort),
             Self::OtherTracksLocate {
                 track_id,
                 query,
@@ -485,11 +491,8 @@ impl Query {
                 favorite,
                 missing,
                 sort,
-                limit,
                 ..
-            } => {
-                QueryIdentity::LibraryRootPage(path, query, *favorite, *missing, *sort, *limit == 0)
-            }
+            } => QueryIdentity::LibraryRootPage(path, query, *favorite, *missing, *sort),
             Self::LibraryLocate {
                 track_id,
                 path,
@@ -502,6 +505,15 @@ impl Query {
                 *track_id, path, *tree, query, *favorite, *missing, *sort,
             ),
             Self::LibraryRootCounts { roots } => QueryIdentity::LibraryRootCounts(roots),
+            Self::LibraryMatchCounts {
+                roots,
+                query,
+                favorite,
+                missing,
+                include_other,
+            } => {
+                QueryIdentity::LibraryMatchCounts(roots, query, *favorite, *missing, *include_other)
+            }
             Self::LibraryRootStats { roots } => QueryIdentity::LibraryRootStats(roots),
             Self::ScanTask { id } => QueryIdentity::ScanTask(*id),
             Self::QueuePage { query, .. } => QueryIdentity::QueuePage(query),
@@ -710,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn root_and_other_count_pages_select_counts_and_structure_only() {
+    fn match_counts_and_pages_select_distinct_revisions() {
         let revisions = QueryRevisions {
             counts: 1,
             structure: 2,
@@ -724,26 +736,15 @@ mod tests {
             structure: 2,
             ..Default::default()
         };
-        for mut query in [
-            Query::LibraryRootPage {
-                path: "/music".into(),
-                query: Some("needle".into()),
-                favorite: Some(true),
-                missing: None,
-                sort: LibrarySort::MostPlayed,
-                offset: 0,
-                limit: 0,
-            },
-            Query::OtherTracksPage {
-                query: Some("needle".into()),
-                favorite: Some(true),
-                missing: None,
-                sort: LibrarySort::MostPlayed,
-                offset: 0,
-                limit: 0,
-            },
-        ] {
-            assert_eq!(query.stamp(revisions).revisions(), count_revisions);
+        let count = Query::LibraryMatchCounts {
+            roots: vec!["/music".into()],
+            query: Some("needle".into()),
+            favorite: Some(true),
+            missing: None,
+            include_other: true,
+        };
+        {
+            assert_eq!(count.stamp(revisions).revisions(), count_revisions);
             for changed in [
                 count_revisions.with_count_revision(2),
                 QueryRevisions {
@@ -751,16 +752,30 @@ mod tests {
                     ..count_revisions
                 },
             ] {
-                let change = impact(&query, revisions, changed);
+                let change = impact(&count, revisions, changed);
                 assert!(change.coordinates_changed);
                 assert!(!change.payload_changed);
             }
-            match &mut query {
-                Query::LibraryRootPage { limit, .. } | Query::OtherTracksPage { limit, .. } => {
-                    *limit = 1;
-                }
-                _ => unreachable!(),
-            }
+        }
+        for query in [
+            Query::LibraryRootPage {
+                path: "/music".into(),
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 1,
+            },
+            Query::OtherTracksPage {
+                query: None,
+                favorite: None,
+                missing: None,
+                sort: LibrarySort::Id,
+                offset: 0,
+                limit: 1,
+            },
+        ] {
             assert_eq!(
                 query.stamp(revisions).revisions(),
                 QueryRevisions {

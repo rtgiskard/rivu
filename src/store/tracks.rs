@@ -317,14 +317,6 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub(crate) fn other_tracks_count(&self, roots: &[PathBuf]) -> Result<usize> {
-        let prefixes = other_root_prefixes(roots)?;
-        let key = serde_json::to_string(&prefixes)?;
-        self.cached_count(super::CountDomain::Other, &[&key, "", "", ""], || {
-            self.count_other_paths(prefixes)
-        })
-    }
-
     fn count_other_paths(&self, prefixes: Vec<String>) -> Result<usize> {
         let Some(OtherPathBounds { first, end, gaps }) = other_path_bounds(prefixes) else {
             return self.track_count();
@@ -355,11 +347,46 @@ impl Store {
         let prefixes = other_root_prefixes(roots)?;
         let roots = serde_json::to_string(&prefixes)?;
         let query = search_query(query);
-        let total = self.cached_count(
+        let total =
+            self.count_other_matches(prefixes, &roots, query.as_deref(), favorite, missing)?;
+        FlatLibraryPage {
+            scope: FlatLibraryScope::Other(&roots),
+            query: query.as_deref(),
+            favorite,
+            missing,
+            sort,
+            offset,
+            limit,
+        }
+        .load(&self.conn, total)
+    }
+
+    pub(crate) fn other_tracks_match_count(
+        &self,
+        roots: &[PathBuf],
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+    ) -> Result<usize> {
+        let prefixes = other_root_prefixes(roots)?;
+        let roots = serde_json::to_string(&prefixes)?;
+        let query = search_query(query);
+        self.count_other_matches(prefixes, &roots, query.as_deref(), favorite, missing)
+    }
+
+    fn count_other_matches(
+        &self,
+        prefixes: Vec<String>,
+        roots: &str,
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+    ) -> Result<usize> {
+        self.cached_count(
             super::CountDomain::Other,
             &[
-                &roots,
-                query.as_deref().unwrap_or(""),
+                roots,
+                query.unwrap_or(""),
                 bool_key(favorite),
                 bool_key(missing),
             ],
@@ -376,17 +403,7 @@ impl Store {
                         row.get::<_, i64>(0)
                     })? as usize)
             },
-        )?;
-        FlatLibraryPage {
-            scope: FlatLibraryScope::Other(&roots),
-            query: query.as_deref(),
-            favorite,
-            missing,
-            sort,
-            offset,
-            limit,
-        }
-        .load(&self.conn, total)
+        )
     }
 
     pub(crate) fn other_tracks_location(
@@ -814,6 +831,36 @@ impl Store {
                     row.get::<_, i64>(1)? as usize,
                 ))
             })?)
+    }
+
+    pub(crate) fn library_root_match_counts(
+        &self,
+        roots: &[PathBuf],
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+    ) -> Result<Vec<rivu_protocol::model::LibraryRootCount>> {
+        anyhow::ensure!(
+            roots.len() <= rivu_protocol::model::MAX_QUERY_ROWS,
+            "Too many Library roots in match count request"
+        );
+        let query = search_query(query);
+        roots
+            .iter()
+            .map(|path| {
+                let prefix = directory_prefix(path)?;
+                let total = self.filtered_track_count(
+                    query.as_deref(),
+                    favorite,
+                    missing,
+                    (!prefix.is_empty()).then_some(prefix.as_str()),
+                )?;
+                Ok(rivu_protocol::model::LibraryRootCount {
+                    path: path.clone(),
+                    total,
+                })
+            })
+            .collect()
     }
 
     /// One aggregate query for all roots; overlapping and duplicate inputs remain independent.

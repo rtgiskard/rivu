@@ -155,7 +155,9 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
                 }
             }
         }
-        ViewResponse::OtherTracksCount(count) => writeln!(output, "{count}")?,
+        ViewResponse::LibraryMatchCounts {
+            other: Some(total), ..
+        } => writeln!(output, "{total}")?,
         ViewResponse::LibraryLocate(location) => {
             if json {
                 writeln!(output, "{}", serde_json::to_string_pretty(&location)?)?;
