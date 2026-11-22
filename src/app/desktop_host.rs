@@ -92,16 +92,16 @@ mod tests {
             runtime.test_executor(),
         )
         .unwrap();
-        let presence = app.subscribe_desktop();
-        presence.try_recv().unwrap();
+        let changes = app.subscribe_desktop_changes();
+        changes.try_recv().unwrap();
         let mut registration = rivu_client::client_session(directory.path());
         assert!(registration.register_desktop().unwrap().is_success());
         assert!(!registration.register_desktop().unwrap().is_success());
-        presence.try_recv().unwrap();
+        changes.try_recv().unwrap();
         drop(registration);
         async_io::block_on(rivu_protocol::transport::timeout(
             Duration::from_secs(5),
-            presence.recv(),
+            changes.recv(),
         ))
         .expect("server did not retire the disconnected desktop registration")
         .unwrap();

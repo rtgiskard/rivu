@@ -147,9 +147,14 @@ configuration even if the new frontend supplies another config path.
 Automatically started Core processes detach from the terminal session and use
 at most 64 KiB of anonymous startup diagnostic storage. Successful initialization
 disconnects that sink; failures return the retained diagnostic to the launcher.
-Manual `serve` retains its normal stderr. GUI open requests coalesce during
-desktop startup under the original child and startup deadline. A failed startup
-is reported rather than automatically replayed; a later explicit open can retry.
+Manual `serve` retains its normal stderr. The service starts a desktop only when
+activation finds no listener or confirms the previous desktop released its
+singleton after flushing the layout. A retiring desktop can acknowledge
+retirement for a request from a different Core instance. A disconnect without
+confirmation, a live desktop's instance mismatch, a timeout or an invalid reply
+does not trigger a launch. GUI open requests coalesce during desktop startup
+under the original child and startup deadline. A failed startup is reported
+rather than automatically replayed. A later explicit open can retry.
 The service writes and flushes its readiness message to stdout. If either fails,
 startup returns an error after normal application teardown and exits unsuccessfully,
 including when a pipe reader has closed; it does not panic or retry the output.

@@ -36,11 +36,13 @@ use std::{
 #[cfg(test)]
 use std::{thread, time::Duration};
 
+/// Publishes the same invalidation on desktop registration and disconnect.
+/// Subscribers must check the activation socket, not infer presence from a hint.
 #[derive(Default)]
-struct DesktopPresence {
+struct DesktopChanges {
     subscribers: parking_lot::Mutex<Vec<async_channel::Sender<()>>>,
 }
-impl DesktopPresence {
+impl DesktopChanges {
     fn notify(&self) {
         self.subscribers.lock().retain(|sender| {
             let _ = sender.try_send(());
@@ -48,7 +50,7 @@ impl DesktopPresence {
         });
     }
 }
-pub(crate) struct DesktopRegistration(Arc<DesktopPresence>);
+pub(crate) struct DesktopRegistration(Arc<DesktopChanges>);
 impl Drop for DesktopRegistration {
     fn drop(&mut self) {
         self.0.notify();
@@ -62,7 +64,7 @@ pub(crate) struct AppHandle {
     #[cfg(feature = "gui")]
     data_dir: Arc<PathBuf>,
     shutting_down: Arc<AtomicBool>,
-    desktop: Arc<DesktopPresence>,
+    desktop_changes: Arc<DesktopChanges>,
     #[cfg(feature = "gui")]
     activation: async_channel::Sender<()>,
     #[cfg(feature = "gui")]
@@ -85,7 +87,7 @@ impl AppHandle {
             #[cfg(feature = "gui")]
             data_dir: Arc::new(data_dir.to_owned()),
             shutting_down,
-            desktop: Arc::new(DesktopPresence::default()),
+            desktop_changes: Arc::new(DesktopChanges::default()),
             #[cfg(feature = "gui")]
             activation,
             #[cfg(feature = "gui")]
@@ -93,14 +95,14 @@ impl AppHandle {
         }
     }
     pub(crate) fn register_desktop(&self) -> DesktopRegistration {
-        self.desktop.notify();
-        DesktopRegistration(Arc::clone(&self.desktop))
+        self.desktop_changes.notify();
+        DesktopRegistration(Arc::clone(&self.desktop_changes))
     }
     #[cfg(feature = "gui")]
-    pub(crate) fn subscribe_desktop(&self) -> async_channel::Receiver<()> {
+    pub(crate) fn subscribe_desktop_changes(&self) -> async_channel::Receiver<()> {
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(());
-        self.desktop.subscribers.lock().push(sender);
+        self.desktop_changes.subscribers.lock().push(sender);
         receiver
     }
     pub(crate) fn can_raise(&self) -> bool {
@@ -662,7 +664,7 @@ mod lifetime_tests {
         }
         assert!(app.activation_requests.try_recv().is_ok());
         assert!(app.activation_requests.try_recv().is_err());
-        let changes = app.subscribe_desktop();
+        let changes = app.subscribe_desktop_changes();
         assert!(changes.try_recv().is_ok());
         let desktop = app.register_desktop();
         assert!(changes.try_recv().is_ok());

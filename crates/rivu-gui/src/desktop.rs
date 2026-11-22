@@ -10,6 +10,7 @@ use gpui::{App as GpuiApp, QuitMode, Subscription, Task};
 use rivu_metadata::artwork::ArtworkManager;
 use std::{
     cell::RefCell,
+    io::ErrorKind,
     os::{
         linux::net::SocketAddrExt,
         unix::ffi::OsStrExt,
@@ -127,13 +128,32 @@ fn address(data_dir: &Path) -> Result<SocketAddr> {
     name.extend_from_slice(b".desktop");
     Ok(SocketAddr::from_abstract_name(name)?)
 }
-/// Acknowledged activation. A retiring desktop holds the connection until its
-/// singleton and layout writer have been released, so callers can then reopen.
+/// What the desktop activation exchange established.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ActivationOutcome {
+    /// The matching desktop accepted the raise request.
+    Raised,
+    /// A new connection found no listening desktop.
+    Absent,
+    /// The desktop acknowledged retirement and released its singleton.
+    Retired,
+}
+
+fn listener_absent(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionRefused | ErrorKind::NotFound
+    )
+}
+
+/// Requests activation of a desktop attached to the expected Core instance.
+/// A retiring desktop holds the connection until its singleton and layout
+/// writer have been released, so callers can then reopen.
 pub async fn raise_async(
     data_dir: &Path,
     expected_instance: u32,
     deadline: Option<Instant>,
-) -> Result<bool> {
+) -> Result<ActivationOutcome> {
     ensure!(
         expected_instance != 0,
         "Desktop activation requires a Core instance"
@@ -147,7 +167,12 @@ pub async fn raise_async(
     path[1..1 + name.len()].copy_from_slice(name);
     let path = Path::new(std::ffi::OsStr::from_bytes(&path[..1 + name.len()]));
     let exchange = async {
-        let mut stream = async_io::Async::<UnixStream>::connect(path).await?;
+        let connect = || async_io::Async::<UnixStream>::connect(path);
+        let mut stream = match connect().await {
+            Ok(stream) => stream,
+            Err(error) if listener_absent(&error) => return Ok(ActivationOutcome::Absent),
+            Err(error) => return Err(error.into()),
+        };
         rivu_protocol::wire::verify_peer(&stream)?;
         let mut request = [0; 5];
         request[0] = b'R';
@@ -159,26 +184,27 @@ pub async fn raise_async(
         }
         .await;
         if let Err(error) = exchanged {
-            return if matches!(
+            drop(stream);
+            // A retiring listener can close requests in its backlog without
+            // an acknowledgement. Only a fresh refused connection confirms
+            // absence; EOF/reset alone also occurs with a live listener.
+            if matches!(
                 error.kind(),
-                std::io::ErrorKind::UnexpectedEof
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::BrokenPipe
-            ) {
-                // Retiring listeners also close requests still in their backlog.
-                Ok(false)
-            } else {
-                Err(error.into())
-            };
+                ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe
+            ) && connect().await.is_err_and(|error| listener_absent(&error))
+            {
+                return Ok(ActivationOutcome::Absent);
+            }
+            return Err(error.into());
         }
         match reply[0] {
-            b'R' => Ok(true),
+            b'R' => Ok(ActivationOutcome::Raised),
             b'Q' => {
                 ensure!(
                     stream.read(&mut reply).await? == 0,
                     "Invalid desktop retirement reply"
                 );
-                Ok(false)
+                Ok(ActivationOutcome::Retired)
             }
             b'S' => bail!("Desktop belongs to a different Core instance"),
             _ => bail!("Invalid desktop activation reply"),
@@ -187,7 +213,7 @@ pub async fn raise_async(
     let timeout = async {
         async_io::Timer::at(deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30)))
             .await;
-        Err::<_, anyhow::Error>(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+        Err::<_, anyhow::Error>(std::io::Error::from(ErrorKind::TimedOut).into())
     };
     futures_lite::future::race(exchange, timeout).await
 }
@@ -246,14 +272,17 @@ impl Activation {
                 if !valid || request[0] != b'R' {
                     continue;
                 }
-                if u32::from_le_bytes(request[1..].try_into().unwrap()) != instance {
-                    let _ = stream.write_all(b"S").await;
-                    continue;
-                }
-                if control.raise().is_ok() {
-                    let _ = stream.write_all(b"R").await;
+                let matches_instance =
+                    u32::from_le_bytes(request[1..].try_into().unwrap()) == instance;
+                let reply = if matches_instance {
+                    if control.raise().is_ok() { b"R" } else { b"Q" }
+                } else if control.is_shutting_down() {
+                    b"Q"
                 } else {
-                    let _ = stream.write_all(b"Q").await;
+                    b"S"
+                };
+                let _ = stream.write_all(reply).await;
+                if reply == b"Q" {
                     let _ = stopped.await;
                     // No replacement may acquire the singleton before the old
                     // writer is flushed and the listening socket is closed.
@@ -316,9 +345,8 @@ impl Desktop {
                         .is_some_and(|error| error.kind() == std::io::ErrorKind::AddrInUse) =>
                 {
                     match async_io::block_on(raise_async(&data_dir, expected, None)) {
-                        Ok(true) => return Ok(()),
-                        Ok(false) => {}
-                        Err(error) if rivu_client::is_no_instance(&error) => {}
+                        Ok(ActivationOutcome::Raised) => return Ok(()),
+                        Ok(ActivationOutcome::Absent | ActivationOutcome::Retired) => {}
                         Err(error) => return Err(error),
                     }
                 }
@@ -597,36 +625,87 @@ mod tests {
         use std::io::{Read, Write};
         let directory = socket_test_directory();
         let tasks = TaskRuntime::start().unwrap();
-        let control = DesktopControl::default();
-        let activation = Activation::start(
-            Activation::bind(directory.path()).unwrap(),
-            control.clone(),
-            7,
-            &tasks.handle,
-        )
-        .unwrap();
-        assert!(async_io::block_on(raise_async(directory.path(), 7, None)).unwrap());
-        assert!(control.take_raise_request());
-        assert!(async_io::block_on(raise_async(directory.path(), 8, None)).is_err());
-        assert!(!control.take_raise_request());
-        assert!(!control.is_shutting_down());
-        control.request_shutdown().unwrap();
-        let mut waiter = UnixStream::connect_addr(&address(directory.path()).unwrap()).unwrap();
-        waiter
-            .set_read_timeout(Some(Duration::from_secs(5)))
+        for requested_instance in [7_u32, 8] {
+            let control = DesktopControl::default();
+            let activation = Activation::start(
+                Activation::bind(directory.path()).unwrap(),
+                control.clone(),
+                7,
+                &tasks.handle,
+            )
             .unwrap();
-        waiter.write_all(&[b'R', 7, 0, 0, 0]).unwrap();
-        let mut reply = [0];
-        waiter.read_exact(&mut reply).unwrap();
-        assert_eq!(reply, *b"Q");
-        waiter.set_nonblocking(true).unwrap();
-        assert_eq!(
-            waiter.read(&mut reply).unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
-        drop(activation);
-        assert_eq!(waiter.read(&mut reply).unwrap(), 0);
-        assert!(Activation::bind(directory.path()).is_ok());
+            assert_eq!(
+                async_io::block_on(raise_async(directory.path(), 7, None)).unwrap(),
+                ActivationOutcome::Raised
+            );
+            assert!(control.take_raise_request());
+            assert!(async_io::block_on(raise_async(directory.path(), 8, None)).is_err());
+            assert!(!control.take_raise_request());
+            assert!(!control.is_shutting_down());
+            control.request_shutdown().unwrap();
+            let mut waiter = UnixStream::connect_addr(&address(directory.path()).unwrap()).unwrap();
+            waiter
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [b'R', 0, 0, 0, 0];
+            request[1..].copy_from_slice(&requested_instance.to_le_bytes());
+            waiter.write_all(&request).unwrap();
+            let mut reply = [0];
+            waiter.read_exact(&mut reply).unwrap();
+            assert_eq!(reply, *b"Q");
+            waiter.set_nonblocking(true).unwrap();
+            assert_eq!(
+                waiter.read(&mut reply).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            drop(activation);
+            assert_eq!(waiter.read(&mut reply).unwrap(), 0);
+            assert!(Activation::bind(directory.path()).is_ok());
+        }
+    }
+
+    #[test]
+    fn unexpected_desktop_eof_requires_absence_probe() {
+        if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(15)) {
+            return;
+        }
+        let directory = socket_test_directory();
+        for release_listener in [false, true] {
+            let socket = Activation::bind(directory.path()).unwrap();
+            let listener = async_io::Async::new(socket).unwrap();
+            let peer = async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 5];
+                stream.read_exact(&mut request).await.unwrap();
+                assert_eq!(request, [b'R', 7, 0, 0, 0]);
+                let listener = if release_listener {
+                    drop(listener);
+                    None
+                } else {
+                    Some(listener)
+                };
+                stream
+                    .get_ref()
+                    .shutdown(std::net::Shutdown::Write)
+                    .unwrap();
+                // Keep a live listener bound through the reconnect probe.
+                listener
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (result, _listener) = async_io::block_on(futures_lite::future::zip(
+                raise_async(directory.path(), 7, Some(deadline)),
+                peer,
+            ));
+            if release_listener {
+                assert_eq!(result.unwrap(), ActivationOutcome::Absent);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                    ErrorKind::UnexpectedEof
+                );
+            }
+        }
     }
 
     #[test]
@@ -702,13 +781,14 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
+        assert_eq!(
             async_io::block_on(raise_async(
                 directory.path(),
                 runtime.handle.instance_id(),
                 None
             ))
-            .is_err()
+            .unwrap(),
+            ActivationOutcome::Absent
         );
     }
 
