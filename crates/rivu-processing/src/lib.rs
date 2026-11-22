@@ -1313,22 +1313,21 @@ impl Service {
                             Arc::clone(vocals.layout()),
                             budget,
                         )?;
-                        let mut v = vec![0.0; 8192 * usize::from(vocals.channels())];
-                        let mut a = vec![0.0; v.len()];
+                        let channels = usize::from(vocals.channels());
+                        let mut mixed = vec![0.0; 4096.min(vocals.frames()) as usize * channels];
                         let vg = 10.0_f32.powf(vocal_gain_db / 20.0);
                         let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
                         let mut position = 0;
                         while position < vocals.frames() {
                             render::check_cancel(cancel)?;
-                            let frames = vocals.read_frames(position, &mut v);
-                            let accompaniment_frames = accompaniment.read_frames(position, &mut a);
-                            debug_assert_eq!(accompaniment_frames, frames);
-                            let count = frames * usize::from(vocals.channels());
-                            for i in 0..count {
-                                v[i] = v[i] * vg + a[i] * ag;
+                            let v = vocals.frame_block(position);
+                            let a = accompaniment.frame_block(position);
+                            let count = v.len().min(a.len()).min(mixed.len());
+                            for ((sample, &v), &a) in mixed[..count].iter_mut().zip(v).zip(a) {
+                                *sample = v * vg + a * ag;
                             }
-                            builder.push(&v[..count])?;
-                            position += frames as u64;
+                            builder.push(&mixed[..count])?;
+                            position += (count / channels) as u64;
                         }
                         render::check_cancel(cancel)?;
                         #[cfg(any(test, feature = "test-support"))]

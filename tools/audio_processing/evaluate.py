@@ -39,6 +39,7 @@ if __package__:
     from .benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
     from .common import digest, read_json_with_digest
     from .export import completed_export_report
+    from .runtime.worker import MAX_SECONDS
     from ..audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from ..audio_quality.music_manifest import music_records
     from ..audio_quality.evaluate import load_audio, load_identified, require_alignment
@@ -47,6 +48,7 @@ else:
     from benchmark import PreparedReference, TIMING_BOUNDARIES, timing_summary
     from common import digest, read_json_with_digest
     from export import completed_export_report
+    from runtime.worker import MAX_SECONDS
     from audio_quality.metric_core import reconstruction_metrics, score_difference, score_summary
     from audio_quality.music_manifest import music_records
     from audio_quality.evaluate import load_audio, load_identified, require_alignment
@@ -156,12 +158,13 @@ def main():
         report["metric_packages"]={"pystoi":importlib.metadata.version("pystoi")}
     def score_case(name, source, reference, corpus_checksum, backing, diagnostic, source_identity):
         evaluation_start=time.perf_counter()
-        reference_pcm = load_identified(reference, dtype="float32", max_frames=None)
-        input_pcm = reference_pcm if source.resolve() == reference.resolve() else load_identified(source, dtype="float32", max_frames=None)
+        input_pcm = load_identified(source, dtype="float32", max_frames=None, max_seconds=MAX_SECONDS)
+        reference_pcm = input_pcm if source.resolve() == reference.resolve() else load_identified(
+            reference, dtype="float32", max_frames=None, max_seconds=MAX_SECONDS)
         require_alignment(reference_pcm, input_pcm, "paired source/reference")
         reference_audio, rate = reference_pcm.data, reference_pcm.rate
         input_audio = input_pcm.data
-        backing_pcm = load_identified(backing, dtype="float32", max_frames=None) if backing else None
+        backing_pcm = load_identified(backing, dtype="float32", max_frames=None, max_seconds=MAX_SECONDS) if backing else None
         if backing_pcm is not None:
             require_alignment(reference_pcm, backing_pcm, "backing reference")
         if args.kind == "music":

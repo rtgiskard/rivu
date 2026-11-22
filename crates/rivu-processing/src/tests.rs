@@ -1955,6 +1955,54 @@ fn failed_processing_spawns_do_not_consume_retirement_capacity() {
 }
 
 #[test]
+fn stem_mix_aligns_sliced_stems_across_storage_blocks() {
+    let (_directory, mut service, _track, _config) = fixture();
+    let layout: Arc<[audio::Channel]> =
+        Arc::from([audio::Channel::FrontLeft, audio::Channel::FrontRight]);
+    let frames = 9_001;
+    let stem = |start, sign: f32| {
+        let mut builder =
+            audio::PcmBuilder::new(48_000, Arc::clone(&layout), Arc::clone(&service.budget))
+                .unwrap();
+        let data: Vec<_> = (0..frames + start)
+            .flat_map(|frame| {
+                let sample = (frame % 32) as f32 / 32.0;
+                [sample * sign, sample * sign * 0.5]
+            })
+            .collect();
+        builder.push(&data).unwrap();
+        builder
+            .finish()
+            .unwrap()
+            .slice_frames(start, frames)
+            .unwrap()
+    };
+    let vocals = stem(7, 1.0);
+    let accompaniment = stem(13, -1.0);
+    let outputs = &mut service.results.front_mut().unwrap().outputs;
+    outputs.vocals = Some(vocals);
+    outputs.accompaniment = Some(accompaniment);
+    service.start_mix(1, 7, 0.0, 0.0).unwrap();
+    let pcm = match next_event(&mut service) {
+        Event::MixFinished { id, result, .. } => {
+            service.finish_task(id).unwrap();
+            result.unwrap()
+        }
+        _ => panic!("unexpected stem mix event"),
+    };
+    assert_eq!(pcm.frames(), frames);
+    assert_eq!(pcm.sample_rate(), 48_000);
+    assert_eq!(pcm.layout(), &layout);
+    let expected: Vec<_> = (0..frames)
+        .flat_map(|frame| {
+            let sample = (((frame + 7) % 32) as f32 - ((frame + 13) % 32) as f32) / 32.0;
+            [sample, sample * 0.5]
+        })
+        .collect();
+    assert_eq!(samples(&pcm), expected);
+}
+
+#[test]
 fn failed_mix_spawns_do_not_consume_retirement_capacity() {
     bounded(|| {
         let (_directory, mut service, _track, _config) = fixture();

@@ -51,12 +51,14 @@ class IdentifiedAudio(Audio):
     identity: dict
 
 
-def load_audio(source, dtype="float64", *, max_frames=MAX_FRAMES):
+def load_audio(source, dtype="float64", *, max_frames=MAX_FRAMES, max_seconds=None):
     with sf.SoundFile(source) as reader:
         shape = (reader.frames, reader.channels)
         rate = reader.samplerate
         if reader.frames <= 0 or (max_frames is not None and reader.frames > max_frames) or not 0 < reader.channels <= MAX_CHANNELS:
             raise ValueError(f"evaluation bound exceeded: {reader.frames} frames/{reader.channels} channels")
+        if max_seconds is not None and reader.frames > max_seconds * rate:
+            raise ValueError(f"input duration exceeds {max_seconds} seconds: {reader.frames} frames at {rate} Hz")
         data = reader.read(dtype=dtype, always_2d=True)
     if data.shape != shape:
         raise ValueError(f"incomplete audio: {source}")
@@ -66,11 +68,11 @@ def load_audio(source, dtype="float64", *, max_frames=MAX_FRAMES):
     return Audio(data, rate)
 
 
-def load_identified(path, dtype="float64", *, max_frames=MAX_FRAMES):
+def load_identified(path, dtype="float64", *, max_frames=MAX_FRAMES, max_seconds=None):
     path = Path(path).resolve(strict=True)
     with path.open("rb") as stream:
         before = os.fstat(stream.fileno())
-        audio = load_audio(stream, dtype=dtype, max_frames=max_frames)
+        audio = load_audio(stream, dtype=dtype, max_frames=max_frames, max_seconds=max_seconds)
         # Hash the same file descriptor used to decode; reject an in-place
         # edit across either pass or a pathname replacement during capture.
         stream.seek(0)

@@ -525,6 +525,29 @@ class CaseSelectionTests(unittest.TestCase):
                             self.assertEqual(Path(request["input_path"]), source)
                             self.assertEqual(sorted(path.name for path in output.iterdir()), [selector + "-request.json"])
 
+    def test_cli_rejects_overlong_input_before_pcm_read(self):
+        for kind, operation in (("paired", "speech"), ("music", "separate")):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                root = base / "corpus"
+                selector = self.corpus(root, kind)
+                source = root / "noisy" / (selector + ".wav") if kind == "paired" else root / selector / "mixture.wav"
+                sf.write(source, np.zeros((8001, 2), dtype="float32"), 8000, subtype="FLOAT")
+                model = base / "model.json"
+                model.write_text(json.dumps({"operation": operation}))
+                argv = ["evaluate.py", "--kind", kind, "--corpus-root", str(root),
+                        "--model-manifest", str(model), "--output-dir", str(base / "evaluation"), "--case", selector]
+                with patch.object(sys, "argv", argv), \
+                        patch.dict(sys.modules, {"pystoi": SimpleNamespace(stoi=None)}), \
+                        patch("importlib.metadata.version", return_value="fixture"), \
+                        patch.object(evaluate, "MAX_SECONDS", 1), \
+                        patch.object(sf.SoundFile, "read") as read, \
+                        patch.object(evaluate.subprocess, "run") as worker:
+                    with self.assertRaisesRegex(ValueError, "input duration"):
+                        evaluate.main()
+                    read.assert_not_called()
+                    worker.assert_not_called()
+
     def test_selection_does_not_bypass_corpus_membership_validation(self):
         for kind in ("paired", "music"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
