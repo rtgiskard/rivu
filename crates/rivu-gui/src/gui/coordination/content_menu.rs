@@ -11,15 +11,14 @@ use rivu_protocol::model::{Command, Query};
 use rivu_ui::{POPOVER_MAX_REMS, Popover, caption, menu_item};
 use std::{collections::HashSet, path::PathBuf};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RemoveTarget {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::gui) enum RemoveTarget {
     Selection,
     LibraryRoot,
 }
 
 pub(in crate::gui) struct ContentMenu {
     source: TrackSource,
-    album_revision: u64,
     nodes: Option<Vec<LibraryNode>>,
     tracks_only: bool,
     guard: ContentGuard,
@@ -28,9 +27,7 @@ pub(in crate::gui) struct ContentMenu {
     remove: Option<Command>,
     remove_label: &'static str,
     root: Option<PathBuf>,
-    loading: bool,
-    confirm_remove: Option<RemoveTarget>,
-    pub(in crate::gui) playlists: bool,
+    page: ContentMenuPage,
     playlist_targets: PlaylistTargets,
     playlist_trigger: FocusHandle,
     restore_playlist_trigger: bool,
@@ -98,25 +95,27 @@ impl PlaylistTargets {
     }
 }
 
-// Preserve every page-state transition used to invalidate deferred menu focus.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::gui) struct ContentMenuPage {
-    loading: bool,
-    playlists: bool,
-    confirming_remove: bool,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::gui) enum ContentMenuPage {
+    Actions,
+    Resolving,
+    Playlists,
+    ConfirmRemove(RemoveTarget),
 }
 
 impl ContentMenu {
     pub(in crate::gui) fn keyboard_page(&self) -> ContentMenuPage {
-        ContentMenuPage {
-            loading: self.loading,
-            playlists: self.playlists,
-            confirming_remove: self.confirm_remove.is_some(),
-        }
+        self.page
+    }
+
+    pub(in crate::gui) fn playlist_picker_open(&self) -> bool {
+        self.page == ContentMenuPage::Playlists
     }
 
     pub(in crate::gui) fn focus_playlist_return(&mut self, window: &mut Window, cx: &mut App) {
-        if std::mem::take(&mut self.restore_playlist_trigger) && !self.playlists && !self.loading {
+        if std::mem::take(&mut self.restore_playlist_trigger)
+            && self.page == ContentMenuPage::Actions
+        {
             self.playlist_trigger.focus(window, cx);
         }
     }
@@ -176,11 +175,13 @@ impl WindowView {
     ) -> Option<ContentMenu> {
         self.content_resolution.cancel();
         let previous = std::mem::replace(&mut self.content_menu, menu);
-        if previous.as_ref().is_some_and(|menu| menu.playlists)
+        if previous
+            .as_ref()
+            .is_some_and(ContentMenu::playlist_picker_open)
             != self
                 .content_menu
                 .as_ref()
-                .is_some_and(|menu| menu.playlists)
+                .is_some_and(ContentMenu::playlist_picker_open)
         {
             self.reconcile_feature_demand(cx);
         }
@@ -190,19 +191,23 @@ impl WindowView {
         previous
     }
 
-    fn set_content_menu_playlists(&mut self, visible: bool, cx: &mut Context<Self>) {
+    fn set_content_menu_page(&mut self, page: ContentMenuPage, cx: &mut Context<Self>) {
         if let Some(menu) = &mut self.content_menu
-            && menu.playlists != visible
+            && menu.page != page
         {
-            menu.playlists = visible;
-            menu.restore_playlist_trigger = !visible;
-            if visible {
-                menu.playlist_targets.select(0, self.playlists.read(cx));
-                menu.playlist_targets
-                    .scroll
-                    .scroll_to_item_strict(0, ScrollStrategy::Top);
+            let was_picking = menu.playlist_picker_open();
+            menu.page = page;
+            let picking = menu.playlist_picker_open();
+            if was_picking != picking {
+                menu.restore_playlist_trigger = !picking;
+                if picking {
+                    menu.playlist_targets.select(0, self.playlists.read(cx));
+                    menu.playlist_targets
+                        .scroll
+                        .scroll_to_item_strict(0, ScrollStrategy::Top);
+                }
+                self.reconcile_feature_demand(cx);
             }
-            self.reconcile_feature_demand(cx);
             cx.notify();
         }
     }
@@ -235,7 +240,6 @@ impl WindowView {
             && nodes.as_ref().is_none_or(Vec::is_empty)
         {
             self.replace_content_menu(None, cx);
-            cx.notify();
             return;
         }
         self.panel_menu = None;
@@ -253,13 +257,8 @@ impl WindowView {
             Some(Command::RemoveHistory { .. }) => "gl-remove-history",
             _ => "gl-remove-library-selected",
         };
-        let album_revision = match &request.source {
-            TrackSource::Album { revision, .. } => *revision,
-            TrackSource::Tracks(_) => self.state.library.album_revision,
-        };
         let menu = Some(ContentMenu {
             source: request.source,
-            album_revision,
             nodes,
             tracks_only,
             guard,
@@ -268,15 +267,12 @@ impl WindowView {
             remove,
             remove_label,
             root,
-            loading: false,
-            confirm_remove: None,
-            playlists: false,
+            page: ContentMenuPage::Actions,
             playlist_targets: PlaylistTargets::new(cx),
             playlist_trigger: cx.focus_handle(),
             restore_playlist_trigger: false,
         });
         self.replace_content_menu(menu, cx);
-        cx.notify();
     }
 
     // Only favorites and creating a playlist need concrete IDs. Keep the menu's
@@ -285,17 +281,16 @@ impl WindowView {
         let Some(menu) = self.content_menu.as_ref() else {
             return;
         };
-        let TrackSource::Album { key, .. } = &menu.source else {
+        let TrackSource::Album { key, revision } = &menu.source else {
             return;
         };
         let key = key.clone();
         let guard = menu.guard.clone();
-        let album_revision = menu.album_revision;
+        let album_revision = *revision;
         let Some(read) = self.begin_content_resolution(cx) else {
             return;
         };
-        self.set_content_menu_playlists(false, cx);
-        self.content_menu.as_mut().unwrap().loading = true;
+        self.set_content_menu_page(ContentMenuPage::Resolving, cx);
         let ticket = read.ticket.clone();
         let query = Query::AlbumTracks {
             key: key.clone(),
@@ -341,7 +336,7 @@ impl WindowView {
                     {
                         let menu = this.content_menu.as_mut().unwrap();
                         menu.source = TrackSource::Tracks(ids);
-                        menu.loading = false;
+                        menu.page = ContentMenuPage::Actions;
                         this.content_action(action, cx);
                     }
                     Ok(_) => {
@@ -368,7 +363,6 @@ impl WindowView {
             });
         })
         .detach();
-        cx.notify();
     }
 
     pub(in crate::gui) fn drop_content(
@@ -516,10 +510,10 @@ impl WindowView {
         let Some(menu) = self.content_menu.as_ref() else {
             return;
         };
-        if menu.loading
+        if menu.page == ContentMenuPage::Resolving
             || !menu.guard.current(&self.state)
-            || (matches!(menu.source, TrackSource::Album { .. })
-                && menu.album_revision != self.state.library.album_revision)
+            || matches!(menu.source, TrackSource::Album { revision, .. }
+                if revision != self.state.library.album_revision)
         {
             self.replace_content_menu(None, cx);
             self.error = Some(self.i18n.text("li-source-changed").to_owned());
@@ -556,11 +550,8 @@ impl WindowView {
                     });
                 } else {
                     match menu.source {
-                        TrackSource::Album { key, .. } => self.send_content_collection(
-                            rivu_protocol::model::CollectionSource::Album {
-                                key,
-                                revision: menu.album_revision,
-                            },
+                        TrackSource::Album { key, revision } => self.send_content_collection(
+                            rivu_protocol::model::CollectionSource::Album { key, revision },
                             destination,
                             cx,
                         ),
@@ -624,18 +615,13 @@ impl WindowView {
     }
 
     pub(in crate::gui) fn back_content_menu(&mut self, cx: &mut Context<Self>) {
-        if self
-            .content_menu
-            .as_ref()
-            .is_some_and(|menu| menu.playlists || menu.confirm_remove.is_some())
-        {
-            self.set_content_menu_playlists(false, cx);
-            if let Some(menu) = &mut self.content_menu {
-                menu.confirm_remove = None;
+        match self.content_menu.as_ref().map(|menu| menu.page) {
+            Some(ContentMenuPage::Playlists | ContentMenuPage::ConfirmRemove(_)) => {
+                self.set_content_menu_page(ContentMenuPage::Actions, cx);
             }
-            cx.notify();
-        } else {
-            self.replace_content_menu(None, cx);
+            _ => {
+                self.replace_content_menu(None, cx);
+            }
         }
     }
 
@@ -659,7 +645,7 @@ impl WindowView {
         let Some(menu) = self
             .content_menu
             .as_mut()
-            .filter(|menu| menu.playlists && menu.playlist_targets.focus == *focus)
+            .filter(|menu| menu.playlist_picker_open() && menu.playlist_targets.focus == *focus)
         else {
             return;
         };
@@ -708,15 +694,13 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if self
-            .content_menu
-            .as_ref()
-            .is_some_and(|menu| menu.playlists && menu.playlist_targets.focus == *focus)
-            && self
-                .playlists
-                .read(cx)
-                .catalog_row(index)
-                .is_some_and(|row| row.id == id)
+        if self.content_menu.as_ref().is_some_and(|menu| {
+            menu.playlist_picker_open() && menu.playlist_targets.focus == *focus
+        }) && self
+            .playlists
+            .read(cx)
+            .catalog_row(index)
+            .is_some_and(|row| row.id == id)
         {
             self.content_action(ContentAction::Playlist(id), cx);
         }
@@ -729,14 +713,13 @@ impl WindowView {
         callback: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static {
         let focus = state.playlist_targets.focus.clone();
-        let page = state.keyboard_page();
-        let remove_target = state.confirm_remove;
+        let page = state.page;
         move |this, window, cx| {
-            if this.content_menu.as_ref().is_some_and(|menu| {
-                menu.playlist_targets.focus == focus
-                    && menu.keyboard_page() == page
-                    && menu.confirm_remove == remove_target
-            }) {
+            if this
+                .content_menu
+                .as_ref()
+                .is_some_and(|menu| menu.playlist_targets.focus == focus && menu.page == page)
+            {
                 callback(this, window, cx);
             }
         }
@@ -754,16 +737,15 @@ impl WindowView {
         let dismiss = Self::content_menu_callback(state, |this, _, cx| {
             this.replace_content_menu(None, cx);
             cx.stop_propagation();
-            cx.notify();
         });
         let mut menu = Popover::menu(theme, "content-menu", window)
             .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
                 dismiss(this, window, cx);
             }));
-        if state.loading {
+        if state.page == ContentMenuPage::Resolving {
             menu = menu.child(caption(theme, self.tr("shell-loading")));
-        } else if let Some(target) = state.confirm_remove {
+        } else if let ContentMenuPage::ConfirmRemove(target) = state.page {
             let (description, label, action) = match target {
                 RemoveTarget::Selection => (
                     "li-confirm-remove",
@@ -809,7 +791,7 @@ impl WindowView {
                     )
                     .debug_selector(|| "content-confirm-remove".into()),
                 ));
-        } else if state.playlists {
+        } else if state.playlist_picker_open() {
             menu = menu.child(rivu_ui::menu_title(theme, self.tr("li-playlist")));
             if state.tracks_only {
                 menu = menu.child(menu_item(
@@ -944,7 +926,8 @@ impl WindowView {
                             )
                             .on_viewport_deferred(cx.weak_entity(), move |this, range, cx| {
                                 if this.content_menu.as_ref().is_some_and(|menu| {
-                                    menu.playlists && menu.playlist_targets.focus == demand_focus
+                                    menu.playlist_picker_open()
+                                        && menu.playlist_targets.focus == demand_focus
                                 }) {
                                     this.playlists.update(cx, |playlists, cx| {
                                         playlists.ensure_playlist_range(range, cx);
@@ -960,7 +943,7 @@ impl WindowView {
                     self.tr("shell-back"),
                     cx,
                     Self::content_menu_callback(state, |this, _, cx| {
-                        this.set_content_menu_playlists(false, cx);
+                        this.back_content_menu(cx);
                     }),
                 ));
         } else {
@@ -992,7 +975,7 @@ impl WindowView {
                         self.tr("li-playlist"),
                         cx,
                         Self::content_menu_callback(state, |this, _, cx| {
-                            this.set_content_menu_playlists(true, cx);
+                            this.set_content_menu_page(ContentMenuPage::Playlists, cx);
                         }),
                     )
                     .track_focus(&state.playlist_trigger)
@@ -1044,10 +1027,10 @@ impl WindowView {
                     self.tr(state.remove_label),
                     cx,
                     Self::content_menu_callback(state, |this, _, cx| {
-                        if let Some(menu) = &mut this.content_menu {
-                            menu.confirm_remove = Some(RemoveTarget::Selection);
-                        }
-                        cx.notify();
+                        this.set_content_menu_page(
+                            ContentMenuPage::ConfirmRemove(RemoveTarget::Selection),
+                            cx,
+                        );
                     }),
                 )
                 .debug_selector(|| "content-remove".into());
@@ -1065,10 +1048,10 @@ impl WindowView {
                             self.tr("li-remove-root"),
                             cx,
                             Self::content_menu_callback(state, |this, _, cx| {
-                                if let Some(menu) = &mut this.content_menu {
-                                    menu.confirm_remove = Some(RemoveTarget::LibraryRoot);
-                                }
-                                cx.notify();
+                                this.set_content_menu_page(
+                                    ContentMenuPage::ConfirmRemove(RemoveTarget::LibraryRoot),
+                                    cx,
+                                );
                             }),
                         ),
                     ));
@@ -1234,7 +1217,7 @@ mod tests {
             cx,
         );
         let menu = app.content_menu.as_ref().unwrap();
-        assert!(!menu.loading);
+        assert_eq!(menu.page, ContentMenuPage::Actions);
         assert!(matches!(&menu.source, TrackSource::Album { key, .. } if key == album));
         assert_eq!(app.content_favorite_actions(cx), (true, true));
     }
@@ -1456,13 +1439,16 @@ mod tests {
             &fixture,
             confirm,
             |app, cx| {
-                app.content_menu.as_mut().unwrap().confirm_remove = Some(RemoveTarget::LibraryRoot);
-                cx.notify();
+                app.set_content_menu_page(
+                    ContentMenuPage::ConfirmRemove(RemoveTarget::LibraryRoot),
+                    cx,
+                );
             },
             cx,
         );
         assert!(fixture.app.read_with(cx, |app, _| {
-            app.content_menu.as_ref().unwrap().confirm_remove == Some(RemoveTarget::LibraryRoot)
+            app.content_menu.as_ref().unwrap().page
+                == ContentMenuPage::ConfirmRemove(RemoveTarget::LibraryRoot)
         }));
         assert_eq!(favorites(&fixture.runtime, &fixture.album).len(), 3);
         change_and_click_menu(
@@ -1487,7 +1473,10 @@ mod tests {
             cx,
         );
         fixture.app.read_with(cx, |app, _| {
-            assert!(app.content_menu.as_ref().unwrap().confirm_remove.is_none());
+            assert_eq!(
+                app.content_menu.as_ref().unwrap().page,
+                ContentMenuPage::Actions
+            );
         });
         assert_eq!(favorites(&fixture.runtime, &fixture.album).len(), 3);
         draw_menu(&fixture, cx);
@@ -1500,7 +1489,8 @@ mod tests {
         })
         .unwrap();
         assert!(fixture.app.read_with(cx, |app, _| {
-            app.content_menu.as_ref().unwrap().confirm_remove.is_some()
+            app.content_menu.as_ref().unwrap().page
+                == ContentMenuPage::ConfirmRemove(RemoveTarget::Selection)
         }));
         draw_menu(&fixture, cx);
         let confirm = menu_point(&fixture, "content-confirm-remove", cx);
@@ -1601,7 +1591,10 @@ mod tests {
                 app.window_visible = true;
                 app.content_action(ContentAction::Favorite(favorite), cx);
                 assert!(app.content_resolution.pending());
-                assert!(app.content_menu.as_ref().unwrap().loading);
+                assert_eq!(
+                    app.content_menu.as_ref().unwrap().page,
+                    ContentMenuPage::Resolving
+                );
             });
             cx.condition(&fixture.app, |app, _| {
                 !app.content_resolution.pending() && app.content_menu.is_none()
@@ -1619,12 +1612,15 @@ mod tests {
         let fixture = fixture(cx);
         fixture.app.update(cx, |app, cx| {
             open_album(app, &fixture.album, cx);
-            app.set_content_menu_playlists(true, cx);
+            app.set_content_menu_page(ContentMenuPage::Playlists, cx);
             assert!(!app.content_resolution.pending());
             app.window_visible = true;
             app.content_action(ContentAction::CreatePlaylist(fixture.window), cx);
             assert!(app.content_resolution.pending());
-            assert!(app.content_menu.as_ref().unwrap().loading);
+            assert_eq!(
+                app.content_menu.as_ref().unwrap().page,
+                ContentMenuPage::Resolving
+            );
         });
         cx.condition(&fixture.app, |app, cx| {
             !app.content_resolution.pending()
@@ -1654,10 +1650,13 @@ mod tests {
             fixture.app.update(cx, |app, cx| {
                 open_album(app, &fixture.album, cx);
                 app.window_visible = true;
-                app.set_content_menu_playlists(true, cx);
+                app.set_content_menu_page(ContentMenuPage::Playlists, cx);
                 app.content_action(action, cx);
                 assert!(app.content_resolution.pending());
-                assert!(app.content_menu.as_ref().unwrap().loading);
+                assert_eq!(
+                    app.content_menu.as_ref().unwrap().page,
+                    ContentMenuPage::Resolving
+                );
                 app.back_content_menu(cx);
                 assert!(app.content_menu.is_none());
                 assert!(app.content_resolution.pending());
@@ -1698,16 +1697,14 @@ mod tests {
         for key in ["escape", "left"] {
             fixture.app.update(cx, |app, cx| {
                 open_album(app, &fixture.album, cx);
-                app.set_content_menu_playlists(true, cx);
+                app.set_content_menu_page(ContentMenuPage::Playlists, cx);
             });
             draw(fixture.window, cx);
             // Hold the physical reader deterministically, without racing a real
             // AlbumTracks response against the loading page's deferred focus.
             let read = fixture.app.update(cx, |app, cx| {
                 let read = app.begin_content_resolution(cx).unwrap();
-                app.set_content_menu_playlists(false, cx);
-                app.content_menu.as_mut().unwrap().loading = true;
-                cx.notify();
+                app.set_content_menu_page(ContentMenuPage::Resolving, cx);
                 read
             });
             draw(fixture.window, cx);

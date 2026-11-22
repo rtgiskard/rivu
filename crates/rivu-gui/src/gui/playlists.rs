@@ -2555,7 +2555,9 @@ mod content_menu_keyboard_tests {
         key(handle, "down", cx);
         key(handle, "enter", cx);
         assert!(app.read_with(cx, |app, _| {
-            app.content_menu.as_ref().is_some_and(|menu| menu.playlists)
+            app.content_menu
+                .as_ref()
+                .is_some_and(|menu| menu.playlist_picker_open())
         }));
     }
 
@@ -2649,12 +2651,14 @@ mod content_menu_keyboard_tests {
         assert!(app.read_with(cx, |app, _| {
             app.content_menu
                 .as_ref()
-                .is_some_and(|menu| !menu.playlists)
+                .is_some_and(|menu| !menu.playlist_picker_open())
         }));
         // Back restores the Playlist trigger, not the first Queue command.
         key(handle, "enter", cx);
         assert!(app.read_with(cx, |app, _| {
-            app.content_menu.as_ref().is_some_and(|menu| menu.playlists)
+            app.content_menu
+                .as_ref()
+                .is_some_and(|menu| menu.playlist_picker_open())
         }));
         key(handle, "down", cx);
         key(handle, "enter", cx);

@@ -485,7 +485,7 @@ impl WindowView {
                     || this
                         .content_menu
                         .as_ref()
-                        .is_some_and(|menu| menu.playlists)
+                        .is_some_and(content_menu::ContentMenu::playlist_picker_open)
                 {
                     cx.notify();
                 }
@@ -612,7 +612,7 @@ impl WindowView {
                 self.panel_demand("playlists"),
                 self.content_menu
                     .as_ref()
-                    .is_some_and(|menu| menu.playlists),
+                    .is_some_and(content_menu::ContentMenu::playlist_picker_open),
                 cx,
             )
         });
