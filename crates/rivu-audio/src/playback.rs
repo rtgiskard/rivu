@@ -928,8 +928,7 @@ impl Playback {
         Ok(())
     }
     pub(super) fn finished(&self) -> bool {
-        !self.paused
-            && self.eof
+        self.eof
             && self.offset_frames == self.pending.len() / self.source.layout().len()
             && self.speed.idle()
             && self.output.drained()
@@ -2436,6 +2435,7 @@ pub(super) mod tests {
             let mut data = [0.0; 160];
             render(&mut data, 0);
             render(&mut data, 20);
+            playback.pause(true);
             render(&mut data, 40);
             assert_eq!(
                 playback.completed_bitrate(),
