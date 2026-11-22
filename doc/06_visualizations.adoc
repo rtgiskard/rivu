@@ -213,6 +213,9 @@ above the centerline, right below; the filled body is RMS amplitude and the oute
 line is peak amplitude. Unknown intervals remain blank. The GUI session builds
 the preview progressively from admitted PCM; `Load full waveform now` explicitly
 requests a complete preview. Both sources of waveform data are session-local.
+Once the full scan completes, the right edge represents the exact end of the
+track or CUE subtrack. Later playback can update the waveform within that span
+while keeping the end time fixed.
 Click or drag to seek the current track; a non-playing selection preview does
 not seek playback.
 Seeking gestures stay bound to the queue entry at press time. If playback moves

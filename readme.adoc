@@ -6,7 +6,13 @@ image:https://img.shields.io/badge/Ko--fi-F16061.svg?logo=ko-fi&logoColor=white[
 Rivu is a lightweight, local-first music player for Linux, with GUI, TUI, and CLI
 access to a shared playback service that runs independently of the desktop.
 
-image:https://github.com/user-attachments/assets/bfa5c41c-14f5-42a6-b173-f2a89bb55d94[rivu]
+[cols="1,1,1", grid=none, frame=none]
+|===
+3+| image:https://github.com/user-attachments/assets/7fb94474-bb79-4baf-81b7-c68420028831[gui_tui_res]
+| image:https://github.com/user-attachments/assets/4be88d51-0f45-44d8-9970-fc5ae9f99296[graph_texture]
+| image:https://github.com/user-attachments/assets/ec0cd64f-5d07-4b11-9a57-f3943fb16840[eq_diagnose]
+| image:https://github.com/user-attachments/assets/166b0b6b-fed9-47f4-afd7-2fd1fe479399[playlist]
+|===
 
 == Why Rivu
 

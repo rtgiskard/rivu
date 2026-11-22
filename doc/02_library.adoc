@@ -55,8 +55,7 @@ link:08_tui.adoc#terminal-client[Terminal client].
 Scanning requires at least one configured `library.roots`. Add a directory with
 the GUI Library `+` button or set absolute directory paths in `config.toml`.
 Saved roots appear immediately in the desktop Library, even when empty or not
-yet scanned. Saving roots does not scan or enqueue music. Use a root's scan action
-or choose `Scan paths` in Library.
+yet scanned. Adding a root or starting Rivu does not scan or enqueue music.
 
 See link:04_playback.adoc#audio-formats[Audio format support] for supported
 inputs and decoder requirements.
@@ -70,6 +69,12 @@ To stop managing a root, right-click its header, choose `Remove library folder..
 and confirm. Only the configured root is removed; indexed tracks, user data,
 queue/playlist references, and audio files are kept.
 
+In the GUI, use a root's scan action or choose `Scan paths` in Library.
+
+In the TUI, enter `:scan` to scan all configured roots. To scan one file or
+directory within those roots, use `:scan` followed by its absolute path. See
+link:08_tui.adoc#terminal-client[Terminal client commands].
+
 To scan from the command line, run:
 
 [source,sh]
@@ -77,10 +82,10 @@ To scan from the command line, run:
 rivu library scan ~/Music --wait
 ----
 
-The desktop does not scan roots at startup. Scans run in the background without
-stopping playback. `--force` rereads unchanged audio metadata; CUE sheets are always
-reread. Readable tracks may be saved even when the task fails: fix errors and rescan
-before cleaning missing records. Path, admission and recovery rules are under
+Scans run in the background without stopping playback. `--force` rereads
+unchanged audio metadata. CUE sheets are always reread. Readable tracks may be
+saved even when the task fails. Fix errors and rescan before cleaning missing
+records. Path, admission and recovery rules are under
 <<scan-policies-and-recovery,Scan policies and recovery>>.
 
 For shared media-task admission, progress, errors, and shutdown, see

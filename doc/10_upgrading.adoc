@@ -87,47 +87,45 @@ see link:27_migration.adoc#configuration-schema[Configuration schema].
 
 === Client and protocol changes
 
-The following cutovers describe compatibility changes for upgrades from older
-versions, not the current wire version. See
-link:21_ipc.adoc#session-handshake[IPC handshake] for the current version authority.
+For each cutover below, upgrade Core and all clients together, then restart
+Core. See link:21_ipc.adoc#session-handshake[IPC handshake] for the current wire
+version.
 
 Protocol 56 replaces command replies, query cancellation, and state watching.
-Upgrade Core and all clients together, then restart Core. Protocol 50 clients
-cannot attach to the new service; this cutover does not require a database or
-configuration migration.
+Protocol 50 clients cannot attach to the new service. This cutover requires no
+database or configuration migration.
 
 Protocol 57 distinguishes malformed command bodies that end the session from
-invalid command values that allow reuse. Protocol 56 clients must upgrade with
-Core; no data or configuration migration is needed.
+invalid command values that allow reuse. No database or configuration migration
+is needed.
 
 Protocol 60 replaces the three task-status queries with `LookupTask(TaskTarget)`
-and moves shared playlist location fields to the batch response. Upgrade Core
-and clients together and restart Core. Database and configuration formats are unchanged.
+and moves shared playlist location fields to the batch response. Database and
+configuration formats are unchanged.
 
-Moving waveform ownership to the GUI changes local side-channel
-compatibility, not database or saved visualization configuration. Frontend and
-Core must be upgraded together: realtime PCM uses `.pcm.v6`/`RIVUPCM6`/SHM6,
-and generic finite PCM rendering uses `.audio.v1`. The former waveform-summary
-socket is not a compatibility path. GUI-session summaries are not persisted or
-migrated. Waveform style, display settings and seek controls retain their keys;
-see link:23_visuals.adoc#waveform[Waveform] and
+Moving waveform ownership to the GUI changes local side-channel compatibility.
+Realtime PCM uses `.pcm.v6`/`RIVUPCM6`/SHM6`, and generic finite PCM rendering
+uses `.audio.v1`. The database and saved visualization configuration remain
+compatible. Clients can no longer use the former waveform-summary socket.
+Waveform summaries are session-local. Waveform style, display settings and seek
+controls retain their keys.
+See link:23_visuals.adoc#waveform[Waveform] and
 link:21_ipc.adoc#finite-pcm-rendering[finite PCM rendering].
 
 [[settings-protocol-cutover]]
-Protocol 26 removes the full-configuration `Configure` command. Upgrade clients
-together and restart Core; mismatched versions are rejected before decoding.
-Clients must use `MutateConfig` Settings patches or dedicated commands instead;
-see link:21_ipc.adoc#configuration-mutations[configuration mutations]. On-disk
-configuration and database formats are unchanged; no disk migration is needed.
+Protocol 26 removes the full-configuration `Configure` command. Mismatched versions
+are rejected before decoding. Clients must use `MutateConfig` Settings patches or
+dedicated commands instead. See
+link:21_ipc.adoc#configuration-mutations[configuration mutations]. No database or
+configuration migration is needed.
 
-Protocol 41 adds the ReplayGain setting, track gain, and single-field edits. Upgrade
-Core and frontends together. Source-tag operations include track gain; database
-format 7 is required, while configuration remains compatible.
+Protocol 41 adds the ReplayGain setting, track gain, and single-field edits.
+Source-tag operations include track gain. Database format 7 is required, and
+configuration remains compatible.
 
 Protocol 42 adds runtime audio-output diagnostics and the global ReplayGain peak
-policy. Upgrade Core and frontends together and restart Core. Configuration defaults
-preserve existing gain behavior; peak tags and diagnostics are not stored in the
-database, so this change requires no database migration.
+policy. Configuration defaults preserve existing gain behavior. The database
+stores neither peak tags nor diagnostics, so no database migration is needed.
 
 [[configuration-compatibility]]
 === Manual configuration changes

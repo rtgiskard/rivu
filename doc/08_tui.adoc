@@ -35,8 +35,10 @@ the new order and Esc cancels. The selection follows the picked row. Each queue
 or playlist occurrence moves independently, even when the same track appears
 more than once. Clear search before reordering.
 
-If the edited list changes before saving, the preview is discarded; press Esc
-to dismiss the notice and start again. Other lists and playback continue to
+If the edited list changes before saving, the preview is discarded. In Queue,
+only adding, removing, or reordering entries invalidates the preview. A track
+title change leaves it intact. Press Esc to dismiss the notice and start again.
+Other lists and playback continue to
 refresh. A rejected save with an unchanged list leaves the preview available for
 retry or cancellation. If the save result is unknown, the preview is discarded;
 press Esc and check the list before starting another move.
