@@ -46,11 +46,11 @@ fn source_peak_rejects_changed_selection_file_and_explicit_reload(cx: &mut TestA
             .unwrap()
             .clone();
         let peak = SourcePeak {
-            track_id: original.id,
+            editor: this.metadata.editor_identity().unwrap(),
             path: original.path.clone(),
+            fingerprint: original.fingerprint.clone(),
             source_serial: this.metadata.source.generation(),
             reload: this.source_peak_reload,
-            eligible: true,
             value: Some(0.75),
         };
         assert!(this.source_peak_current(&peak, cx.background_executor().now()));
@@ -64,6 +64,13 @@ fn source_peak_rejects_changed_selection_file_and_explicit_reload(cx: &mut TestA
         let read = this.metadata.begin_load(original.id);
         assert!(this.metadata.accept_load(read, Some(original.clone())));
         assert!(this.source_peak_current(&peak, cx.background_executor().now()));
+        let mut replaced = original.clone();
+        replaced.fingerprint = Some("replacement".into());
+        let read = this.metadata.begin_load(original.id);
+        assert!(this.metadata.accept_load(read, Some(replaced)));
+        assert!(!this.source_peak_current(&peak, cx.background_executor().now()));
+        let read = this.metadata.begin_load(original.id);
+        assert!(this.metadata.accept_load(read, Some(original.clone())));
         this.request_track(original.id, cx);
         assert!(!this.source_peak_current(&peak, cx.background_executor().now()));
 
@@ -83,6 +90,90 @@ fn source_peak_rejects_changed_selection_file_and_explicit_reload(cx: &mut TestA
         assert!(this.source_peak_current(&peak, cx.background_executor().now()));
         this.metadata.select(original.id + 1);
         assert!(!this.source_peak_current(&peak, cx.background_executor().now()));
+        this.metadata.select(original.id);
+        let read = this.metadata.begin_load(original.id);
+        assert!(this.metadata.accept_load(read, Some(original)));
+        assert!(!this.source_peak_current(&peak, cx.background_executor().now()));
+    });
+}
+
+#[gpui::test]
+fn waveform_preview_skips_track_peak_io_and_details_reacquires_it(cx: &mut TestAppContext) {
+    let (directory, _runtime, metadata) = fixture(cx);
+    let mut selected = track(7, "Preview");
+    selected.path = directory.path().join("preview.wav");
+    rivu_metadata::artwork::test_support::tagged_wav(&selected.path);
+    metadata.update(cx, |this, cx| {
+        this.set_preview_demand(true, cx);
+        artwork_selection(this, selected, cx);
+        this.demand_metadata(cx);
+        assert!(this.read_demand());
+        assert!(!this.source_peak_reading);
+
+        this.set_source_peak_demand(true, cx);
+        assert!(this.source_peak_reading);
+        // Hide Details while the waveform still holds Track demand.
+        this.set_source_peak_demand(false, cx);
+        assert!(this.source_peak_reading);
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(!this.source_peak_reading);
+        assert!(this.source_peak.is_none());
+        this.set_source_peak_demand(true, cx);
+        assert!(this.source_peak_reading);
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(!this.source_peak_reading);
+        let peak = this.source_peak.as_ref().unwrap();
+        assert!(this.source_peak_current(peak, cx.background_executor().now()));
+        assert!(peak.value.is_none());
+        this.demand_metadata(cx);
+        assert!(!this.source_peak_reading);
+    });
+}
+
+#[gpui::test]
+fn track_peak_reloads_when_a_missing_source_returns_with_the_same_fingerprint(
+    cx: &mut TestAppContext,
+) {
+    let (directory, _runtime, metadata) = fixture(cx);
+    let mut available = track(1, "Peak");
+    available.path = directory.path().join("peak.wav");
+    available.fingerprint = Some("same-file".into());
+    rivu_metadata::artwork::test_support::tagged_wav(&available.path);
+    let mut missing = available.clone();
+    missing.missing = true;
+
+    metadata.update(cx, |this, cx| {
+        playback(this, available.clone(), cx);
+        this.set_source_peak_demand(true, cx);
+    });
+    cx.run_until_parked();
+    let recovered_reload = metadata.update(cx, |this, cx| {
+        let peak = this.source_peak.as_ref().unwrap();
+        assert!(peak.value.is_none());
+        playback(this, missing.clone(), cx);
+        assert!(this.source_peak.is_none());
+        assert!(!this.source_peak_reading);
+        playback(this, available.clone(), cx);
+        assert!(this.source_peak_reading);
+
+        // Another disappearance also fences the already submitted read.
+        let before = this.source_peak_reload;
+        playback(this, missing, cx);
+        playback(this, available, cx);
+        assert!(this.source_peak_reading);
+        assert_ne!(this.source_peak_reload, before);
+        this.source_peak_reload
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(!this.source_peak_reading);
+        let peak = this.source_peak.as_ref().unwrap();
+        assert_eq!(peak.reload, recovered_reload);
+        assert!(this.source_peak_current(peak, cx.background_executor().now()));
     });
 }
 

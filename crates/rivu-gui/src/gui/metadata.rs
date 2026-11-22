@@ -50,12 +50,18 @@ struct InlineEdit {
 }
 
 struct SourcePeak {
-    track_id: i64,
+    editor: EditorIdentity,
     path: std::path::PathBuf,
+    fingerprint: Option<String>,
     source_serial: u64,
     reload: u64,
-    eligible: bool,
     value: Option<f64>,
+}
+
+impl SourcePeak {
+    fn eligible(track: &Track) -> bool {
+        track.cue.is_none() && !track.missing
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +92,7 @@ pub(in crate::gui) struct Metadata {
     metadata: MetadataSession,
     metadata_read: MetadataReadCoordinator,
     playback_reload: Option<PlaybackReload>,
+    source_peak_demand: bool,
     source_peak: Option<SourcePeak>,
     source_peak_reading: bool,
     source_peak_reload: u64,
@@ -127,6 +134,7 @@ impl Metadata {
             metadata,
             metadata_read: MetadataReadCoordinator::default(),
             playback_reload: None,
+            source_peak_demand: false,
             source_peak: None,
             source_peak_reading: false,
             source_peak_reload: 0,
@@ -184,6 +192,8 @@ impl Metadata {
         }
         if query_changed {
             self.demand_metadata(cx);
+        } else if current_changed || recovery_changed {
+            self.prepare_source_peak(cx);
         }
         self.schedule_metadata_expiry(cx);
         if display_changed {
@@ -235,6 +245,17 @@ impl Metadata {
 
     fn read_demand(&self) -> bool {
         self.visible || self.preview_demand
+    }
+
+    pub(in crate::gui) fn set_source_peak_demand(
+        &mut self,
+        demanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.source_peak_demand != demanded {
+            self.source_peak_demand = demanded;
+            self.prepare_source_peak(cx);
+        }
     }
 
     pub(in crate::gui) fn retain_artwork_consumers(&mut self, visible: &[u64]) {
@@ -468,60 +489,79 @@ impl Metadata {
         self.run_metadata_read(task, cx);
     }
 
+    fn invalidate_ineligible_source_peak(&mut self) {
+        if (self.source_peak.is_some() || self.source_peak_reading)
+            && self
+                .metadata
+                .source_track()
+                .is_none_or(|track| !SourcePeak::eligible(track))
+        {
+            self.source_peak = None;
+            // A read started before the file disappeared must also be retired
+            // if the file returns with the same fingerprint before completion.
+            self.source_peak_reload = self.source_peak_reload.wrapping_add(1);
+        }
+    }
+
     fn source_peak_current(&self, peak: &SourcePeak, now: Instant) -> bool {
-        self.metadata.identity() == Some(peak.track_id)
+        self.metadata.editor_identity() == Some(peak.editor)
             && peak.source_serial == self.metadata.source.generation()
             && peak.reload == self.source_peak_reload
             && self.metadata.display_track_at(now).is_some_and(|track| {
-                track.id == peak.track_id
+                track.id == peak.editor.track_id
                     && track.path == peak.path
-                    && (track.cue.is_none() && !track.missing) == peak.eligible
+                    && track.fingerprint == peak.fingerprint
+                    && SourcePeak::eligible(track)
             })
     }
 
     fn prepare_source_peak(&mut self, cx: &mut Context<Self>) {
+        if !self.source_peak_demand || self.source_peak_reading {
+            return;
+        }
         let now = cx.background_executor().now();
-        if !self.read_demand()
-            || self.source_peak_reading
-            || self
-                .source_peak
-                .as_ref()
-                .is_some_and(|peak| self.source_peak_current(peak, now))
+        if self
+            .source_peak
+            .as_ref()
+            .is_some_and(|peak| self.source_peak_current(peak, now))
         {
             return;
         }
         let Some(track) = self.metadata.display_track_at(now) else {
             return;
         };
-        if self.metadata.identity() != Some(track.id) {
+        let Some(editor) = self.metadata.editor_identity() else {
+            return;
+        };
+        if editor.track_id != track.id || !SourcePeak::eligible(track) {
             return;
         }
         let mut peak = SourcePeak {
-            track_id: track.id,
+            editor,
             path: track.path.clone(),
+            fingerprint: track.fingerprint.clone(),
             source_serial: self.metadata.source.generation(),
             reload: self.source_peak_reload,
-            eligible: track.cue.is_none() && !track.missing,
             value: None,
         };
         self.source_peak_reading = true;
         // Keep one physical reader until completion, even if selection changes.
         let read = cx.background_executor().spawn(async move {
-            if peak.eligible {
-                peak.value = std::fs::File::open(&peak.path).ok().and_then(|mut file| {
-                    rivu_metadata::read_playback_tags(&mut file)
-                        .ok()
-                        .flatten()
-                        .and_then(|(_, peak)| peak)
-                });
-            }
+            peak.value = std::fs::File::open(&peak.path).ok().and_then(|mut file| {
+                rivu_metadata::read_playback_tags(&mut file)
+                    .ok()
+                    .flatten()
+                    .and_then(|(_, peak)| peak)
+            });
             peak
         });
         cx.spawn(async move |this, cx| {
             let peak = read.await;
             let _ = this.update(cx, |this, cx| {
                 this.source_peak_reading = false;
-                if this.source_peak_current(&peak, cx.background_executor().now()) {
+                if this.source_peak_demand
+                    && this.source_peak_current(&peak, cx.background_executor().now())
+                {
                     this.source_peak = Some(peak);
                     cx.notify();
                 } else {
@@ -597,10 +637,14 @@ impl Metadata {
                 ) {
                     ReadCompletion::Retired => this.demand_metadata(cx),
                     ReadCompletion::Loaded(accepted) => {
-                        if accepted && !this.metadata.editable() {
-                            this.cancel_edit(cx);
+                        if accepted {
+                            this.invalidate_ineligible_source_peak();
+                            if !this.metadata.editable() {
+                                this.cancel_edit(cx);
+                            }
                         }
                         cx.emit(MetadataEvent::TrackChanged);
+                        this.prepare_source_peak(cx);
                         this.schedule_metadata_expiry(cx);
                         cx.notify();
                     }
@@ -738,6 +782,7 @@ impl Metadata {
         let previous = self.metadata.editor_identity();
         self.metadata
             .sync_playback(self.state.current_track.as_ref());
+        self.invalidate_ineligible_source_peak();
         if self.metadata.editor_identity() != previous {
             self.cancel_edit(cx);
             self.close_hint(cx);

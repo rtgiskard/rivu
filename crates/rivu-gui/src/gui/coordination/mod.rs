@@ -620,11 +620,13 @@ impl WindowView {
         } else {
             &[]
         };
+        let metadata_visible = self.panel_demand("metadata");
         self.metadata.update(cx, |owner, cx| {
             owner.set_visible(
-                self.panel_demand("metadata") || self.panel_demand("audio_processing"),
+                metadata_visible || self.panel_demand("audio_processing"),
                 cx,
             );
+            owner.set_source_peak_demand(metadata_visible, cx);
             owner.set_preview_demand(
                 self.window_visible
                     && !self.state.system.shutting_down

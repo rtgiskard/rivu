@@ -239,6 +239,10 @@ changes notify only affected panels. Configuration refreshes reuse unchanged
 staging rather than treating it as new audio; neither animation clock refreshes
 the business root.
 
+Oscilloscope, Stereo Density and Spatial Spectrum wake for new analysis
+publications and do not request animation frames between publications. This
+presentation policy leaves analysis demand and history collection independent.
+
 The display clock advances at wall-clock speed but never beyond the latest
 accepted audio timestamp. Spectrum hold/release and smoothing, radial rotation
 and smoothing, generative motion, and Spectrogram placement can therefore change

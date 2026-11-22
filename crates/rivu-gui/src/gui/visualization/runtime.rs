@@ -46,6 +46,22 @@ impl PanelKind {
     fn analysis(self) -> bool {
         !matches!(self, Self::Waveform(_))
     }
+
+    fn animates(self) -> bool {
+        matches!(
+            self,
+            Self::Spectrum(_)
+                | Self::Spectrogram(_)
+                | Self::Audio(AudioVisualizerOptions {
+                    style: AudioVisualizerStyle::Bars
+                        | AudioVisualizerStyle::Rings
+                        | AudioVisualizerStyle::BarsRings
+                        | AudioVisualizerStyle::FractalBeams
+                        | AudioVisualizerStyle::FractalFlow,
+                    ..
+                })
+        )
+    }
 }
 
 pub(in crate::gui) struct VisualizerInputs<'a> {
@@ -247,6 +263,7 @@ impl VisualizerRuntime {
             || stopping
             || (status == PlaybackStatus::Stopped && stop_receipt_changed);
         let had_visible_analysis = self.panels.values().any(|kind| kind.analysis());
+        let was_running = self.animating();
         let membership_changed = self.panel_revision != panels.revision
             || AudioVisualizerOptions::from(self.config.as_ref())
                 != AudioVisualizerOptions::from(config.as_ref());
@@ -277,7 +294,6 @@ impl VisualizerRuntime {
             self.panel_revision = panels.revision;
             self.views.retain(|id, _| self.panels.contains_key(id));
         }
-        let was_running = self.animating();
         self.config = config;
         self.visible = visible;
         self.shutting_down = shutting_down;
@@ -482,7 +498,7 @@ impl VisualizerRuntime {
 
     fn animating(&self) -> bool {
         self.active()
-            && self.panels.values().any(|kind| kind.analysis())
+            && self.panels.values().any(|kind| kind.animates())
             && self.demand.enabled
             && self.status == PlaybackStatus::Playing
     }
@@ -498,13 +514,14 @@ impl VisualizerRuntime {
     }
 
     pub(in crate::gui) fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.active()
+        if self.frame_pending
+            || !self.active()
             || !self.demand.enabled
             || !self.panels.values().any(|kind| kind.analysis())
             || (!self.frame_requested
+                && !self.presentation_pending
                 && !self.animating()
                 && !self.style_coordinator.idle_fading(Instant::now()))
-            || self.frame_pending
         {
             return;
         }
@@ -537,15 +554,12 @@ impl VisualizerRuntime {
         }
         self.frame_requested = false;
         self.present_analysis(now, cx);
-        if self.animating() {
-            if !self.awaiting_replacement {
-                let time = self.animation_clock.advance(now);
-                let visuals_changed = self.frequency_enabled && self.frequency_views.animate(time);
-                let audio_changed = self.style_coordinator.animate(time);
-                self.notify_animation(visuals_changed, audio_changed, cx);
-            }
-        } else {
-            self.animation_clock.suspend();
+        if self.animating() && !self.awaiting_replacement {
+            let time = self.animation_clock.advance(now);
+            let visuals_changed = self.frequency_enabled && self.frequency_views.animate(time);
+            let audio_changed = self.style_coordinator.animate(time);
+            self.notify_animation(visuals_changed, audio_changed, cx);
+        } else if self.style_coordinator.idle_fading(now) {
             self.style_coordinator.advance_idle_fade(now);
             self.notify_animation(false, true, cx);
         }
@@ -618,19 +632,14 @@ impl VisualizerRuntime {
 
     fn notify_animation(&self, visuals: bool, audio: bool, cx: &mut Context<Self>) {
         for (id, view) in &self.views {
-            let changed = match self.panels.get(id) {
-                Some(PanelKind::Spectrum(_) | PanelKind::Spectrogram(_)) => visuals,
-                Some(PanelKind::Audio(options)) => {
-                    audio
-                        && !matches!(
-                            options.style,
-                            AudioVisualizerStyle::StereoDensity
-                                | AudioVisualizerStyle::SpatialSpectrum
-                                | AudioVisualizerStyle::Oscilloscope
-                        )
-                }
-                _ => false,
-            };
+            let changed = self.panels.get(id).is_some_and(|kind| {
+                kind.animates()
+                    && match kind {
+                        PanelKind::Spectrum(_) | PanelKind::Spectrogram(_) => visuals,
+                        PanelKind::Audio(_) => audio,
+                        PanelKind::Waveform(_) => false,
+                    }
+            });
             if changed {
                 view.update(cx, |_, cx| cx.notify());
             }
@@ -1522,6 +1531,67 @@ mod tests {
                 assert_eq!(owner.demand, DisplayDemand::default());
             }
         });
+    }
+
+    #[gpui::test]
+    fn data_driven_panels_sleep_between_publications(cx: &mut gpui::TestAppContext) {
+        let mut config = test_config();
+        config.animation_fps = 0;
+        let (_directory, runtime) = fixture(&config);
+        let config = runtime.handle.config_snapshot();
+        let window = cx.add_empty_window();
+        for style in [
+            AudioVisualizerStyle::Oscilloscope,
+            AudioVisualizerStyle::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum,
+        ] {
+            let mut layout = layout::Layout {
+                root: None,
+                next_id: 1,
+                locked: false,
+            };
+            let panel = layout.add("audio_visualizer", None);
+            layout.set_audio_visualizer_options(
+                panel,
+                AudioVisualizerOptions {
+                    style,
+                    ..config.as_ref().into()
+                },
+            );
+            let panels = demand(&layout);
+            window.update(|window, cx| {
+                let owner = new_owner(&runtime, cx);
+                owner.update(cx, |owner, cx| {
+                    owner.sync(inputs(&config, &panels), cx);
+                    assert!(owner.demand.enabled);
+                    owner.request_frame(window, cx);
+                    assert!(owner.frame_pending, "first paint for {style:?}");
+                });
+                window.simulate_next_frame(cx);
+                owner.update(cx, |owner, cx| {
+                    assert!(!owner.frame_pending, "{style:?} without data");
+                    // The frontend wake requests a native frame after staging a publication.
+                    owner.staging = AnalysisFrame {
+                        sequence: 1,
+                        generation: 1,
+                        sample_rate: 48_000,
+                        sample_time: Duration::from_secs(1),
+                        settings: Some(config.as_ref().into()),
+                        ..Default::default()
+                    };
+                    owner.presentation_pending = true;
+                    owner.request_frame(window, cx);
+                    assert!(owner.frame_pending, "fresh publication for {style:?}");
+                });
+                window.simulate_next_frame(cx);
+                owner.update(cx, |owner, cx| {
+                    assert!(!owner.presentation_pending);
+                    assert_eq!(owner.animation_clock.latest, Some(Duration::from_secs(1)));
+                    owner.request_frame(window, cx);
+                    assert!(!owner.frame_pending, "{style:?} after presentation");
+                });
+            });
+        }
     }
 
     #[gpui::test]
