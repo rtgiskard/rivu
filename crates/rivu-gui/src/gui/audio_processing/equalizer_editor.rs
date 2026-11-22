@@ -690,8 +690,15 @@ impl EqualizerEditor {
         let input = cx.new(|cx| Input::new(label.to_owned(), value, placeholder, cx));
         input.update(cx, |input, cx| {
             input.set_enabled(enabled, cx);
-            if matches!(key, EqField::PreampDb | EqField::OutputGainDb) {
-                input.set_trailing_text("dB".into(), cx);
+            let unit = match key {
+                EqField::Band(_, BandField::FrequencyHz) => Some("Hz"),
+                EqField::PreampDb | EqField::OutputGainDb | EqField::Band(_, BandField::GainDb) => {
+                    Some("dB")
+                }
+                _ => None,
+            };
+            if let Some(unit) = unit {
+                input.set_trailing_text(unit.into(), cx);
             }
         });
         input
@@ -940,13 +947,8 @@ impl EqualizerEditor {
                     BandField::Stages => "processing-stages",
                     BandField::Channels => "processing-channels",
                 });
-                let placeholder = if name == BandField::Channels {
-                    self.tr("processing-channels-placeholder")
-                } else {
-                    label.clone()
-                };
                 let text = field.input.read(cx).text().to_owned();
-                field.input = cx.new(|cx| Input::new(label, text, placeholder, cx));
+                field.input = self.new_field_input(&new_key, &label, text, true, cx);
                 field.identity = field.input.entity_id();
                 field.native_epoch = self.native_epoch;
                 field.slider_bounds = Rc::new(Cell::new(None));
@@ -1496,13 +1498,11 @@ impl EqualizerEditor {
         let label: SharedString = label.into();
         let compact = matches!(key, EqField::PreampDb | EqField::OutputGainDb);
         let enabled = enabled && self.field_input_enabled(key);
-        let (unit, step) = match key {
-            EqField::Band(_, BandField::FrequencyHz) => ("Hz", Some(1.)),
-            EqField::PreampDb | EqField::OutputGainDb => ("dB", None),
-            EqField::Band(_, BandField::GainDb) => ("dB", Some(0.5)),
-            EqField::Band(_, BandField::Q | BandField::ShelfSlope) => ("", Some(0.1)),
-            EqField::Band(_, BandField::Stages) => ("", Some(1.)),
-            _ => ("", None),
+        let step = match key {
+            EqField::Band(_, BandField::FrequencyHz | BandField::Stages) => Some(1.),
+            EqField::Band(_, BandField::GainDb) => Some(0.5),
+            EqField::Band(_, BandField::Q | BandField::ShelfSlope) => Some(0.1),
+            _ => None,
         };
         let help = match key {
             EqField::PreampDb => Some("processing-preamp-input-help"),
@@ -1517,7 +1517,7 @@ impl EqualizerEditor {
         let mut numeric = rivu_ui::NumericInput::new(
             div()
                 .min_w_0()
-                .w(rems(5.))
+                .w(numeric_parameter_width(cx))
                 .flex_shrink_0()
                 .id(SharedString::from(format!("eq-input-help-{key}")))
                 .when_some(help, |view, help| {
@@ -1525,9 +1525,6 @@ impl EqualizerEditor {
                 })
                 .child(field.input.clone()),
         );
-        if !compact {
-            numeric = numeric.unit(caption(theme, unit).w(rems(1.5)).flex_shrink_0());
-        }
         let mut control = row()
             .gap_1()
             .when(compact, |view| view.flex_shrink_0())
@@ -1535,8 +1532,8 @@ impl EqualizerEditor {
                 div()
                     .text_xs()
                     .text_color(rgb(theme.secondary))
-                    .when(!compact, |view| view.w(rems(7.)))
-                    .flex_shrink_0()
+                    .when(!compact, |view| view.w(rems(7.)).min_w_0())
+                    .when(compact, |view| view.flex_shrink_0())
                     .truncate()
                     .child(rivu_ui::truncated_label(
                         SharedString::from(format!("eq-label-{key}")),
@@ -2544,6 +2541,7 @@ impl EqualizerEditor {
                 !self.input_locked(),
                 cx,
             ))
+            .flex_wrap()
             .child(self.field_view(
                 &EqField::OutputGainDb,
                 self.tr("processing-output-gain-short"),

@@ -642,20 +642,16 @@ impl FieldKey {
     }
 }
 
-fn denoise_unit(field: DenoiseField, bins: impl FnOnce() -> SharedString) -> SharedString {
-    match field {
-        DenoiseField::SpectralGainFloorDb => "dB",
-        DenoiseField::AttackMs | DenoiseField::ReleaseMs => "ms",
-        DenoiseField::HumFundamentalHz => "Hz",
-        DenoiseField::SmoothingBins => return bins(),
-        DenoiseField::StationaryNoiseDbfs | DenoiseField::ImpulseFloorDbfs => "dBFS",
-        _ => "",
-    }
-    .into()
+fn numeric_parameter_width(cx: &App) -> gpui::Rems {
+    rems(1.5 + 5. * rivu_ui::theme::font_size_scale(cx).max(1.))
 }
 
-fn numeric_parameter_input(input: Entity<Input>) -> Div {
-    div().w(rems(5.)).max_w_full().min_w_0().child(input)
+fn numeric_parameter_input(input: Entity<Input>, cx: &App) -> Div {
+    div()
+        .w(numeric_parameter_width(cx))
+        .max_w_full()
+        .min_w_0()
+        .child(input)
 }
 
 fn page_parameter_command<'a>(
@@ -1290,7 +1286,51 @@ impl AudioProcessing {
                 .unwrap_or_else(|| label.to_owned().into())
         };
         let help = self.field_help(key);
-        cx.new(|cx| Input::new(label.to_owned(), text, placeholder, cx).with_help(help))
+        let unit = self.field_unit(key);
+        cx.new(|cx| {
+            let mut input = Input::new(label.to_owned(), text, placeholder, cx).with_help(help);
+            if let Some(unit) = unit {
+                input.set_trailing_text(unit, cx);
+            }
+            input
+        })
+    }
+
+    fn field_unit(&self, key: FieldKey) -> Option<SharedString> {
+        use graph_editor::{GraphField, NodeField};
+
+        let unit = match key {
+            FieldKey::Denoise(field)
+            | FieldKey::Graph(NodeField {
+                field: GraphField::Denoise(field),
+                ..
+            }) => match field {
+                DenoiseField::SpectralGainFloorDb => "dB",
+                DenoiseField::AttackMs | DenoiseField::ReleaseMs => "ms",
+                DenoiseField::HumFundamentalHz => "Hz",
+                DenoiseField::SmoothingBins => return Some(self.tr("processing-smoothing-unit")),
+                DenoiseField::StationaryNoiseDbfs | DenoiseField::ImpulseFloorDbfs => "dBFS",
+                _ => return None,
+            },
+            FieldKey::Neural(NeuralField::SpeechAttenuationLimitDb)
+            | FieldKey::VocalGain
+            | FieldKey::AccompanimentGain
+            | FieldKey::Graph(NodeField {
+                field:
+                    GraphField::Neural(NeuralField::SpeechAttenuationLimitDb) | GraphField::MixGain(_),
+                ..
+            }) => "dB",
+            FieldKey::ProfileStart
+            | FieldKey::ProfileEnd
+            | FieldKey::Graph(NodeField {
+                field: GraphField::ProfileStart | GraphField::ProfileEnd,
+                ..
+            }) => "s",
+            FieldKey::ExportRate => "Hz",
+            FieldKey::ExportBitrate => "kb/s",
+            _ => return None,
+        };
+        Some(unit.into())
     }
 
     fn field_placeholder(&self, key: FieldKey) -> Option<SharedString> {
@@ -1600,25 +1640,7 @@ impl AudioProcessing {
             FieldKey::Neural(field) if field.input_kind() == FieldInputKind::Path => {
                 div().min_w_0().child(input)
             }
-            _ => {
-                let unit = match key {
-                    FieldKey::Denoise(field) => {
-                        denoise_unit(field, || self.tr("processing-smoothing-unit"))
-                    }
-                    FieldKey::Neural(NeuralField::SpeechAttenuationLimitDb)
-                    | FieldKey::VocalGain
-                    | FieldKey::AccompanimentGain => "dB".into(),
-                    FieldKey::ProfileStart | FieldKey::ProfileEnd => "s".into(),
-                    FieldKey::ExportBitrate => "kb/s".into(),
-                    _ => SharedString::default(),
-                };
-                row()
-                    .gap_1()
-                    .child(numeric_parameter_input(input))
-                    .when(!unit.is_empty(), |view| {
-                        view.child(caption(theme, unit).flex_shrink_0())
-                    })
-            }
+            _ => numeric_parameter_input(input, cx),
         };
         self.parameter_row(
             theme,

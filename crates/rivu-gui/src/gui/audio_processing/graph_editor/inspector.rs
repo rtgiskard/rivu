@@ -535,20 +535,10 @@ impl AudioProcessing {
         } else {
             let input = self.field_input(panel, key, &label, cx);
             let editor = if !descriptor.is_path() {
-                let unit = match descriptor {
-                    GraphField::Denoise(field) => {
-                        denoise_unit(field, || self.tr("processing-smoothing-unit"))
-                    }
-                    GraphField::Neural(NeuralField::SpeechAttenuationLimitDb)
-                    | GraphField::MixGain(_) => "dB".into(),
-                    GraphField::ProfileStart | GraphField::ProfileEnd => "s".into(),
-                    _ => SharedString::default(),
-                };
-                let value = row()
+                let mut numeric = row()
                     .gap_1()
-                    .child(numeric_parameter_input(input))
-                    .when(!unit.is_empty(), |view| view.child(caption(theme, unit)));
-                let mut numeric = row().gap_1().flex_wrap().child(value);
+                    .flex_wrap()
+                    .child(numeric_parameter_input(input, cx));
                 if let Some(step) = descriptor.numeric_step() {
                     let mut steps = row().gap_1();
                     for (sign, delta) in [("−", -step), ("+", step)] {
