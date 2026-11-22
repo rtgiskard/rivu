@@ -33,14 +33,7 @@ impl ReadView<'_> {
         query: &Query,
         current: QueryRevisions,
     ) -> Result<ViewResponse, QueryError> {
-        if self.database_maintenance_active()
-            && !matches!(
-                query,
-                Query::ScanTask { .. }
-                    | Query::RelocationTask { .. }
-                    | Query::ProcessingTask { .. }
-            )
-        {
+        if self.database_maintenance_active() {
             return Err(QueryError::Message(
                 "Database maintenance is in progress; retry this read after it finishes".into(),
             ));
@@ -131,9 +124,6 @@ impl ReadView<'_> {
                     .duplicate_member_selection(fingerprint, &outside[..len])?;
                 ViewResponse::DuplicateReviewMembers { page, selected }
             }
-            Query::ProcessingTask { .. } | Query::RelocationTask { .. } => {
-                unreachable!("task status stays on Core")
-            }
             Query::QueuePage {
                 query,
                 offset,
@@ -165,7 +155,6 @@ impl ReadView<'_> {
                 self.store
                     .queue_entry_locations(query.as_deref(), queue_ids)?,
             ),
-            Query::ScanTask { .. } => unreachable!("task status stays on Core"),
             Query::OtherTracksPage { limit: 0, .. } | Query::LibraryRootPage { limit: 0, .. } => {
                 return Err(QueryError::Message(
                     "Library page limit must be positive; use LibraryMatchCounts for counts".into(),

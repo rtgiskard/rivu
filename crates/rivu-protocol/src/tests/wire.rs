@@ -1,7 +1,10 @@
 use crate as rivu_protocol;
 use crate::{
-    model::{Command, Query},
-    response::{QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections},
+    model::{Command, Query, TaskTarget},
+    response::{
+        QueryResponse, StateRequest, StateResponse, StateRevisions, StateSections, TaskLookup,
+        TaskOutcome,
+    },
     transport::*,
     wire::*,
 };
@@ -202,12 +205,27 @@ fn exact_playlist_summary_identity_and_stamp_select_catalog() {
 }
 
 #[test]
-fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
+fn scan_task_lookup_and_cancel_wire_round_trip_preserve_id() {
     let mut encoded = Vec::new();
     for id in [0, 42, u64::MAX] {
-        assert_query_round_trip(&mut encoded, Query::ScanTask { id });
+        let target = TaskTarget::Scan { id };
+        encode_request_frame_into(&WireRequest::LookupTask(target), &mut encoded).unwrap();
+        assert_eq!(encoded[5], 9);
+        assert!(
+            matches!(decode_request_frame(&encoded[4..]).unwrap(), WireRequest::LookupTask(decoded) if decoded == target)
+        );
         assert_command_round_trip(&mut encoded, Command::CancelScan { id });
     }
+    encode_response_frame_into(
+        &WireResponse::TaskLookup(TaskLookup::UnknownOrExpired),
+        &mut encoded,
+    )
+    .unwrap();
+    assert_eq!(encoded[5], 6);
+    assert!(matches!(
+        decode_response_frame(&encoded[4..]).unwrap(),
+        WireResponse::TaskLookup(TaskLookup::UnknownOrExpired)
+    ));
 }
 
 #[test]
@@ -533,10 +551,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
 
 #[test]
 fn scan_task_status_wire_round_trip_preserves_all_phases() {
-    use rivu_protocol::{
-        model::{ScanPhase, ScanProgress, ScanTaskStatus},
-        response::{QueryRevisions, ViewResponse},
-    };
+    use rivu_protocol::model::{ScanPhase, ScanProgress, ScanTaskStatus};
     for phase in [
         ScanPhase::Discovering,
         ScanPhase::ReadingMetadata,
@@ -559,16 +574,12 @@ fn scan_task_status_wire_round_trip_preserves_all_phases() {
             library_committed: false,
             playlist_id: None,
         };
-        let response = QueryResponse {
-            revisions: QueryRevisions::default(),
-            result: Ok(ViewResponse::ScanTask(task.clone())),
-        };
+        let response = WireResponse::TaskLookup(TaskLookup::Found(TaskOutcome::Scan(task.clone())));
         let mut encoded = Vec::new();
-        encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
-        let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
-            panic!("expected query response");
-        };
-        let ViewResponse::ScanTask(decoded) = decoded.result.unwrap() else {
+        encode_response_frame_into(&response, &mut encoded).unwrap();
+        let WireResponse::TaskLookup(TaskLookup::Found(TaskOutcome::Scan(decoded))) =
+            decode_response_frame(&encoded[4..]).unwrap()
+        else {
             panic!("expected scan task");
         };
         assert_eq!(decoded, task);
@@ -1284,6 +1295,7 @@ fn request_round_trip_uses_explicit_message_types() {
             .into(),
         ),
         WireRequest::WaitTask(rivu_protocol::model::TaskTarget::Scan { id: 42 }),
+        WireRequest::LookupTask(TaskTarget::Scan { id: 42 }),
         WireRequest::RegisterDesktop,
         WireRequest::CancelRead(73),
     ];
@@ -1295,6 +1307,7 @@ fn request_round_trip_uses_explicit_message_types() {
             WireRequest::Command(_) => RequestTag::Command,
             WireRequest::WaitState(_) => RequestTag::WaitState,
             WireRequest::WaitTask(_) => RequestTag::WaitTask,
+            WireRequest::LookupTask(_) => RequestTag::LookupTask,
             WireRequest::RegisterDesktop => RequestTag::RegisterDesktop,
             WireRequest::CancelRead(_) => RequestTag::CancelRead,
         };
@@ -1331,7 +1344,7 @@ fn request_round_trip_uses_explicit_message_types() {
             WireRequest::Hello(_) => {}
             WireRequest::RegisterDesktop => {}
             WireRequest::CancelRead(id) => assert_eq!(id, 73),
-            WireRequest::WaitTask(target) => {
+            WireRequest::WaitTask(target) | WireRequest::LookupTask(target) => {
                 assert_eq!(target, rivu_protocol::model::TaskTarget::Scan { id: 42 })
             }
             WireRequest::Command(WireCommand::MoveQueue {
@@ -2229,20 +2242,14 @@ fn graph_task_query_frame_retains_pcm_availability_and_context_without_paths() {
     assert!(json["graph_outputs"][1]["context"].get("path").is_none());
     let mut encoded = Vec::new();
     encode_response_frame_into(
-        &WireResponse::Query(QueryResponse {
-            revisions: Default::default(),
-            result: Ok(rivu_protocol::response::ViewResponse::ProcessingTask(Some(
-                Box::new(task.clone()),
-            ))),
-        }),
+        &WireResponse::TaskLookup(TaskLookup::Found(TaskOutcome::Processing(Box::new(
+            task.clone(),
+        )))),
         &mut encoded,
     )
     .unwrap();
-    let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
-        panic!("expected graph task response");
-    };
-    let rivu_protocol::response::ViewResponse::ProcessingTask(Some(decoded)) =
-        decoded.result.unwrap()
+    let WireResponse::TaskLookup(TaskLookup::Found(TaskOutcome::Processing(decoded))) =
+        decode_response_frame(&encoded[4..]).unwrap()
     else {
         panic!("expected retained graph task");
     };

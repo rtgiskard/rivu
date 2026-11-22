@@ -1,4 +1,5 @@
 use super::*;
+use rivu_protocol::response::TaskLookup;
 
 fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
     let (directory, mut core) = fixture();
@@ -237,7 +238,7 @@ fn manual_relocation_preserves_source_identity_state_and_references() {
     assert!(core.state.query_revisions().library > revisions.library);
     assert!(core.state.query_revisions().structure > revisions.structure);
     assert!(
-        matches!(core.view(&Query::RelocationTask { id }), Ok(ViewResponse::RelocationTask(task)) if task == status)
+        matches!(core.lookup_task(TaskTarget::Relocation { id }), TaskLookup::Found(TaskOutcome::Relocation(task)) if task == status)
     );
 }
 

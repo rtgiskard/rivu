@@ -11,9 +11,9 @@ use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{
         Command, DuplicateGroup, DuplicateMember, Page, Query, RelocationPhase,
-        RelocationTaskStatus,
+        RelocationTaskStatus, TaskTarget,
     },
-    response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
+    response::{QueryError, QueryResponse, QueryRevisions, TaskLookup, TaskOutcome, ViewResponse},
 };
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, active_control, button, caption,
@@ -223,10 +223,10 @@ impl DuplicateReview {
     }
 
     fn accept_task(&mut self, task: &RelocationTaskStatus) -> bool {
-        if !self.open || self.task_id() != Some(task.id) || task.phase == RelocationPhase::Verifying
-        {
-            return false;
-        }
+        self.open && self.task_id() == Some(task.id) && self.finish_task(task)
+    }
+
+    fn finish_task(&mut self, task: &RelocationTaskStatus) -> bool {
         self.feedback = Some(match task.phase {
             RelocationPhase::Completed => match &task.error {
                 Some(error) => ReviewFeedback::Text(format!("Warning: {error}"), StatusKind::Info),
@@ -239,7 +239,7 @@ impl DuplicateReview {
                 Some(error) => ReviewFeedback::Text(error.clone(), StatusKind::Error),
                 None => ReviewFeedback::Localized("gl-relocation-failed", StatusKind::Error),
             },
-            RelocationPhase::Verifying => unreachable!(),
+            RelocationPhase::Verifying => return false,
         });
         self.busy = None;
         true
@@ -261,7 +261,7 @@ impl DuplicateReview {
         &mut self,
         epoch: u64,
         id: u64,
-        response: QueryResponse,
+        response: anyhow::Result<TaskLookup>,
         timed_out: bool,
     ) -> TaskReadOutcome {
         self.task_query_pending = false;
@@ -271,15 +271,23 @@ impl DuplicateReview {
         if !self.open || self.epoch != epoch || self.task_id() != Some(id) {
             return TaskReadOutcome::Ignored;
         }
-        match response.result {
-            Ok(ViewResponse::RelocationTask(task)) if task.id == id => {
-                if self.accept_task(&task) {
+        match response {
+            Ok(TaskLookup::Found(TaskOutcome::Relocation(task))) => {
+                if self.finish_task(&task) {
                     TaskReadOutcome::Finished
                 } else {
                     TaskReadOutcome::Ignored
                 }
             }
-            Err(QueryError::RevisionChanged | QueryError::Cancelled) => TaskReadOutcome::Ignored,
+            Ok(TaskLookup::UnknownOrExpired) => {
+                self.busy = None;
+                self.invalidate();
+                self.feedback = Some(ReviewFeedback::Localized(
+                    "gl-verification-unknown-or-expired",
+                    StatusKind::Info,
+                ));
+                TaskReadOutcome::Finished
+            }
             result => {
                 self.task_read_failed = Some((epoch, id));
                 self.feedback = Some(match result {
@@ -291,14 +299,12 @@ impl DuplicateReview {
         }
     }
 
-    fn timeout_task_read(&mut self, epoch: u64, id: u64, response: QueryResponse) -> bool {
+    fn timeout_task_read(&mut self, epoch: u64, id: u64, message: &str) -> bool {
         if !self.open || self.epoch != epoch || self.task_id() != Some(id) {
             return false;
         }
         self.task_read_failed = Some((epoch, id));
-        self.feedback = Some(ReviewFeedback::ReadFailed(
-            response.result.unwrap_err().to_string(),
-        ));
+        self.feedback = Some(ReviewFeedback::ReadFailed(message.into()));
         true
     }
 
@@ -1157,22 +1163,17 @@ impl Duplicates {
         };
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let (response, timed_out) =
-                crate::gui::query::run(
-                    handle,
-                    cx,
-                    move |handle| async move {
-                        handle.query_for_gui(Query::RelocationTask { id }).await
-                    },
-                    |response, cx| {
-                        let _ = this.update(cx, |this, cx| {
-                            if this.duplicate_review.timeout_task_read(epoch, id, response) {
-                                this.sync_duplicate_review(cx);
-                                cx.notify();
-                            }
-                        });
-                    },
-                )
+            let mut timed_out = false;
+            let response = handle
+                .lookup_task(TaskTarget::Relocation { id }, |message| {
+                    timed_out = true;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.duplicate_review.timeout_task_read(epoch, id, message) {
+                            this.sync_duplicate_review(cx);
+                            cx.notify();
+                        }
+                    });
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_retained_relocation(epoch, id, response, timed_out, cx);
@@ -1185,7 +1186,7 @@ impl Duplicates {
         &mut self,
         epoch: u64,
         id: u64,
-        response: QueryResponse,
+        response: anyhow::Result<TaskLookup>,
         timed_out: bool,
         cx: &mut Context<Self>,
     ) {
@@ -2088,7 +2089,7 @@ mod tests {
     use super::{Busy, DuplicateReview, Member, ReviewFeedback, TaskReadOutcome};
     use rivu_protocol::{
         model::{Command, DuplicateMember, Page, RelocationPhase, RelocationTaskStatus, Track},
-        response::{QueryResponse, QueryRevisions, ViewResponse},
+        response::{QueryResponse, QueryRevisions, TaskLookup, TaskOutcome, ViewResponse},
     };
     use std::time::Instant;
 
@@ -2538,7 +2539,7 @@ mod tests {
         let mut review = ready_review();
         review.busy = Some(Busy::Relocating(7));
         let epoch = review.begin_task_read(7).unwrap();
-        assert!(review.timeout_task_read(epoch, 7, timeout_response()));
+        assert!(review.timeout_task_read(epoch, 7, "timed out"));
         assert_eq!(review.task_id(), Some(7));
         assert_eq!(review.cancellable_task(), Some(7));
         assert!(review.task_query_pending);
@@ -2563,7 +2564,7 @@ mod tests {
         review.open(QueryRevisions::default(), Instant::now());
         review.busy = Some(Busy::Relocating(9));
         review.feedback = Some(ReviewFeedback::ReadFailed("latest error".into()));
-        assert!(!review.timeout_task_read(epoch, 8, timeout_response()));
+        assert!(!review.timeout_task_read(epoch, 8, "timed out"));
         assert!(matches!(
             review.accept_task_read(epoch, 8, task_response(8, RelocationPhase::Completed), true),
             TaskReadOutcome::Ignored
@@ -2609,12 +2610,7 @@ mod tests {
                     this.duplicate_review.close();
                 }
                 let response = if failed {
-                    QueryResponse {
-                        revisions: QueryRevisions::default(),
-                        result: Err(rivu_protocol::response::QueryError::Message(
-                            "read failed".into(),
-                        )),
-                    }
+                    Err(anyhow::anyhow!("read failed"))
                 } else {
                     task_response(7, RelocationPhase::Verifying)
                 };
@@ -2936,11 +2932,8 @@ mod tests {
         }
     }
 
-    fn task_response(id: u64, phase: RelocationPhase) -> QueryResponse {
-        QueryResponse {
-            revisions: QueryRevisions::default(),
-            result: Ok(ViewResponse::RelocationTask(task(id, phase))),
-        }
+    fn task_response(id: u64, phase: RelocationPhase) -> anyhow::Result<TaskLookup> {
+        Ok(TaskLookup::Found(TaskOutcome::Relocation(task(id, phase))))
     }
 
     #[test]
@@ -3188,30 +3181,59 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_retained_status_preserves_task_until_terminal_status() {
-        let mut review = ready_review();
-        review.confirm(true);
-        let (epoch, _) = review.submit(false).unwrap();
-        review.accept_ack(epoch, false, &ack(true, Some(7)));
-        review.begin_task_read(7);
-        assert!(matches!(
-            review.accept_task_read(
-                epoch,
-                7,
-                task_response(8, RelocationPhase::Completed),
-                false
-            ),
-            TaskReadOutcome::Failed
-        ));
-        assert_eq!(review.task_id(), Some(7));
-        assert!(!review.task_query_pending);
-        assert!(review.begin_task_read(7).is_none());
-        let mut failed = task(7, RelocationPhase::Failed);
-        failed.error = Some("verification failed".into());
-        assert!(review.accept_task(&failed));
-        assert!(
-            matches!(&review.feedback, Some(ReviewFeedback::Text(error, _)) if error == "verification failed")
-        );
+    fn expired_result_only_retires_the_review_and_task_that_requested_it() {
+        for reopen in [false, true] {
+            let mut review = ready_review();
+            review.busy = Some(Busy::Relocating(7));
+            let epoch = review.begin_task_read(7).unwrap();
+            let current_id = if reopen {
+                review.close();
+                review.open(QueryRevisions::default(), Instant::now());
+                7
+            } else {
+                8
+            };
+            review.busy = Some(Busy::Relocating(current_id));
+            assert!(matches!(
+                review.accept_task_read(epoch, 7, Ok(TaskLookup::UnknownOrExpired), false),
+                TaskReadOutcome::Ignored
+            ));
+            assert!(review.feedback.is_none());
+            assert_eq!(review.cancellable_task(), Some(current_id));
+            assert_eq!(review.begin_task_read(current_id), Some(review.epoch));
+        }
+    }
+
+    #[test]
+    fn expired_task_releases_review_and_requires_fresh_choices_before_retry() {
+        for cancelling in [false, true] {
+            let mut review = ready_review();
+            review.confirm(true);
+            let (epoch, _) = review.submit(false).unwrap();
+            review.accept_ack(epoch, false, &ack(true, Some(7)));
+            if cancelling {
+                review.accept_cancel(7, Ok(()));
+            }
+            assert_eq!(review.begin_task_read(7), Some(epoch));
+            assert!(matches!(
+                review.accept_task_read(epoch, 7, Ok(TaskLookup::UnknownOrExpired), false),
+                TaskReadOutcome::Finished
+            ));
+            assert!(matches!(
+                review.feedback,
+                Some(ReviewFeedback::Localized(
+                    "gl-verification-unknown-or-expired",
+                    StatusKind::Info
+                ))
+            ));
+            assert!(review.busy.is_none());
+            assert!(!review.task_query_pending);
+            assert!(review.begin_task_read(7).is_none());
+            assert!(!review.confirm(true));
+            assert!(review.submit(true).is_none());
+            assert!(review.begin_groups().is_some());
+            assert_eq!(review.close(), None);
+        }
     }
 
     #[test]
@@ -3306,10 +3328,10 @@ mod tests {
             review.accept_ack(epoch, false, &ack(true, Some(7)));
             let epoch = review.begin_task_read(7).unwrap();
             if timeout {
-                assert!(review.timeout_task_read(epoch, 7, timeout_response()));
+                assert!(review.timeout_task_read(epoch, 7, "timed out"));
             } else {
                 assert!(matches!(
-                    review.accept_task_read(epoch, 7, timeout_response(), false),
+                    review.accept_task_read(epoch, 7, Err(anyhow::anyhow!("read failed")), false),
                     TaskReadOutcome::Failed
                 ));
             }

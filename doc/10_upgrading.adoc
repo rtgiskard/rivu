@@ -100,6 +100,9 @@ Protocol 57 distinguishes malformed command bodies that end the session from
 invalid command values that allow reuse. Protocol 56 clients must upgrade with
 Core; no data or configuration migration is needed.
 
+Protocol 60 replaces the three task-status queries with `LookupTask(TaskTarget)`.
+Upgrade Core and clients together and restart Core. Database and configuration formats are unchanged.
+
 Moving waveform ownership to the GUI changes local side-channel
 compatibility, not database or saved visualization configuration. Frontend and
 Core must be upgraded together: realtime PCM uses `.pcm.v6`/`RIVUPCM6`/SHM6,

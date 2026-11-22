@@ -1,4 +1,5 @@
 use super::*;
+use rivu_protocol::response::TaskLookup;
 
 fn drive_to_saving(core: &mut Core) {
     while !core.active_external_admission.as_ref().unwrap().is_saving() {
@@ -79,7 +80,8 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert!(snapshot.scan_visible(MediaTaskOwner::Queue));
     assert!(!snapshot.scan_visible(MediaTaskOwner::Library));
     assert_eq!(core.store.queue_ids().unwrap(), before_queue);
-    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(status)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("expected media task")
     };
     assert_eq!(status.id, id);
@@ -115,7 +117,8 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     );
     assert_eq!(core.state.library.track_total, before_total + 2);
     assert!(Arc::ptr_eq(core.preferences.settings(), &config));
-    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(status)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("expected retained media task")
     };
     assert!(status.library_committed);
@@ -194,7 +197,8 @@ fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_ap
             .unwrap()
             .is_none()
     );
-    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(status)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("expected task")
     };
     assert!(!status.library_committed);
@@ -260,7 +264,8 @@ fn cancel_scan_is_intent_until_preparation_joins_and_leaves_no_residue() {
             .unwrap()
             .is_none()
     );
-    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(status)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("expected task")
     };
     assert_eq!(status.progress.phase, ScanPhase::Cancelled);
@@ -331,7 +336,8 @@ fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
         _ => None,
     })
     .expect("admitted external files expose a media task identity");
-    let ViewResponse::ScanTask(status) = handle.query(Query::ScanTask { id }).result.unwrap()
+    let TaskLookup::Found(TaskOutcome::Scan(status)) =
+        futures::executor::block_on(handle.lookup_task(TaskTarget::Scan { id })).unwrap()
     else {
         panic!("expected active task")
     };
@@ -342,7 +348,8 @@ fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
     let core = worker.join().unwrap();
     // Shutdown may cancel preparation or join Saving, but the same retained task
     // must truthfully distinguish those outcomes; the admission CommandReceipt is not a commit.
-    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(status)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("expected retained task")
     };
     assert_eq!(
@@ -387,7 +394,8 @@ fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts()
         core.store.queue_ids().unwrap().len(),
         core.state.queue.total
     );
-    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(status)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("expected retained task")
     };
     assert!(status.library_committed);
@@ -460,7 +468,8 @@ fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
         core.store.queue_ids().unwrap().len(),
         core.state.queue.total
     );
-    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(status)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("expected task")
     };
     assert!(status.library_committed);
@@ -644,7 +653,9 @@ fn stale_queue_external_saving_rechecks_recovery_before_capturing_queue_snapshot
         }
         core.external_admission_event(prepared);
         finish_admission(&mut core);
-        let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        let TaskLookup::Found(TaskOutcome::Scan(status)) =
+            core.lookup_task(TaskTarget::Scan { id })
+        else {
             panic!("expected retained admission result");
         };
         assert_eq!(status.library_committed, repaired);
@@ -787,7 +798,9 @@ fn committed_external_queue_projection_failure_recovers_before_navigation() {
             .unwrap();
         let id = core.active_external_admission.as_ref().unwrap().status.id;
         finish_admission(&mut core);
-        let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        let TaskLookup::Found(TaskOutcome::Scan(status)) =
+            core.lookup_task(TaskTarget::Scan { id })
+        else {
             panic!("expected retained admission result");
         };
         assert!(status.library_committed);

@@ -6,10 +6,10 @@ use anyhow::{Context, Result, bail, ensure};
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
     model::{
-        Command, ProcessingPhase, ProcessingTaskStatus, Query, RelocationPhase,
-        RelocationTaskStatus, ScanPhase, ScanTaskStatus, TaskTarget,
+        Command, ProcessingPhase, ProcessingTaskStatus, RelocationPhase, RelocationTaskStatus,
+        ScanPhase, ScanTaskStatus, TaskTarget,
     },
-    response::{TaskOutcome, ViewResponse},
+    response::{TaskLookup, TaskOutcome},
 };
 use rivu_utils::terminal::TerminalEscaped;
 use std::{io::Write, path::Path};
@@ -85,29 +85,27 @@ pub(super) fn run(
     session.bind_instance(reference.instance_id)?;
     let id = reference.id;
     match action {
-        TaskAction::Status { kind, .. } => match kind {
-            TaskKind::Scan => emit_scan(
-                i18n,
-                reference.instance_id,
-                &scan_status(&mut session, id)?,
-                json,
-                None,
-            ),
-            TaskKind::Relocation => emit_relocation(
-                i18n,
-                reference.instance_id,
-                &relocation_status(&mut session, id)?,
-                json,
-                true,
-            ),
-            TaskKind::Processing => emit_processing(
-                i18n,
-                reference.instance_id,
-                &processing_status(&mut session, id)?,
-                json,
-                true,
-            ),
-        },
+        TaskAction::Status { kind, .. } => {
+            let (target, name) = match kind {
+                TaskKind::Scan => (TaskTarget::Scan { id }, "scan"),
+                TaskKind::Relocation => (TaskTarget::Relocation { id }, "relocation"),
+                TaskKind::Processing => (TaskTarget::Processing { id }, "processing"),
+            };
+            let TaskLookup::Found(status) = session.lookup_task(target)? else {
+                bail!("Unknown or expired {name} task {id}");
+            };
+            match status {
+                TaskOutcome::Scan(task) => {
+                    emit_scan(i18n, reference.instance_id, &task, json, None)
+                }
+                TaskOutcome::Relocation(task) => {
+                    emit_relocation(i18n, reference.instance_id, &task, json, true)
+                }
+                TaskOutcome::Processing(task) => {
+                    emit_processing(i18n, reference.instance_id, &task, json, true)
+                }
+            }
+        }
         TaskAction::Cancel { kind, .. } => {
             let command = match kind {
                 TaskKind::Scan => Command::CancelScan { id },
@@ -120,26 +118,6 @@ pub(super) fn run(
     }
 }
 
-fn processing_status(
-    session: &mut rivu_client::ClientSession,
-    id: u64,
-) -> Result<ProcessingTaskStatus> {
-    let view = session
-        .query(Query::ProcessingTask { id })?
-        .result
-        .map_err(anyhow::Error::from)?;
-    let ViewResponse::ProcessingTask(task) = view else {
-        bail!("Unexpected processing task response")
-    };
-    let task = task
-        .map(|task| *task)
-        .context("Unknown or expired processing task")?;
-    ensure!(
-        task.id == id,
-        "Processing query returned a different task ID"
-    );
-    Ok(task)
-}
 pub(super) fn emit_processing(
     i18n: &Localizer,
     instance_id: u32,
@@ -199,37 +177,6 @@ pub(super) fn emit_processing(
     output.flush()?;
     Ok(())
 }
-fn scan_status(session: &mut rivu_client::ClientSession, id: u64) -> Result<ScanTaskStatus> {
-    let view = session
-        .query(Query::ScanTask { id })?
-        .result
-        .map_err(anyhow::Error::from)?;
-    let ViewResponse::ScanTask(task) = view else {
-        bail!("Scan task query returned an unexpected response");
-    };
-    if task.id != id {
-        bail!("Scan task query returned a different task ID");
-    }
-    Ok(task)
-}
-
-fn relocation_status(
-    session: &mut rivu_client::ClientSession,
-    id: u64,
-) -> Result<RelocationTaskStatus> {
-    let view = session
-        .query(Query::RelocationTask { id })?
-        .result
-        .map_err(anyhow::Error::from)?;
-    let ViewResponse::RelocationTask(task) = view else {
-        bail!("Relocation task query returned an unexpected response");
-    };
-    if task.id != id {
-        bail!("Relocation task query returned a different task ID");
-    }
-    Ok(task)
-}
-
 fn emit_scan(
     i18n: &Localizer,
     instance_id: u32,

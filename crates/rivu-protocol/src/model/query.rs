@@ -117,9 +117,6 @@ pub enum Query {
     LibraryRootStats {
         roots: Vec<PathBuf>,
     },
-    ScanTask {
-        id: u64,
-    },
     QueuePage {
         query: Option<String>,
         offset: usize,
@@ -152,17 +149,11 @@ pub enum Query {
         offset: usize,
         limit: usize,
     },
-    RelocationTask {
-        id: u64,
-    },
     DuplicateReviewMembers {
         fingerprint: String,
         offset: usize,
         limit: usize,
         selected_ids: Vec<i64>,
-    },
-    ProcessingTask {
-        id: u64,
     },
     PlaylistSummary {
         playlist_id: i64,
@@ -313,7 +304,6 @@ pub enum QueryIdentity<'a> {
     ),
     LibraryRootCounts(&'a [PathBuf]),
     LibraryRootStats(&'a [PathBuf]),
-    ScanTask(u64),
     QueuePage(&'a Option<String>),
     QueueBatch(&'a Option<String>),
     QueueIdentityPage(&'a Option<String>),
@@ -321,9 +311,7 @@ pub enum QueryIdentity<'a> {
     PlaylistEntry(i64),
     DuplicateGroups,
     DuplicateMembers(&'a str),
-    RelocationTask(u64),
     DuplicateReviewMembers(&'a str),
-    ProcessingTask(u64),
     PlaylistSummary(i64),
     LibraryMatchCounts(
         &'a [PathBuf],
@@ -418,7 +406,6 @@ impl Query {
                 stamp.duplicate_members = revisions.duplicate_members;
                 stamp.queue = revisions.queue;
             }
-            Self::ScanTask { .. } | Self::RelocationTask { .. } | Self::ProcessingTask { .. } => {}
         }
         if matches!(
             self,
@@ -506,13 +493,10 @@ impl Query {
             | Self::LibraryStats
             | Self::LibraryRootCounts { .. }
             | Self::LibraryRootStats { .. }
-            | Self::ScanTask { .. }
             | Self::PlaylistEntry { .. }
             | Self::DuplicateGroups { .. }
             | Self::DuplicateMembers { .. }
-            | Self::RelocationTask { .. }
             | Self::DuplicateReviewMembers { .. }
-            | Self::ProcessingTask { .. }
             | Self::PlaylistSummary { .. } => None,
         }
     }
@@ -603,7 +587,6 @@ impl Query {
                 QueryIdentity::LibraryMatchCounts(roots, query, *favorite, *missing, *include_other)
             }
             Self::LibraryRootStats { roots } => QueryIdentity::LibraryRootStats(roots),
-            Self::ScanTask { id } => QueryIdentity::ScanTask(*id),
             Self::QueuePage { query, .. } => QueryIdentity::QueuePage(query),
             Self::QueueBatch { query, .. } => QueryIdentity::QueueBatch(query),
             Self::QueueIdentityPage { query, .. } => QueryIdentity::QueueIdentityPage(query),
@@ -615,8 +598,6 @@ impl Query {
             Self::DuplicateMembers { fingerprint, .. } => {
                 QueryIdentity::DuplicateMembers(fingerprint)
             }
-            Self::RelocationTask { id } => QueryIdentity::RelocationTask(*id),
-            Self::ProcessingTask { id } => QueryIdentity::ProcessingTask(*id),
             Self::DuplicateReviewMembers { fingerprint, .. } => {
                 QueryIdentity::DuplicateReviewMembers(fingerprint)
             }
@@ -796,9 +777,6 @@ mod tests {
                 offset: 0,
                 limit: 2,
             },
-            Query::ScanTask { id: 1 },
-            Query::RelocationTask { id: 1 },
-            Query::ProcessingTask { id: 1 },
         ] {
             assert_eq!(query.stamp(previous), query.stamp(next), "{query:?}");
             for (from, to) in [(previous, next), (next, previous)] {

@@ -263,6 +263,10 @@ impl QueryRevisions {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "single-track reads transfer an owned Track without an extra heap allocation"
+)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ViewResponse {
     Albums(Page<crate::model::AlbumSummary>),
@@ -280,15 +284,12 @@ pub enum ViewResponse {
     LibraryRootStats(Vec<crate::model::LibraryRootStats>),
     OtherTracksCount(usize),
     LibraryLocate(crate::model::LibraryLocateResult),
-    ScanTask(crate::model::ScanTaskStatus),
     QueuePage(Page<QueueRow>),
     QueueBatch(Batch<QueueRow, BatchContinuation<QueueCursor>>),
     PlaylistEntry(Option<PlaylistEntryLocation>),
     DuplicateGroups(Page<crate::model::DuplicateGroup>),
     DuplicateMembers(Page<crate::model::DuplicateMember>),
-    RelocationTask(crate::model::RelocationTaskStatus),
     PlaylistEntryLocations(Vec<PlaylistEntryLocation>),
-    ProcessingTask(Option<Box<crate::model::ProcessingTaskStatus>>),
     PlaylistSummary(Option<PlaylistSummary>),
     LibraryMatchCounts {
         roots: Vec<LibraryRootCount>,
@@ -301,12 +302,29 @@ pub enum ViewResponse {
     QueueIdentityPage(Page<QueueIdentity>),
     QueueEntryLocations(Vec<QueueIdentity>),
 }
-/// Final task status, returned only after the owner commits its outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TaskLookup {
+    Found(TaskOutcome),
+    UnknownOrExpired,
+}
+
+/// A status snapshot. A successful wait contains an owner-committed terminal status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskOutcome {
     Scan(crate::model::ScanTaskStatus),
     Relocation(crate::model::RelocationTaskStatus),
     Processing(Box<crate::model::ProcessingTaskStatus>),
+}
+
+impl TaskOutcome {
+    pub fn target(&self) -> crate::model::TaskTarget {
+        use crate::model::TaskTarget;
+        match self {
+            Self::Scan(task) => TaskTarget::Scan { id: task.id },
+            Self::Relocation(task) => TaskTarget::Relocation { id: task.id },
+            Self::Processing(task) => TaskTarget::Processing { id: task.id },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

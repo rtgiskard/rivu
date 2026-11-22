@@ -263,6 +263,7 @@ Request types:
 * `WaitTask` (`5`) — wait for a specific scan, relocation, or processing task's terminal result
 * `RegisterDesktop` (`7`) — register an instance-bound desktop activation session
 * `CancelRead` (`8`) — revoke only the matching query on this session; emits no reply
+* `LookupTask` (`9`) — read the current or retained status of a specific task
 
 Response types:
 
@@ -271,6 +272,7 @@ Response types:
 * `Query` (`2`) — returns query revisions and the query result
 * `Command` (`3`) — returns a typed receipt or refusal for `Command` or `RegisterDesktop`
 * `Task` (`5`) — returns the task-specific terminal status or a task-wait error
+* `TaskLookup` (`6`) — returns the matching task status or `UnknownOrExpired`
 * `Error` (`255`) — returns a protocol or request error
 
 `wire::RequestTag` and `wire::ResponseTag` define the frame's `message_type` byte,
@@ -468,7 +470,7 @@ second:
 [cols="2,1",options="header"]
 |===
 |Request |Client response-wait limit
-|Bounded Query, ReadState, Hello and ordinary commands |21 seconds
+|Bounded Query, LookupTask, ReadState, Hello and ordinary commands |21 seconds
 |LoadSourceTags, SaveSourceTags and database optimization |129 seconds
 |ShowWindow and Shutdown |19 seconds
 |Interactive Query, WaitState and WaitTask |No response-wait deadline
@@ -550,8 +552,7 @@ and diagnostics, never replacement state. Distinct from the System section token
 payload actually received; omitted sections preserve previous values.
 |Query-data stamp: `Query::stamp`
 |Are this query's selected data dependencies still current?
-|Compare only dependencies selected by the query kind. An empty task-status stamp
-does not make status immutable: query that task again or use `WaitTask`.
+|Compare only dependencies selected by the query kind.
 |Consumer request generation / intent
 |Does the owner still want this target and operation?
 |Owner-scoped admission rejects superseded or abandoned requests even when their
@@ -715,9 +716,10 @@ Revision zero is a valid equality token, never an indicator of query kind.
 The classification does not own cached rows, selection, cancellation policy or
 physical execution slots; consumers apply it to their own state transitions.
 
-Task-status queries select no query-data revision domains; their mutable status
-follows <<identity-and-freshness,the empty-stamp rule>>. For presentation updates,
-subscribe to System for scan and relocation status; Processing subscriptions
+`LookupTask` takes the same instance-local `TaskTarget` as `WaitTask`. It returns
+active or retained status, or `UnknownOrExpired`, without query-data revisions.
+For presentation updates, subscribe to System for scan and relocation status.
+Processing subscriptions
 follow <<wire-schemas,Wire schemas>>.
 
 Track and playlist metadata scopes share an index of at most 256 entries. Commits
@@ -1162,10 +1164,10 @@ a follow-up query; `task status` remains immediate. A waiting connection cannot
 pipeline another request. Unknown or expired tasks fail rather than waiting for a
 future task with the same numeric ID.
 
-`ViewResponse::ScanTask` contains `{id, progress, message, library_committed,
+A found scan task contains `{id, progress, message, library_committed,
 playlist_id, error}`. The phases are `Discovering`, `ReadingMetadata`, `Saving`,
 `Completed`, `Failed`, and `Cancelled`; the last three are terminal. The core
-retains the active task and latest 32 terminal results. Unknown/evicted IDs fail.
+retains the active task and latest 32 terminal results.
 `library_committed=true` confirms a library commit (and the atomic queue insertion
 for external admission); `playlist_id` confirms a subsequent playlist commit even
 if refresh failed. A failed task is not evidence of zero side effects; after an
@@ -1244,7 +1246,7 @@ before replacement playback, deletion, relocation, or Saving can retire its
 track identity. User mutations are never replayed automatically.
 
 Relocation verification is Core-owned and single-flight. Acceptance returns
-the relocation task ID; exact task queries and System status expose completion, with
+the relocation task ID. `LookupTask` and System status expose completion, with
 32 terminal results retained. Hashing is cancellable in at most 4 MiB stages with
 one 128 KiB buffer; started stages retire before admission is released. The verified
 descriptor survives to commit, where source absence, path/descriptor identity,
@@ -1368,14 +1370,13 @@ link:07_audio_processing.adoc#playback-bypass[Playback bypass] for desktop/CLI u
 `StartProcessing { track_id, operation, profile }` accepts `denoise`, `speech` or
 `separate`; profile is null or `{start_seconds,end_seconds}` in source-relative
 seconds. Acceptance returns the processing task ID, not completed output.
-`Query::ProcessingTask { id }` returns an optional task status: unknown or no-longer
-retained IDs return `None`, unlike unknown scan and relocation task queries.
+Use `LookupTask` with the processing target to read the accepted task's status.
 `CancelProcessing { id }` requests cooperative cancellation of the matching active
 task; its acknowledgement does not prove worker retirement. `AuditionProcessing
 { id, mode, vocal_gain_db, accompaniment_gain_db }` selects
 original/denoised/vocals/accompaniment/mix. Latest-task presentation follows the
 Processing section contract in link:21_ipc.adoc#wire-schemas[Wire schemas]. Use
-the exact task query or `WaitTask` for that task's completion rather than an
+`LookupTask` or `WaitTask` for that task's completion rather than an
 unrelated latest-task field, and bind task IDs to the Hello instance.
 Settings and source identity are captured with the job; output status reports
 the models actually used. Retained output availability is session-bounded.

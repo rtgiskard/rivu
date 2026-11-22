@@ -369,6 +369,7 @@ gl-verification-cancelled = 验证已取消，未提交位置迁移
 gl-relocation-failed = 位置迁移失败，未合并任何状态。请刷新后重新选择
 
 gl-verification-response = 验证返回了意外结果，请刷新后重新选择
+gl-verification-unknown-or-expired = 找不到此验证任务，或任务记录已过期。请核对音乐库中的当前条目后再决定是否重试。
 
 gl-review-action-failed = 无法完成此操作
 

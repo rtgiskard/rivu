@@ -1,4 +1,5 @@
 use super::*;
+use rivu_protocol::response::TaskLookup;
 
 impl Core {
     /// Default-encoded frozen-run export, as `rivu processing graph export` requests it.
@@ -2122,8 +2123,8 @@ fn retained_audition_remains_queryable_after_terminal_history_eviction() {
         complete(&mut core);
     }
     assert!(!core.processing.history().any(|status| status.id == 1));
-    let ViewResponse::ProcessingTask(Some(task)) =
-        core.view(&Query::ProcessingTask { id: 1 }).unwrap()
+    let TaskLookup::Found(TaskOutcome::Processing(task)) =
+        core.lookup_task(TaskTarget::Processing { id: 1 })
     else {
         panic!("Retained audition disappeared from its query");
     };

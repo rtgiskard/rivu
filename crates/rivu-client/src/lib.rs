@@ -11,11 +11,11 @@ use rivu_protocol::wire::{
 };
 use rivu_protocol::{
     AppCommand,
-    model::Query,
+    model::{Query, TaskTarget},
     query_wait_timeout,
     response::{
         AckStatus, QueryError, QueryResponse, StateRequest, StateResponse, StateRevisions,
-        StateSections, StateWatch,
+        StateSections, StateWatch, TaskLookup, TaskOutcome,
     },
     wire::{CommandRefusal, CommandReply},
 };
@@ -420,10 +420,28 @@ impl ClientSession {
         }
     }
 
-    pub fn wait_task(
-        &mut self,
-        target: rivu_protocol::model::TaskTarget,
-    ) -> Result<rivu_protocol::response::TaskOutcome> {
+    pub fn lookup_task(&mut self, target: TaskTarget) -> Result<TaskLookup> {
+        self.ensure_handshake()?;
+        let response = self.exchange(&WireRequest::LookupTask(target), query_wait_timeout())?;
+        match response {
+            WireResponse::TaskLookup(lookup) => {
+                if let TaskLookup::Found(status) = &lookup
+                    && status.target() != target
+                {
+                    self.disconnect();
+                    bail!("IPC task lookup returned a different task")
+                }
+                Ok(lookup)
+            }
+            response => {
+                self.disconnect();
+                unpack_error(response)?;
+                bail!("IPC response was not a task lookup response")
+            }
+        }
+    }
+
+    pub fn wait_task(&mut self, target: TaskTarget) -> Result<TaskOutcome> {
         self.ensure_handshake()?;
         let response = self.exchange_until(
             &WireRequest::WaitTask(target),
@@ -432,33 +450,21 @@ impl ClientSession {
         )?;
         match response {
             WireResponse::Task(Ok(outcome)) => {
-                use rivu_protocol::{
-                    model::{RelocationPhase, ScanPhase, TaskTarget},
-                    response::TaskOutcome,
+                use rivu_protocol::model::{RelocationPhase, ScanPhase};
+                let terminal = match &outcome {
+                    TaskOutcome::Scan(task) => matches!(
+                        task.progress.phase,
+                        ScanPhase::Completed | ScanPhase::Cancelled | ScanPhase::Failed
+                    ),
+                    TaskOutcome::Relocation(task) => matches!(
+                        task.phase,
+                        RelocationPhase::Completed
+                            | RelocationPhase::Cancelled
+                            | RelocationPhase::Failed
+                    ),
+                    TaskOutcome::Processing(task) => task.phase.is_terminal(),
                 };
-                let valid = match (target, &outcome) {
-                    (TaskTarget::Scan { id }, TaskOutcome::Scan(task)) => {
-                        id == task.id
-                            && matches!(
-                                task.progress.phase,
-                                ScanPhase::Completed | ScanPhase::Cancelled | ScanPhase::Failed
-                            )
-                    }
-                    (TaskTarget::Relocation { id }, TaskOutcome::Relocation(task)) => {
-                        id == task.id
-                            && matches!(
-                                task.phase,
-                                RelocationPhase::Completed
-                                    | RelocationPhase::Cancelled
-                                    | RelocationPhase::Failed
-                            )
-                    }
-                    (TaskTarget::Processing { id }, TaskOutcome::Processing(task)) => {
-                        id == task.id && task.phase.is_terminal()
-                    }
-                    _ => false,
-                };
-                if valid {
+                if outcome.target() == target && terminal {
                     Ok(outcome)
                 } else {
                     self.disconnect();
@@ -864,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_task_instance_mismatch_sends_neither_query_nor_cancel() {
+    fn bound_task_instance_mismatch_sends_neither_lookup_nor_cancel() {
         if isolate_socket_test() {
             return;
         }
@@ -903,7 +909,7 @@ mod tests {
                     .request_command(Command::CancelScan { id: 7 })
                     .unwrap_err()
             } else {
-                client.query(Query::ScanTask { id: 7 }).unwrap_err()
+                client.lookup_task(TaskTarget::Scan { id: 7 }).unwrap_err()
             };
             assert!(error.downcast_ref::<InstanceChanged>().is_some());
             assert_eq!(client.instance_id(), None);
@@ -1426,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn task_wait_disconnects_for_wrong_id_or_nonterminal_outcome() {
+    fn task_lookup_and_wait_validate_identity_and_completion() {
         if isolate_socket_test() {
             return;
         }
@@ -1436,7 +1442,12 @@ mod tests {
             response::TaskOutcome,
         };
         use std::{io::Read, os::unix::net::UnixListener};
-        for (id, phase) in [(8, ScanPhase::Completed), (7, ScanPhase::Saving)] {
+        for (lookup, id, phase) in [
+            (false, 8, ScanPhase::Completed),
+            (false, 7, ScanPhase::Saving),
+            (true, 8, ScanPhase::Completed),
+            (true, 7, ScanPhase::Saving),
+        ] {
             let directory = socket_test_directory();
             let listener =
                 UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
@@ -1444,33 +1455,54 @@ mod tests {
             let server = std::thread::spawn(move || {
                 let mut stream = listener.accept().unwrap().0;
                 complete_test_handshake(&mut stream);
-                assert!(matches!(
-                    read_test_request(&mut stream),
-                    WireRequest::WaitTask(TaskTarget::Scan { id: 7 })
-                ));
+                let target = TaskTarget::Scan { id: 7 };
+                match read_test_request(&mut stream) {
+                    WireRequest::LookupTask(actual) if lookup => assert_eq!(actual, target),
+                    WireRequest::WaitTask(actual) if !lookup => assert_eq!(actual, target),
+                    _ => panic!("unexpected task request"),
+                }
+                let status = TaskOutcome::Scan(ScanTaskStatus {
+                    id,
+                    progress: ScanProgress {
+                        phase,
+                        processed: 0,
+                        total: None,
+                        errors: 0,
+                        path: None,
+                    },
+                    message: String::new(),
+                    library_committed: false,
+                    playlist_id: None,
+                    error: None,
+                });
                 write_test_response(
                     &mut stream,
-                    WireResponse::Task(Ok(TaskOutcome::Scan(ScanTaskStatus {
-                        id,
-                        progress: ScanProgress {
-                            phase,
-                            processed: 0,
-                            total: None,
-                            errors: 0,
-                            path: None,
-                        },
-                        message: String::new(),
-                        library_committed: false,
-                        playlist_id: None,
-                        error: None,
-                    }))),
+                    if lookup {
+                        WireResponse::TaskLookup(TaskLookup::Found(status))
+                    } else {
+                        WireResponse::Task(Ok(status))
+                    },
                 );
                 assert_eq!(stream.read(&mut [0]).unwrap(), 0);
             });
             let mut client = client_session(directory.path());
-            assert!(client.wait_task(TaskTarget::Scan { id: 7 }).is_err());
-            assert!(client.stream.is_none());
-            assert_eq!(client.instance_id(), None);
+            let target = TaskTarget::Scan { id: 7 };
+            if lookup && id == 7 {
+                assert!(matches!(
+                    client.lookup_task(target).unwrap(),
+                    TaskLookup::Found(_)
+                ));
+                assert!(client.instance_id().is_some());
+                drop(client);
+            } else {
+                if lookup {
+                    assert!(client.lookup_task(target).is_err());
+                } else {
+                    assert!(client.wait_task(target).is_err());
+                }
+                assert!(client.stream.is_none());
+                assert_eq!(client.instance_id(), None);
+            }
             server.join().unwrap();
         }
     }

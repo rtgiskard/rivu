@@ -5,7 +5,7 @@ use crate::test_support::ipc::socket_test_directory;
 use rivu_client::client_session;
 use rivu_protocol::{AppCommand, transport::*, wire::*};
 use rivu_protocol::{
-    model::{Command, Query},
+    model::{Command, Query, TaskTarget},
     response::{QueryResponse, StateSections},
 };
 
@@ -188,7 +188,7 @@ fn configuration_change_returns_selective_ipc_state_delta() {
     let config_path = command_config(directory.path());
     let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut control = client_session(directory.path());
-    control.query(Query::ScanTask { id: 0 }).unwrap();
+    control.lookup_task(TaskTarget::Scan { id: 0 }).unwrap();
     let initial = control.get_state(StateSections::ALL).unwrap();
     let before = initial.revisions;
     assert_eq!(initial.sections(), StateSections::ALL);
@@ -249,13 +249,17 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     let (owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut client = client_session(directory.path());
     // Fence the initial database projection before comparing business state.
-    client.query(Query::ScanTask { id: 0 }).unwrap();
+    client.lookup_task(TaskTarget::Scan { id: 0 }).unwrap();
     for target in [
         rivu_protocol::model::TaskTarget::Scan { id: u64::MAX },
         rivu_protocol::model::TaskTarget::Relocation { id: u64::MAX },
         rivu_protocol::model::TaskTarget::Processing { id: u64::MAX },
     ] {
         let instance = client.instance_id();
+        assert!(matches!(
+            client.lookup_task(target).unwrap(),
+            rivu_protocol::response::TaskLookup::UnknownOrExpired
+        ));
         let error = client.wait_task(target).unwrap_err();
         assert!(
             error
@@ -312,7 +316,7 @@ fn selective_wait_ignores_unselected_revision_and_rejects_concurrent_read() {
     let config_path = command_config(directory.path());
     let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut control = client_session(directory.path());
-    control.query(Query::ScanTask { id: 0 }).unwrap();
+    control.lookup_task(TaskTarget::Scan { id: 0 }).unwrap();
     let mut stream = connect_hello(
         directory.path(),
         Duration::from_secs(5),
@@ -367,7 +371,7 @@ fn malformed_request_during_state_wait_rejects_and_closes() {
     let config_path = command_config(directory.path());
     let (_owner, mut runtime, _app, server) = command_service(directory.path(), &config_path, None);
     let mut control = client_session(directory.path());
-    control.query(Query::ScanTask { id: 0 }).unwrap();
+    control.lookup_task(TaskTarget::Scan { id: 0 }).unwrap();
     let mut stream = connect_hello(
         directory.path(),
         std::time::Duration::from_secs(5),

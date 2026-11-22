@@ -98,6 +98,9 @@ pub fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
         RequestTag::WaitTask => {
             WireRequest::WaitTask(decode_body(body, "Decoding IPC task wait request")?)
         }
+        RequestTag::LookupTask => {
+            WireRequest::LookupTask(decode_body(body, "Decoding IPC task lookup request")?)
+        }
         RequestTag::RegisterDesktop => {
             let () = decode_body(body, "Decoding IPC desktop registration")?;
             WireRequest::RegisterDesktop
@@ -126,6 +129,9 @@ pub fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
             WireResponse::Command(decode_body(body, "Decoding IPC command reply")?)
         }
         ResponseTag::Task => WireResponse::Task(decode_body(body, "Decoding IPC task response")?),
+        ResponseTag::TaskLookup => {
+            WireResponse::TaskLookup(decode_body(body, "Decoding IPC task lookup response")?)
+        }
         ResponseTag::Error => {
             WireResponse::Error(decode_body(body, "Decoding IPC error response")?)
         }
@@ -172,6 +178,7 @@ pub fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u8>) -> 
         WireRequest::Command(value) => writer.encode(RequestTag::Command as u8, value),
         WireRequest::WaitState(value) => writer.encode(RequestTag::WaitState as u8, value),
         WireRequest::WaitTask(value) => writer.encode(RequestTag::WaitTask as u8, value),
+        WireRequest::LookupTask(value) => writer.encode(RequestTag::LookupTask as u8, value),
         WireRequest::RegisterDesktop => writer.encode(RequestTag::RegisterDesktop as u8, &()),
         WireRequest::CancelRead(value) => writer.encode(RequestTag::CancelRead as u8, value),
     }
@@ -188,6 +195,7 @@ pub fn encode_response_frame_into(response: &WireResponse, bytes: &mut Vec<u8>) 
         WireResponse::Query(value) => writer.encode(ResponseTag::Query as u8, value),
         WireResponse::Command(value) => writer.encode(ResponseTag::Command as u8, value),
         WireResponse::Task(value) => writer.encode(ResponseTag::Task as u8, value),
+        WireResponse::TaskLookup(value) => writer.encode(ResponseTag::TaskLookup as u8, value),
         WireResponse::Error(value) => writer.encode(ResponseTag::Error as u8, value),
     }
 }

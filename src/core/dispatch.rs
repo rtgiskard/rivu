@@ -436,12 +436,6 @@ impl Core {
                     return;
                 }
                 if let Some(reads) = &self.read_queries
-                    && !matches!(
-                        &query,
-                        Query::ScanTask { .. }
-                            | Query::RelocationTask { .. }
-                            | Query::ProcessingTask { .. }
-                    )
                     && !self.database_maintenance_active()
                 {
                     if let Some(reply) = request.reply {
@@ -453,6 +447,9 @@ impl Core {
                         let _ = reply.send(CoreResponse::Query(response));
                     }
                 }
+            }
+            Operation::LookupTask { target, reply } => {
+                let _ = reply.send(self.lookup_task(target));
             }
             Operation::WaitTask {
                 target,
@@ -760,42 +757,13 @@ impl Core {
     }
 
     fn read_query(&self, query: &Query) -> QueryResponse {
-        let result = match query {
-            Query::ProcessingTask { id } => Some(Ok(ViewResponse::ProcessingTask(
-                self.processing_status(*id).map(Box::new),
-            ))),
-            Query::RelocationTask { id } => Some(
-                self.relocation_status_ref(*id)
-                    .map(task_wait::TaskStatusRef::status)
-                    .cloned()
-                    .context("Unknown or expired relocation task")
-                    .map(ViewResponse::RelocationTask)
-                    .map_err(Into::into),
-            ),
-            Query::ScanTask { id } => Some(
-                self.scan_status_ref(*id)
-                    .map(task_wait::TaskStatusRef::status)
-                    .cloned()
-                    .context("Unknown or expired scan task")
-                    .map(ViewResponse::ScanTask)
-                    .map_err(Into::into),
-            ),
-            _ => None,
-        };
-        if let Some(result) = result {
-            QueryResponse {
-                revisions: self.state.query_revisions_for(query),
-                result,
-            }
-        } else {
-            query_worker::read_snapshot(
-                &self.store,
-                &self.state,
-                query,
-                self.database_maintenance_active(),
-                self.preferences.published_settings(),
-            )
-        }
+        query_worker::read_snapshot(
+            &self.store,
+            &self.state,
+            query,
+            self.database_maintenance_active(),
+            self.preferences.published_settings(),
+        )
     }
 
     #[cfg(test)]

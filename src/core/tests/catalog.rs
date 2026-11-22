@@ -1,5 +1,6 @@
 use super::*;
 use crate::core::catalog::{ScanFinished, ScanMode};
+use rivu_protocol::response::TaskLookup;
 
 #[test]
 fn committed_scan_invalidates_before_failed_refresh() {
@@ -418,7 +419,8 @@ fn import_task_errors_distinguish_scan_save_from_playlist_creation_failure() {
             .unwrap();
         let id = core.active_scan.as_ref().unwrap().status.id;
         assert!(!settle_scan(&mut core));
-        let ViewResponse::ScanTask(task) = core.view(&Query::ScanTask { id }).unwrap() else {
+        let TaskLookup::Found(TaskOutcome::Scan(task)) = core.lookup_task(TaskTarget::Scan { id })
+        else {
             panic!("Expected task");
         };
         let error = task.error.as_deref().unwrap();
@@ -1039,7 +1041,8 @@ fn scan_start_ack_binds_the_accepted_task() {
         _ => None,
     })
     .expect("Accepted scans must expose their identity");
-    let ViewResponse::ScanTask(task) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(task)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("Expected task");
     };
     assert_eq!(task.id, id);
@@ -1130,12 +1133,14 @@ fn completed_scan_wait_is_independent_of_later_scans_and_global_errors() {
     core.scan(vec![path.clone()], false).unwrap();
     let id = core.active_scan.as_ref().unwrap().status.id;
     assert!(settle_scan(&mut core));
-    let ViewResponse::ScanTask(before) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(before)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("Expected task");
     };
     core.state.system.last_error = Some("Unrelated audio failure".into());
     core.scan(vec![path], false).unwrap();
-    let ViewResponse::ScanTask(after) = core.view(&Query::ScanTask { id }).unwrap() else {
+    let TaskLookup::Found(TaskOutcome::Scan(after)) = core.lookup_task(TaskTarget::Scan { id })
+    else {
         panic!("Expected task");
     };
     assert_eq!(before, after);
@@ -1419,13 +1424,15 @@ fn scan_terminal_retention_is_bounded_and_unknown_ids_fail() {
         core.retain_scan_outcome(retained, rivu_protocol::model::MediaTaskOwner::Library);
     }
     assert_eq!(core.scan_results.len(), MAX_RETAINED_SCAN_RESULTS);
-    assert!(core.view(&Query::ScanTask { id: 1 }).is_err());
-    assert!(core.view(&Query::ScanTask { id: u64::MAX }).is_err());
+    for id in [1, u64::MAX] {
+        assert!(matches!(
+            core.lookup_task(TaskTarget::Scan { id }),
+            TaskLookup::UnknownOrExpired
+        ));
+    }
+    let id = MAX_RETAINED_SCAN_RESULTS as u64 + 1;
     assert!(
-        core.view(&Query::ScanTask {
-            id: MAX_RETAINED_SCAN_RESULTS as u64 + 1
-        })
-        .is_ok()
+        matches!(core.lookup_task(TaskTarget::Scan { id }), TaskLookup::Found(TaskOutcome::Scan(task)) if task.id == id)
     );
 }
 

@@ -492,6 +492,13 @@ async fn serve_connection(
                 };
                 write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
             }
+            WireRequest::LookupTask(target) => {
+                let response = match handle.lookup_task(target).await {
+                    Ok(status) => WireResponse::TaskLookup(status),
+                    Err(error) => WireResponse::Error(format!("Task lookup failed: {error:#}")),
+                };
+                write_frame_buffered(&mut stream, &response, &mut write_buffer).await?;
+            }
             WireRequest::WaitTask(target) => {
                 if !serve_task_wait(
                     &mut stream,

@@ -411,6 +411,7 @@ gl-verification-cancelled = Verification cancelled; no relocation committed
 gl-relocation-failed = Relocation failed; no state was merged. Refresh and choose again
 
 gl-verification-response = Unexpected verification result; refresh before deciding again
+gl-verification-unknown-or-expired = The verification task is unknown or has expired. Check the current library entries before trying again.
 
 gl-review-action-failed = Could not complete review action
 

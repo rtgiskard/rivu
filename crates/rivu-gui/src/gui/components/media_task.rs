@@ -3,8 +3,8 @@ use crate::gui::feature::FeatureContext;
 use crate::projection::GuiSystemSnapshot;
 use gpui::{ClipboardItem, Context, Div, SharedString, Window, div, prelude::*, px, relative, rgb};
 use rivu_presentation::i18n::Localizer;
-use rivu_protocol::model::{Command, MediaTaskOwner, Query, ScanPhase};
-use rivu_protocol::response::ViewResponse;
+use rivu_protocol::model::{Command, MediaTaskOwner, ScanPhase, TaskTarget};
+use rivu_protocol::response::{TaskLookup, TaskOutcome};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, caption, column,
     panel_header_actions, panel_heading_row, status_message,
@@ -18,15 +18,14 @@ struct TaskDetails {
 
 impl TaskDetails {
     fn from_reply(
-        id: u64,
         phase: ScanPhase,
         importing: bool,
-        reply: Option<ViewResponse>,
+        reply: Option<TaskLookup>,
         i18n: &Localizer,
     ) -> Self {
         let status = match reply {
-            Some(ViewResponse::ScanTask(status))
-                if status.id == id && status.progress.phase == phase =>
+            Some(TaskLookup::Found(TaskOutcome::Scan(status)))
+                if status.progress.phase == phase =>
             {
                 status
             }
@@ -82,24 +81,17 @@ impl TaskDetailsSlot {
         // Drain the read even after unmount. The weak handle can only update
         // the keyed slot that requested it, never its replacement.
         cx.spawn(async move |slot, cx| {
-            let publish = |reply: rivu_protocol::response::QueryResponse,
-                           cx: &mut gpui::AsyncApp| {
+            let publish = |reply, cx: &mut gpui::AsyncApp| {
                 let _ = slot.update(cx, |slot, cx| {
-                    if slot.publish(|| {
-                        TaskDetails::from_reply(id, phase, importing, reply.result.ok(), &i18n)
-                    }) {
+                    if slot.publish(|| TaskDetails::from_reply(phase, importing, reply, &i18n)) {
                         cx.notify();
                     }
                 });
             };
-            let (reply, _) = crate::gui::query::run(
-                handle,
-                cx,
-                |handle| async move { handle.query_for_gui(Query::ScanTask { id }).await },
-                &publish,
-            )
-            .await;
-            publish(reply, cx);
+            let reply = handle
+                .lookup_task(TaskTarget::Scan { id }, |_| publish(None, cx))
+                .await;
+            publish(reply.ok(), cx);
         })
         .detach();
         Self { details: None }
@@ -342,7 +334,7 @@ mod tests {
     use rivu_presentation::i18n::Localizer;
     use rivu_protocol::{
         model::{ScanPhase, ScanProgress, ScanTaskStatus},
-        response::ViewResponse,
+        response::{TaskLookup, TaskOutcome},
     };
 
     fn failed_import() -> ScanTaskStatus {
@@ -372,10 +364,9 @@ mod tests {
                 ..failed_import()
             };
             let details = TaskDetails::from_reply(
-                status.id,
                 status.progress.phase,
                 true,
-                Some(ViewResponse::ScanTask(status)),
+                Some(TaskLookup::Found(TaskOutcome::Scan(status))),
                 &i18n,
             );
             assert_eq!(
@@ -403,10 +394,9 @@ mod tests {
             let mut status = failed_import();
             status.progress.phase = phase;
             let details = TaskDetails::from_reply(
-                status.id,
                 phase,
                 true,
-                Some(ViewResponse::ScanTask(status)),
+                Some(TaskLookup::Found(TaskOutcome::Scan(status))),
                 &i18n,
             );
             assert!(details.error.is_none());
@@ -420,7 +410,7 @@ mod tests {
     fn timeout_feedback_is_not_replaced_when_worker_finishes() {
         let i18n = Localizer::new("en-US");
         let mut slot = super::TaskDetailsSlot { details: None };
-        assert!(slot.publish(|| TaskDetails::from_reply(8, ScanPhase::Failed, true, None, &i18n)));
+        assert!(slot.publish(|| TaskDetails::from_reply(ScanPhase::Failed, true, None, &i18n)));
         assert!(!slot.publish(|| panic!("late worker result published")));
         assert_eq!(
             slot.details.unwrap().outcome.as_deref(),
@@ -432,20 +422,15 @@ mod tests {
     fn stale_or_unavailable_result_never_supplies_copy_or_commit_evidence() {
         let i18n = Localizer::new("en-US");
         let status = failed_import();
-        for (id, phase, reply) in [
+        for (phase, reply) in [
             (
-                9,
-                ScanPhase::Failed,
-                Some(ViewResponse::ScanTask(status.clone())),
-            ),
-            (
-                8,
                 ScanPhase::Completed,
-                Some(ViewResponse::ScanTask(status.clone())),
+                Some(TaskLookup::Found(TaskOutcome::Scan(status.clone()))),
             ),
-            (8, ScanPhase::Failed, None),
+            (ScanPhase::Failed, None),
+            (ScanPhase::Failed, Some(TaskLookup::UnknownOrExpired)),
         ] {
-            let details = TaskDetails::from_reply(id, phase, true, reply, &i18n);
+            let details = TaskDetails::from_reply(phase, true, reply, &i18n);
             assert!(details.error.is_none());
             assert_eq!(
                 details.outcome.as_deref(),
@@ -453,13 +438,12 @@ mod tests {
             );
         }
         let details = TaskDetails::from_reply(
-            status.id,
             status.progress.phase,
             false,
-            Some(ViewResponse::ScanTask(ScanTaskStatus {
+            Some(TaskLookup::Found(TaskOutcome::Scan(ScanTaskStatus {
                 error: None,
                 ..status
-            })),
+            }))),
             &i18n,
         );
         assert!(details.error.is_none(), "summary is not a copyable error");

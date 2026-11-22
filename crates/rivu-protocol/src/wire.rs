@@ -18,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 59;
+pub const PROTOCOL_VERSION: u8 = 60;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -36,6 +36,7 @@ pub enum RequestTag {
     WaitTask = 5,
     RegisterDesktop = 7,
     CancelRead = 8,
+    LookupTask = 9,
 }
 
 impl TryFrom<u8> for RequestTag {
@@ -51,6 +52,7 @@ impl TryFrom<u8> for RequestTag {
             5 => Self::WaitTask,
             7 => Self::RegisterDesktop,
             8 => Self::CancelRead,
+            9 => Self::LookupTask,
             _ => bail!("Unknown IPC request type {value}"),
         })
     }
@@ -64,6 +66,7 @@ pub enum ResponseTag {
     Query = 2,
     Command = 3,
     Task = 5,
+    TaskLookup = 6,
     Error = 255,
 }
 
@@ -77,6 +80,7 @@ impl TryFrom<u8> for ResponseTag {
             2 => Self::Query,
             3 => Self::Command,
             5 => Self::Task,
+            6 => Self::TaskLookup,
             255 => Self::Error,
             _ => bail!("Unknown IPC response type {value}"),
         })
@@ -100,6 +104,7 @@ pub enum WireRequest {
     Command(WireCommand),
     WaitState(StateWatch),
     WaitTask(crate::model::TaskTarget),
+    LookupTask(crate::model::TaskTarget),
     RegisterDesktop,
     /// Serial control frame: cancels only the matching read and has no reply.
     CancelRead(u64),
@@ -191,9 +196,6 @@ pub enum WireQuery {
     LibraryRootStats {
         roots: Vec<PathBuf>,
     },
-    ScanTask {
-        id: u64,
-    },
     QueuePage {
         query: Option<String>,
         offset: u64,
@@ -216,12 +218,6 @@ pub enum WireQuery {
         fingerprint: String,
         offset: u64,
         limit: u64,
-    },
-    RelocationTask {
-        id: u64,
-    },
-    ProcessingTask {
-        id: u64,
     },
     PlaylistEntryLocations {
         query: Option<String>,
@@ -810,7 +806,6 @@ impl From<Query> for WireQuery {
             },
             Query::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
             Query::LibraryRootStats { roots } => Self::LibraryRootStats { roots },
-            Query::ScanTask { id } => Self::ScanTask { id },
             Query::QueuePage {
                 query,
                 offset,
@@ -868,8 +863,6 @@ impl From<Query> for WireQuery {
                 limit: limit as u64,
                 selected_ids,
             },
-            Query::RelocationTask { id } => Self::RelocationTask { id },
-            Query::ProcessingTask { id } => Self::ProcessingTask { id },
         }
     }
 }
@@ -1066,7 +1059,6 @@ impl TryFrom<WireQuery> for Query {
             },
             WireQuery::LibraryRootCounts { roots } => Self::LibraryRootCounts { roots },
             WireQuery::LibraryRootStats { roots } => Self::LibraryRootStats { roots },
-            WireQuery::ScanTask { id } => Self::ScanTask { id },
             WireQuery::QueuePage {
                 query,
                 offset,
@@ -1124,8 +1116,6 @@ impl TryFrom<WireQuery> for Query {
                 limit: wire_usize(limit, "limit")?,
                 selected_ids,
             },
-            WireQuery::RelocationTask { id } => Self::RelocationTask { id },
-            WireQuery::ProcessingTask { id } => Self::ProcessingTask { id },
             WireQuery::PlaylistSummary { playlist_id } => Self::PlaylistSummary { playlist_id },
             WireQuery::LibraryMatchCounts {
                 roots,
@@ -2047,6 +2037,7 @@ pub enum WireResponse {
     State(WireStateResponse),
     Command(CommandReply),
     Task(Result<crate::response::TaskOutcome, crate::response::QueryError>),
+    TaskLookup(crate::response::TaskLookup),
     Error(String),
 }
 

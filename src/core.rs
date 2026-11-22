@@ -27,7 +27,7 @@ use rivu_protocol::{
     model::*,
     response::{
         PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateRequest, StateResponse,
-        StateRevisions, StateSections, TaskOutcome, ViewResponse,
+        StateRevisions, StateSections, TaskLookup, TaskOutcome, ViewResponse,
     },
     wire::{CommandOutcome, CommandOutput, CommandReceipt, SourceTagOutput},
 };
@@ -105,6 +105,10 @@ enum Operation {
     RenderSnapshot {
         source: u64,
         reply: oneshot::Sender<std::result::Result<Option<audio::AudioRenderSnapshot>, String>>,
+    },
+    LookupTask {
+        target: TaskTarget,
+        reply: oneshot::Sender<TaskLookup>,
     },
     WaitTask {
         target: TaskTarget,

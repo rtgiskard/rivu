@@ -1,5 +1,6 @@
 use super::*;
 use crate::core::catalog::ScanFinished;
+use rivu_protocol::response::TaskLookup;
 
 pub(super) fn attach_read_owner(core: &mut Core, directory: &Path) {
     core.read_queries = Some(
@@ -1373,8 +1374,8 @@ fn unrelated_album_query_failure_preserves_command_results_and_scan_identity() {
         panic!("accepted scan must remain queryable");
     };
     let id = *id;
-    match handle.query(Query::ScanTask { id }).result.unwrap() {
-        ViewResponse::ScanTask(task) => assert_eq!(task.id, id),
+    match futures::executor::block_on(handle.lookup_task(TaskTarget::Scan { id })).unwrap() {
+        TaskLookup::Found(TaskOutcome::Scan(task)) => assert_eq!(task.id, id),
         other => panic!("Unexpected scan response: {other:?}"),
     }
     control.request_shutdown().unwrap();

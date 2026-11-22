@@ -32,9 +32,9 @@ impl FrontendFixture {
         )?;
         let server =
             ipc::Server::start(&owner, runtime.handle.clone(), app, runtime.test_executor())?;
-        // Hello binds identity; a query also waits for Core's dispatch startup.
+        // Hello binds identity. Task lookup also waits for Core's dispatch startup.
         rivu_client::client_session(data_dir)
-            .query(rivu_protocol::model::Query::ScanTask { id: 0 })?;
+            .lookup_task(rivu_protocol::model::TaskTarget::Scan { id: 0 })?;
         Ok(Self {
             server: Some(server),
             audio: Some(audio),

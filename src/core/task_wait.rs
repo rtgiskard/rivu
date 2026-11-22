@@ -80,6 +80,19 @@ impl Drop for WaitRegistration {
 }
 
 impl CoreHandle {
+    pub(crate) async fn lookup_task(&self, target: TaskTarget) -> Result<TaskLookup> {
+        let (reply, receiver) = oneshot::channel();
+        self.admit(Request {
+            operation: Operation::LookupTask { target, reply },
+            reply: None,
+        })
+        .await?;
+        rivu_protocol::transport::timeout(REPLY_TIMEOUT, receiver)
+            .await
+            .context("Task lookup timed out")?
+            .context("Core response unavailable")
+    }
+
     /// Wait indefinitely for an owner-committed terminal outcome.
     /// Dropping this future only cancels the wait, never the business task.
     pub async fn wait_task(
@@ -107,6 +120,21 @@ impl CoreHandle {
 }
 
 impl Core {
+    pub(super) fn lookup_task(&self, target: TaskTarget) -> TaskLookup {
+        let status = match target {
+            TaskTarget::Scan { id } => self
+                .scan_status_ref(id)
+                .map(|status| TaskOutcome::Scan(status.status().clone())),
+            TaskTarget::Relocation { id } => self
+                .relocation_status_ref(id)
+                .map(|status| TaskOutcome::Relocation(status.status().clone())),
+            TaskTarget::Processing { id } => self
+                .processing_status(id)
+                .map(|status| TaskOutcome::Processing(Box::new(status))),
+        };
+        status.map_or(TaskLookup::UnknownOrExpired, TaskLookup::Found)
+    }
+
     pub(super) fn scan_status_ref(&self, id: u64) -> Option<TaskStatusRef<'_, ScanTaskStatus>> {
         self.active_scan
             .as_ref()

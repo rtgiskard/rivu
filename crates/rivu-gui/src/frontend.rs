@@ -14,10 +14,10 @@ use rivu_format::config::{Config, ConfigSettings};
 use rivu_protocol::query_tracking::{QueryEpoch, QueryTicket};
 use rivu_protocol::{
     ADMISSION_TIMEOUT, AppCommand, REPLY_TIMEOUT,
-    model::{Command, ConfigMutation, ConfigPatch, Query},
+    model::{Command, ConfigMutation, ConfigPatch, Query, TaskTarget},
     response::{
         AckStatus, ObservedState, QueryError, QueryResponse, QueryRevisionScope, StateResponse,
-        StateRevisions, StateSections,
+        StateRevisions, StateSections, TaskLookup,
     },
     wire::CommandReply,
 };
@@ -347,6 +347,19 @@ struct QueryRequest {
     reply: oneshot::Sender<QueryResponse>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "bounded queue slots hold the common query inline"
+)]
+enum ReadRequest {
+    Query(QueryRequest),
+    Task {
+        target: TaskTarget,
+        owner: QueryTicket,
+        reply: oneshot::Sender<Result<TaskLookup>>,
+    },
+}
+
 /// Owns remote workers only. Dropping the desktop never sends Core Shutdown.
 pub(crate) struct FrontendRuntime {
     pub(crate) handle: FrontendHandle,
@@ -358,7 +371,7 @@ pub(crate) struct FrontendHandle {
     shared: Arc<Shared>,
     commands: Sender<CommandRequest>,
     shutdown: Sender<CommandRequest>,
-    queries: Sender<QueryRequest>,
+    queries: Sender<ReadRequest>,
     query_timeout: Option<QueryTimeout>,
     pub(crate) analysis: Arc<RwLock<AnalysisFrame>>,
     pub(crate) waveform: Arc<RwLock<WaveformFrame>>,
@@ -584,11 +597,30 @@ fn finish_command(
     shutdown_complete
 }
 
-fn query_worker(shared: Arc<Shared>, mut session: ClientSession, receiver: Receiver<QueryRequest>) {
-    while let Ok(mut request) = receiver.recv_blocking() {
+fn query_worker(shared: Arc<Shared>, mut session: ClientSession, receiver: Receiver<ReadRequest>) {
+    while let Ok(request) = receiver.recv_blocking() {
         if shared.stop.is_cancelled() {
             break;
         }
+        let mut request = match request {
+            ReadRequest::Query(request) => request,
+            ReadRequest::Task {
+                target,
+                owner,
+                reply,
+            } => {
+                if owner.is_current() && !reply.is_canceled() {
+                    let result = session.lookup_task(target);
+                    if let Err(error) = &result
+                        && error.downcast_ref::<InstanceChanged>().is_some()
+                    {
+                        shared.error(format!("GUI instance changed: {error:#}"), true);
+                    }
+                    let _ = reply.send(result);
+                }
+                continue;
+            }
+        };
         let scope = QueryRevisionScope::for_query(&request.query);
         if request.reply.is_canceled()
             || !request.owner.is_current()
@@ -764,6 +796,43 @@ impl FrontendHandle {
         self.query_timeout = Some(Arc::new(notify));
         self
     }
+    pub(crate) async fn lookup_task(
+        &self,
+        target: TaskTarget,
+        on_timeout: impl FnOnce(&str),
+    ) -> Result<TaskLookup> {
+        let mut owner = QueryEpoch::default();
+        let (reply, mut receiver) = oneshot::channel();
+        let request = ReadRequest::Task {
+            target,
+            owner: owner.ticket(),
+            reply,
+        };
+        anyhow::ensure!(
+            self.is_connected()
+                && matches!(
+                    rivu_protocol::transport::timeout(
+                        ADMISSION_TIMEOUT,
+                        self.queries.send(request)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ),
+            "GUI task lookup queue is busy or stopped"
+        );
+        match rivu_protocol::transport::timeout(REPLY_TIMEOUT, &mut receiver).await {
+            Ok(response) => response.context("GUI task lookup disconnected")?,
+            Err(error) => {
+                owner.cancel();
+                let message = format!("GUI task lookup timed out: {error}");
+                on_timeout(&message);
+                // Retain this feature's reservation until the worker finishes.
+                let _ = receiver.await;
+                Err(anyhow::Error::msg(message))
+            }
+        }
+    }
+    #[cfg(test)]
     pub(crate) async fn query_for_gui(&self, query: Query) -> QueryResponse {
         self.query_with_ticket(query, None, REPLY_TIMEOUT, false)
             .await
@@ -793,13 +862,13 @@ impl FrontendHandle {
         }
         let (reply, mut receiver) = oneshot::channel();
         let mut owner = QueryEpoch::default();
-        let request = QueryRequest {
+        let request = ReadRequest::Query(QueryRequest {
             query,
             refresh_state,
             ticket: ticket.clone(),
             owner: owner.ticket(),
             reply,
-        };
+        });
         if !self.is_connected()
             || !matches!(
                 rivu_protocol::transport::timeout(ADMISSION_TIMEOUT, self.queries.send(request))
@@ -1740,13 +1809,13 @@ mod tests {
         assert!(
             handle
                 .queries
-                .try_send(QueryRequest {
+                .try_send(ReadRequest::Query(QueryRequest {
                     query: Query::LibraryStats,
                     refresh_state: false,
                     ticket: None,
                     owner: QueryEpoch::default().ticket(),
                     reply: occupied_reply,
-                })
+                }))
                 .is_ok()
         );
         let query = Query::Track { track_id: 42 };
@@ -1758,7 +1827,9 @@ mod tests {
         drop(requests.try_recv().unwrap());
         let (response, timed_out) = futures::executor::block_on(async {
             futures::join!(pending, async {
-                let request = requests.recv().await.unwrap();
+                let ReadRequest::Query(request) = requests.recv().await.unwrap() else {
+                    panic!("expected query request");
+                };
                 let timed_out = notices.recv().await.unwrap();
                 assert!(!request.owner.is_current());
                 assert!(
