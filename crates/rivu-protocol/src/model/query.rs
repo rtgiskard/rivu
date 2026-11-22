@@ -150,9 +150,11 @@ pub enum Query {
     RelocationTask {
         id: u64,
     },
-    DuplicateMemberSelection {
+    DuplicateReviewMembers {
         fingerprint: String,
-        track_ids: Vec<i64>,
+        offset: usize,
+        limit: usize,
+        selected_ids: Vec<i64>,
     },
     ProcessingTask {
         id: u64,
@@ -306,7 +308,7 @@ pub enum QueryIdentity<'a> {
     DuplicateGroups,
     DuplicateMembers(&'a str),
     RelocationTask(u64),
-    DuplicateMemberSelection(&'a str, &'a [i64]),
+    DuplicateReviewMembers(&'a str),
     ProcessingTask(u64),
     PlaylistSummary(i64),
     LibraryMatchCounts(
@@ -393,7 +395,7 @@ impl Query {
                 stamp.queue = revisions.queue;
             }
             Self::DuplicateGroups { .. } => stamp.duplicate_groups = revisions.duplicate_groups,
-            Self::DuplicateMembers { .. } | Self::DuplicateMemberSelection { .. } => {
+            Self::DuplicateMembers { .. } | Self::DuplicateReviewMembers { .. } => {
                 stamp.library = revisions.library;
                 stamp.duplicate_members = revisions.duplicate_members;
                 stamp.queue = revisions.queue;
@@ -415,7 +417,7 @@ impl Query {
                 | Self::QueueBatch { .. }
                 | Self::QueueEntries { .. }
                 | Self::DuplicateMembers { .. }
-                | Self::DuplicateMemberSelection { .. }
+                | Self::DuplicateReviewMembers { .. }
         ) {
             stamp.bitrate = revisions.bitrate;
         }
@@ -528,10 +530,9 @@ impl Query {
             }
             Self::RelocationTask { id } => QueryIdentity::RelocationTask(*id),
             Self::ProcessingTask { id } => QueryIdentity::ProcessingTask(*id),
-            Self::DuplicateMemberSelection {
-                fingerprint,
-                track_ids,
-            } => QueryIdentity::DuplicateMemberSelection(fingerprint, track_ids),
+            Self::DuplicateReviewMembers { fingerprint, .. } => {
+                QueryIdentity::DuplicateReviewMembers(fingerprint)
+            }
         }
     }
 }
@@ -638,9 +639,11 @@ mod tests {
                 offset: 0,
                 limit: 2,
             },
-            Query::DuplicateMemberSelection {
+            Query::DuplicateReviewMembers {
                 fingerprint: "hash".into(),
-                track_ids: vec![1],
+                offset: 0,
+                limit: 2,
+                selected_ids: vec![1],
             },
         ] {
             assert_ne!(query.stamp(previous), query.stamp(next), "{query:?}");

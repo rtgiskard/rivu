@@ -61,8 +61,6 @@ struct ReviewRead {
     ticket: rivu_protocol::query_tracking::QueryTicket,
 }
 
-type SelectedMembers = Option<(QueryResponse, Vec<Option<bool>>)>;
-
 pub(super) enum DuplicatesEvent {
     RestoreFocus,
 }
@@ -578,7 +576,7 @@ impl DuplicateReview {
         epoch: u64,
         query: &Query,
         generation: u64,
-        result: (QueryResponse, Vec<Option<bool>>, SelectedMembers),
+        result: (QueryResponse, Vec<Option<bool>>, Vec<Option<bool>>),
         revisions: QueryRevisions,
         now: Instant,
     ) -> bool {
@@ -586,23 +584,13 @@ impl DuplicateReview {
         if !self.accepts_members(epoch, query, generation, revisions) {
             return false;
         }
-        let selected_current = selected.as_ref().is_none_or(|(selected, _)| {
-            !matches!(&selected.result, Ok(ViewResponse::DuplicateMembers(_)))
-                || query.stamp(selected.revisions) == query.stamp(response.revisions)
-        });
         let obsolete = matches!(
             &response.result,
             Err(QueryError::RevisionChanged | QueryError::Cancelled)
-        ) || selected.as_ref().is_some_and(|(selected, _)| {
-            matches!(
-                &selected.result,
-                Err(QueryError::RevisionChanged | QueryError::Cancelled)
-            )
-        });
+        );
         if obsolete
-            || (matches!(&response.result, Ok(ViewResponse::DuplicateMembers(_)))
-                && (!selected_current
-                    || !self.accepts_members(epoch, query, generation, response.revisions)))
+            || (response.result.is_ok()
+                && !self.accepts_members(epoch, query, generation, response.revisions))
         {
             self.members_projection.cancel();
             self.members_dirty = false;
@@ -610,27 +598,11 @@ impl DuplicateReview {
             self.members_current = false;
             return true;
         }
-        let selected = match selected {
-            Some((
-                QueryResponse {
-                    result: Ok(ViewResponse::DuplicateMembers(page)),
-                    ..
-                },
-                exists,
-            )) => page
-                .rows
-                .into_iter()
-                .zip(exists)
-                .map(|(value, exists)| Member { value, exists })
-                .collect(),
-            Some((response, _)) => {
-                self.fail_members(response.result.err().map(|error| error.to_string()));
-                return true;
-            }
-            None => Vec::new(),
-        };
         match response.result {
-            Ok(ViewResponse::DuplicateMembers(page)) => {
+            Ok(ViewResponse::DuplicateReviewMembers {
+                page,
+                selected: outside,
+            }) => {
                 if self.members_offset > 0 && self.members_offset >= page.total {
                     if let Some(hash) = self.fingerprint.clone() {
                         self.request_members(hash, 0, revisions, now);
@@ -650,6 +622,11 @@ impl DuplicateReview {
                     self.members = members;
                 }
                 self.members_retention.clear();
+                let selected = outside
+                    .into_iter()
+                    .zip(selected)
+                    .map(|(value, exists)| Member { value, exists })
+                    .collect::<Vec<_>>();
                 self.reconcile_selection(&selected);
             }
             result => self.fail_members(result.err().map(|error| error.to_string())),
@@ -674,10 +651,11 @@ impl DuplicateReview {
     }
 
     fn members_query(&self) -> Option<Query> {
-        Some(Query::DuplicateMembers {
+        Some(Query::DuplicateReviewMembers {
             fingerprint: self.fingerprint.clone()?,
             offset: self.members_offset,
             limit: MEMBER_PAGE,
+            selected_ids: Vec::new(),
         })
     }
 
@@ -741,7 +719,7 @@ impl DuplicateReview {
             && self
                 .members_projection
                 .accepts(query, generation, revisions)
-            && matches!(query, Query::DuplicateMembers { offset, .. } if *offset == self.members_offset)
+            && matches!(query, Query::DuplicateReviewMembers { offset, .. } if *offset == self.members_offset)
     }
 
     fn selection_ids(&self) -> (Option<i64>, Option<i64>) {
@@ -1076,54 +1054,30 @@ impl Duplicates {
             {
                 return;
             }
-            let worker_query = query.clone();
+            let mut worker_query = query.clone();
+            if let Query::DuplicateReviewMembers {
+                selected_ids: ids, ..
+            } = &mut worker_query
+            {
+                *ids = selected_ids;
+            }
             let executor = cx.background_executor().clone();
             let ((response, existence, selected), timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move {
-                    let response = handle
-                        .query_if_current(worker_query.clone(), ticket.clone())
-                        .await;
-                    let (response, existence) = executor
+                    let response = handle.query_if_current(worker_query, ticket).await;
+                    executor
                         .spawn(async move {
-                            let existence = member_existence(&response);
-                            (response, existence)
+                            let (existence, selected) = match &response.result {
+                                Ok(ViewResponse::DuplicateReviewMembers { page, selected }) => {
+                                    (member_existence(&page.rows), member_existence(selected))
+                                }
+                                _ => (Vec::new(), Vec::new()),
+                            };
+                            (response, existence, selected)
                         })
-                        .await;
-                    let selected = match (&worker_query, &response.result) {
-                        (
-                            Query::DuplicateMembers { fingerprint, .. },
-                            Ok(ViewResponse::DuplicateMembers(page)),
-                        ) => {
-                            let track_ids = selected_ids
-                                .into_iter()
-                                .filter(|id| !page.rows.iter().any(|member| member.track.id == *id))
-                                .collect::<Vec<_>>();
-                            if track_ids.is_empty() {
-                                None
-                            } else {
-                                let selected = handle
-                                    .query_if_current(
-                                        Query::DuplicateMemberSelection {
-                                            fingerprint: fingerprint.clone(),
-                                            track_ids,
-                                        },
-                                        ticket.clone(),
-                                    )
-                                    .await;
-                                let (selected, exists) = executor
-                                    .spawn(async move {
-                                        let exists = member_existence(&selected);
-                                        (selected, exists)
-                                    })
-                                    .await;
-                                Some((selected, exists))
-                            }
-                        }
-                        _ => None,
-                    };
-                    (response, existence, selected)
+                        .await
                 },
                 |response, cx| {
                     let _ = this.update(cx, |this, cx| {
@@ -2106,20 +2060,16 @@ fn selectable_target(member: &Member) -> bool {
     !member.value.track.missing && member.exists == Some(true) && !member.value.independent
 }
 
-fn member_existence(response: &QueryResponse) -> Vec<Option<bool>> {
-    match &response.result {
-        Ok(ViewResponse::DuplicateMembers(page)) => page
-            .rows
-            .iter()
-            .map(|member| match std::fs::metadata(&member.track.path) {
-                Ok(metadata) if metadata.is_file() => Some(true),
-                Ok(_) => None,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
-                Err(_) => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+fn member_existence(members: &[DuplicateMember]) -> Vec<Option<bool>> {
+    members
+        .iter()
+        .map(|member| match std::fs::metadata(&member.track.path) {
+            Ok(metadata) if metadata.is_file() => Some(true),
+            Ok(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+            Err(_) => None,
+        })
+        .collect()
 }
 
 fn has_target_state(member: &DuplicateMember) -> bool {
@@ -2221,19 +2171,10 @@ mod tests {
                             (
                                 QueryResponse {
                                     revisions,
-                                    result: Ok(ViewResponse::DuplicateMembers(Page {
-                                        total: 1,
-                                        rows: Vec::new()
-                                    }))
+                                    result: Err(error.clone())
                                 },
                                 Vec::new(),
-                                Some((
-                                    QueryResponse {
-                                        revisions,
-                                        result: Err(error.clone())
-                                    },
-                                    Vec::new()
-                                )),
+                                Vec::new(),
                             ),
                             revisions,
                             Instant::now(),
@@ -2296,7 +2237,7 @@ mod tests {
                                     result: Err(error.clone())
                                 },
                                 Vec::new(),
-                                None
+                                Vec::new()
                             ),
                             current,
                             Instant::now(),
@@ -2309,13 +2250,16 @@ mod tests {
                             (
                                 QueryResponse {
                                     revisions: current,
-                                    result: Ok(ViewResponse::DuplicateMembers(Page {
-                                        total: 0,
-                                        rows: Vec::new()
-                                    }))
+                                    result: Ok(ViewResponse::DuplicateReviewMembers {
+                                        page: Page {
+                                            total: 0,
+                                            rows: Vec::new()
+                                        },
+                                        selected: Vec::new()
+                                    })
                                 },
                                 Vec::new(),
-                                None,
+                                Vec::new(),
                             ),
                             current,
                             Instant::now(),
@@ -2395,17 +2339,20 @@ mod tests {
         assert!(!review.can_relocate());
         let response = QueryResponse {
             revisions: QueryRevisions::default(),
-            result: Ok(ViewResponse::DuplicateMembers(Page {
-                total: 32,
-                rows: vec![member(1, true).value],
-            })),
+            result: Ok(ViewResponse::DuplicateReviewMembers {
+                page: Page {
+                    total: 32,
+                    rows: vec![member(1, true).value],
+                },
+                selected: Vec::new(),
+            }),
         };
         review.members_worker_finished();
         assert!(!review.accept_members(
             members.epoch,
             &members.query,
             members.generation,
-            (response, vec![Some(false)], None),
+            (response, vec![Some(false)], Vec::new()),
             revisions,
             Instant::now(),
         ));
@@ -2726,13 +2673,16 @@ mod tests {
             (
                 QueryResponse {
                     revisions,
-                    result: Ok(ViewResponse::DuplicateMembers(Page {
-                        total: 24,
-                        rows: Vec::new()
-                    })),
+                    result: Ok(ViewResponse::DuplicateReviewMembers {
+                        page: Page {
+                            total: 24,
+                            rows: Vec::new()
+                        },
+                        selected: Vec::new(),
+                    }),
                 },
                 Vec::new(),
-                None
+                Vec::new(),
             ),
             revisions,
             Instant::now(),
@@ -3265,7 +3215,7 @@ mod tests {
     }
 
     #[test]
-    fn member_selection_read_must_share_page_revision_before_acceptance() {
+    fn grouped_review_keeps_off_page_selection() {
         let mut review = ready_review();
         let revisions = QueryRevisions::default();
         review.request_members("fingerprint".into(), 0, revisions, Instant::now());
@@ -3274,46 +3224,25 @@ mod tests {
         review.members_worker_finished();
         let response = QueryResponse {
             revisions,
-            result: Ok(ViewResponse::DuplicateMembers(Page {
-                total: 2,
-                rows: vec![member(1, true).value],
-            })),
-        };
-        let selected = QueryResponse {
-            revisions: QueryRevisions {
-                duplicate_members: 1,
-                ..revisions
-            },
-            result: Ok(ViewResponse::DuplicateMembers(Page {
-                total: 1,
-                rows: vec![member(2, false).value],
-            })),
+            result: Ok(ViewResponse::DuplicateReviewMembers {
+                page: Page {
+                    total: 2,
+                    rows: vec![member(1, true).value],
+                },
+                selected: vec![member(2, false).value],
+            }),
         };
         assert!(review.accept_members(
             read.epoch,
             &read.query,
             read.generation,
-            (
-                response,
-                vec![Some(false)],
-                Some((selected, vec![Some(true)]))
-            ),
+            (response, vec![Some(false)], vec![Some(true)]),
             revisions,
             Instant::now(),
         ));
-        assert!(!review.members_current);
-        assert_eq!(review.members.len(), 2);
-        assert!(!review.members_dirty);
-        assert!(review.feedback.is_none());
-        assert!(review.begin_members().is_none());
-        review.sync_queries(
-            QueryRevisions {
-                duplicate_members: 1,
-                ..revisions
-            },
-            Instant::now(),
-        );
-        assert!(review.begin_members().is_some());
+        assert_eq!(review.members.len(), 1);
+        assert_eq!(review.selection_ids(), (Some(1), Some(2)));
+        assert!(review.can_relocate());
     }
 
     #[test]
@@ -3345,16 +3274,19 @@ mod tests {
         review.members_worker_finished();
         let response = QueryResponse {
             revisions,
-            result: Ok(ViewResponse::DuplicateMembers(Page {
-                total: 2,
-                rows: vec![member(1, true).value, member(2, false).value],
-            })),
+            result: Ok(ViewResponse::DuplicateReviewMembers {
+                page: Page {
+                    total: 2,
+                    rows: vec![member(1, true).value, member(2, false).value],
+                },
+                selected: Vec::new(),
+            }),
         };
         assert!(review.accept_members(
             read.epoch,
             &read.query,
             read.generation,
-            (response, vec![Some(false), Some(true)], None),
+            (response, vec![Some(false), Some(true)], Vec::new()),
             revisions,
             Instant::now(),
         ));
@@ -3482,13 +3414,16 @@ mod tests {
             (
                 QueryResponse {
                     revisions,
-                    result: Ok(ViewResponse::DuplicateMembers(Page {
-                        total: 2,
-                        rows: vec![member(1, true).value, member(2, false).value],
-                    })),
+                    result: Ok(ViewResponse::DuplicateReviewMembers {
+                        page: Page {
+                            total: 2,
+                            rows: vec![member(1, true).value, member(2, false).value]
+                        },
+                        selected: Vec::new(),
+                    }),
                 },
                 vec![Some(false), Some(true)],
-                None
+                Vec::new(),
             ),
             revisions,
             before,

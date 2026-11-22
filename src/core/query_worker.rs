@@ -104,13 +104,33 @@ impl ReadView<'_> {
                 *offset,
                 *limit,
             )?),
-            Query::DuplicateMemberSelection {
+            Query::DuplicateReviewMembers {
                 fingerprint,
-                track_ids,
-            } => ViewResponse::DuplicateMembers(
-                self.store
-                    .duplicate_member_selection(fingerprint, track_ids)?,
-            ),
+                offset,
+                limit,
+                selected_ids,
+            } => {
+                if selected_ids.len() > 2 {
+                    return Err(QueryError::Message(
+                        "Duplicate review accepts at most two selections".into(),
+                    ));
+                }
+                let page = self
+                    .store
+                    .duplicate_members_page(fingerprint, *offset, *limit)?;
+                let mut outside = [0; 2];
+                let mut len = 0;
+                for &id in selected_ids {
+                    if !page.rows.iter().any(|member| member.track.id == id) {
+                        outside[len] = id;
+                        len += 1;
+                    }
+                }
+                let selected = self
+                    .store
+                    .duplicate_member_selection(fingerprint, &outside[..len])?;
+                ViewResponse::DuplicateReviewMembers { page, selected }
+            }
             Query::ProcessingTask { .. } | Query::RelocationTask { .. } => {
                 unreachable!("task status stays on Core")
             }

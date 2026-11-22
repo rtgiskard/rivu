@@ -430,9 +430,11 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             playlist_id: 10,
             entry_ids: vec![42, i64::MAX, 42],
         },
-        Query::DuplicateMemberSelection {
+        Query::DuplicateReviewMembers {
             fingerprint: blake3::hash(b"selected facts").to_hex().to_string(),
-            track_ids: vec![42, i64::MAX, 42],
+            offset: 8,
+            limit: 8,
+            selected_ids: vec![42, i64::MAX],
         },
     ] {
         assert_query_round_trip(&mut encoded, query);

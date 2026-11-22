@@ -18,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 52;
+pub const PROTOCOL_VERSION: u8 = 53;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -244,9 +244,11 @@ pub enum WireQuery {
         offset: u64,
         limit: u64,
     },
-    DuplicateMemberSelection {
+    DuplicateReviewMembers {
         fingerprint: String,
-        track_ids: Vec<i64>,
+        offset: u64,
+        limit: u64,
+        selected_ids: Vec<i64>,
     },
     OtherTracksPage {
         query: Option<String>,
@@ -829,12 +831,16 @@ impl From<Query> for WireQuery {
                 offset: offset as u64,
                 limit: limit as u64,
             },
-            Query::DuplicateMemberSelection {
+            Query::DuplicateReviewMembers {
                 fingerprint,
-                track_ids,
-            } => Self::DuplicateMemberSelection {
+                offset,
+                limit,
+                selected_ids,
+            } => Self::DuplicateReviewMembers {
                 fingerprint,
-                track_ids,
+                offset: offset as u64,
+                limit: limit as u64,
+                selected_ids,
             },
             Query::RelocationTask { id } => Self::RelocationTask { id },
             Query::ProcessingTask { id } => Self::ProcessingTask { id },
@@ -1070,12 +1076,16 @@ impl TryFrom<WireQuery> for Query {
                 offset: wire_usize(offset, "offset")?,
                 limit: wire_usize(limit, "limit")?,
             },
-            WireQuery::DuplicateMemberSelection {
+            WireQuery::DuplicateReviewMembers {
                 fingerprint,
-                track_ids,
-            } => Self::DuplicateMemberSelection {
+                offset,
+                limit,
+                selected_ids,
+            } => Self::DuplicateReviewMembers {
                 fingerprint,
-                track_ids,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+                selected_ids,
             },
             WireQuery::RelocationTask { id } => Self::RelocationTask { id },
             WireQuery::ProcessingTask { id } => Self::ProcessingTask { id },

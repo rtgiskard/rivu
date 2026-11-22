@@ -1223,6 +1223,54 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
 }
 
 #[test]
+fn duplicate_review_returns_only_off_page_members_from_the_group() {
+    let (_directory, mut core) = fixture();
+    let hash = blake3::hash(b"same encoded audio");
+    let records = [1, 2]
+        .into_iter()
+        .map(|id| {
+            let mut record = record_for_known_file(&core, core.track(id).unwrap().path);
+            record.fingerprint = Some(hash);
+            Arc::new(record)
+        })
+        .collect();
+    let impacts = core
+        .store
+        .apply_scan(&ScanResult {
+            records,
+            ..Default::default()
+        })
+        .unwrap();
+    core.apply_catalog_changes(impacts).unwrap();
+    let read = |selected_ids| {
+        core.query_response(&Query::DuplicateReviewMembers {
+            fingerprint: hash.to_hex().to_string(),
+            offset: 1,
+            limit: 1,
+            selected_ids,
+        })
+        .result
+    };
+    let Ok(ViewResponse::DuplicateReviewMembers { page, selected }) = read(vec![1, 2]) else {
+        panic!("expected review page and off-page selection");
+    };
+    assert_eq!(page.total, 2);
+    assert_eq!(page.rows[0].track.id, 2);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|member| member.track.id)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    let Ok(ViewResponse::DuplicateReviewMembers { selected, .. }) = read(vec![2, 3]) else {
+        panic!("expected review page without off-page selection");
+    };
+    assert!(selected.is_empty());
+    assert!(read(vec![1, 2, 3]).is_err());
+}
+
+#[test]
 fn scan_lookup_wait_observes_cancel_and_shutdown_without_committing() {
     for shutdown in [false, true] {
         let (directory, mut core) = fixture();

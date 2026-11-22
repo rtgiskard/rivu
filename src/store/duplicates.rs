@@ -218,15 +218,14 @@ impl Store {
         Ok(Page { total, rows })
     }
     /// Bounded selected identities are facts, not a scan of uncached group pages.
-    pub fn duplicate_member_selection(
+    pub(crate) fn duplicate_member_selection(
         &self,
         fingerprint: &str,
         track_ids: &[i64],
-    ) -> Result<Page<DuplicateMember>> {
-        anyhow::ensure!(
-            track_ids.len() <= rivu_protocol::model::MAX_QUERY_ROWS,
-            "Duplicate selection exceeds query limit"
-        );
+    ) -> Result<Vec<DuplicateMember>> {
+        if track_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let fingerprint = blake3::Hash::from_hex(fingerprint)
             .context("Invalid duplicate group BLAKE3 fingerprint")?;
         let mut query = self.conn.prepare_cached(&format!(
@@ -243,10 +242,7 @@ impl Store {
                 duplicate_member_from_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Page {
-            total: rows.len(),
-            rows,
-        })
+        Ok(rows)
     }
 
     pub fn keep_independent(&self, track_id: i64) -> Result<bool> {
@@ -656,37 +652,26 @@ mod tests {
     }
 
     #[test]
-    fn selected_member_facts_are_bounded_deduplicated_and_current() -> Result<()> {
+    fn selected_member_facts_are_deduplicated_and_current() -> Result<()> {
         let store = fixture()?;
         let fingerprint = blake3::hash(b"same audio").to_hex().to_string();
         let selected = store.duplicate_member_selection(&fingerprint, &[2, 1, 2, 999])?;
         assert_eq!(
             selected
-                .rows
                 .iter()
                 .map(|member| member.track.id)
                 .collect::<Vec<_>>(),
             [1, 2]
         );
-        assert_eq!(selected.total, 2);
         store.enqueue_tracks(&[2])?;
         store.create_playlist_with_tracks("target refs", &[2])?;
         let selected = store.duplicate_member_selection(&fingerprint, &[2])?;
-        assert_eq!(selected.rows[0].queue_references, 1);
-        assert_eq!(selected.rows[0].playlist_references, 1);
+        assert_eq!(selected[0].queue_references, 1);
+        assert_eq!(selected[0].playlist_references, 1);
         assert!(store.prepare_relocation(1, 2).is_err());
         assert!(
             store
-                .duplicate_member_selection(
-                    &fingerprint,
-                    &vec![1; rivu_protocol::model::MAX_QUERY_ROWS + 1]
-                )
-                .is_err()
-        );
-        assert!(
-            store
                 .duplicate_member_selection(blake3::hash(b"different").to_hex().as_ref(), &[1, 2])?
-                .rows
                 .is_empty()
         );
         Ok(())

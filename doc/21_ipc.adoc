@@ -871,10 +871,10 @@ browsing behavior is in link:02_library.adoc[Library].
 present/missing counts. `DuplicateMembers {fingerprint, offset, limit}` returns
 full track, size/mtime verification, independent status, and playlist/queue
 reference facts. Decoder preference is carried only by `track.decoder_hint`.
-`DuplicateMemberSelection {fingerprint, track_ids}` resolves at
-most 256 selected member IDs to the same facts, omitting deleted, foreign-group,
-and CUE identities and deduplicating repeats. This bounded lookup validates
-off-page choices without scanning a group or treating cache eviction as deletion.
+`DuplicateReviewMembers {fingerprint, offset, limit, selected_ids}` returns the
+same page and up to two requested off-page members from a single read snapshot.
+It omits IDs already on the page, deleted or foreign-group members, and CUE
+identities. Selection survives paging without a second request.
 Fresh cached fingerprints are not a substitute for relocation's final source
 and target identity/content verification.
 

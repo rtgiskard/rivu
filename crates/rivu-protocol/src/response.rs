@@ -292,6 +292,10 @@ pub enum ViewResponse {
         roots: Vec<LibraryRootCount>,
         other: Option<usize>,
     },
+    DuplicateReviewMembers {
+        page: Page<crate::model::DuplicateMember>,
+        selected: Vec<crate::model::DuplicateMember>,
+    },
 }
 /// Final task status, returned only after the owner commits its outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
