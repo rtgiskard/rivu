@@ -409,6 +409,12 @@ pub(super) struct OtherTracksFilter {
     pub(super) missing: Option<bool>,
 }
 
+/// An empty `--query` omits the text filter (`--favorite`/`--missing` still apply);
+/// the IPC contract rejects empty search text.
+pub(super) fn search_text(query: Option<String>) -> Option<String> {
+    query.filter(|query| !query.is_empty())
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 pub(super) enum LibraryOrder {
     Id,

@@ -540,10 +540,6 @@ fn new_list_search_matches_effective_metadata_filename_and_literal_substrings() 
         4
     );
     assert_eq!(store.album_tracks_page(&key, None, 0, 0).unwrap().total, 4);
-    assert_eq!(
-        store.queue_page(Some(""), 0, 20).unwrap(),
-        store.queue_page(None, 0, 20).unwrap()
-    );
 }
 
 #[test]
@@ -872,16 +868,6 @@ fn directory_search_preserves_matching_ancestors_and_combines_favorites() {
         .unwrap();
     assert_eq!(root.total, 1);
     assert_eq!(root.rows, [DirectoryRow::Directory { path: "/".into() }]);
-    for favorite in [None, Some(true), Some(false)] {
-        let unfiltered = store
-            .directory_page(Path::new("/music"), None, favorite, None, 1, 10)
-            .unwrap();
-        let empty = store
-            .directory_page(Path::new("/music"), Some(""), favorite, None, 1, 10)
-            .unwrap();
-        assert_eq!(empty.total, unfiltered.total);
-        assert_eq!(empty.rows, unfiltered.rows);
-    }
     for (query, offset, limit) in [
         ("absent", 0, 10),
         ("needle", 4, 10),
@@ -1165,7 +1151,6 @@ fn library_root_pages_reuse_search_filters_sort_and_total() {
     for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
         for query in [
             None,
-            Some(""),
             Some("NEEDLE"),
             Some("Été_100%"),
             Some("étéX100Z"),

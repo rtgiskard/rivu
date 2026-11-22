@@ -34,7 +34,8 @@ fn filtered_library_count_scopes_keep_optional_filters_distinct() {
     assert_eq!(count(None, None, None, None), 3);
     // An empty prefix still restricts the BINARY path range; it is not no scope.
     assert_eq!(count(None, None, None, Some("")), 2);
-    assert_eq!(count(Some(""), None, None, None), 3);
+    // A query matching every title must not share the empty-prefix cache entry.
+    assert_eq!(count(Some("e"), None, None, None), 3);
     assert_eq!(count(None, None, None, Some("")), 2);
     assert_eq!(count(Some("needle"), None, None, None), 2);
     assert_eq!(count(None, Some(true), None, None), 1);

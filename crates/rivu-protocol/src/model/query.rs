@@ -392,29 +392,21 @@ impl Query {
             Self::PlaylistEntryLocations {
                 playlist_id, query, ..
             } => {
-                stamp.playlist_entries = revisions
-                    .playlist_entries
-                    .filter(|scope| scope.playlist_id == *playlist_id);
-                if query.is_some() {
-                    stamp.playlist_metadata = revisions
-                        .playlist_metadata
-                        .filter(|scope| scope.playlist_id == *playlist_id);
-                    if stamp.playlist_metadata.is_none() {
-                        stamp.library = revisions.library;
-                    }
-                }
+                stamp =
+                    Self::playlist_entry_locations_stamp(*playlist_id, query.is_some(), revisions)
+                        .revisions;
             }
             Self::PlaylistEntry { .. } => stamp.playlist_entries = revisions.playlist_entries,
             Self::QueuePage { query, .. } | Self::QueueBatch { query, .. } => {
                 stamp.queue = revisions.queue;
-                if !filters_queue(query) {
+                if query.is_none() {
                     stamp.queue_structure = revisions.queue_structure;
                 }
             }
             // Unfiltered occurrence identities and positions change only with
             // membership/order; filtered ranks also follow queued match values.
             Self::QueueIdentityPage { query, .. } | Self::QueueEntryLocations { query, .. } => {
-                if filters_queue(query) {
+                if query.is_some() {
                     stamp.queue = revisions.queue;
                 } else {
                     stamp.queue_structure = revisions.queue_structure;
@@ -451,12 +443,77 @@ impl Query {
             kind: match self {
                 Self::AlbumTracks { .. } => QueryStampKind::AlbumTracks,
                 Self::QueuePage { query, .. } | Self::QueueBatch { query, .. }
-                    if !filters_queue(query) =>
+                    if query.is_none() =>
                 {
                     QueryStampKind::QueueRows
                 }
                 _ => QueryStampKind::Rows,
             },
+        }
+    }
+
+    /// `PlaylistEntryLocations` stamp: selection depends on filter presence,
+    /// not text or entry ids, so revision checks need no query value.
+    pub fn playlist_entry_locations_stamp(
+        playlist_id: i64,
+        filtered: bool,
+        revisions: crate::response::QueryRevisions,
+    ) -> QueryStamp {
+        let scoped = |scope: Option<crate::response::PlaylistEntryRevision>| {
+            scope.filter(|scope| scope.playlist_id == playlist_id)
+        };
+        let mut stamp = crate::response::QueryRevisions {
+            playlist_entries: scoped(revisions.playlist_entries),
+            ..Default::default()
+        };
+        if filtered {
+            stamp.playlist_metadata = scoped(revisions.playlist_metadata);
+            if stamp.playlist_metadata.is_none() {
+                stamp.library = revisions.library;
+            }
+        }
+        QueryStamp {
+            revisions: stamp,
+            kind: QueryStampKind::Rows,
+        }
+    }
+
+    /// Text filter; `None` means unfiltered. Core rejects empty text, so
+    /// `Some` always filters and selects its match-dependent revisions.
+    pub fn search(&self) -> Option<&str> {
+        match self {
+            Self::OtherTracksPage { query, .. }
+            | Self::OtherTracksLocate { query, .. }
+            | Self::Albums { query, .. }
+            | Self::AlbumTracks { query, .. }
+            | Self::LibraryPage { query, .. }
+            | Self::DirectoryPage { query, .. }
+            | Self::PlaylistSummaries { query, .. }
+            | Self::PlaylistEntries { query, .. }
+            | Self::PlaylistEntryLocations { query, .. }
+            | Self::TrackBatch { query, .. }
+            | Self::PlaylistSummaryBatch { query, .. }
+            | Self::PlaylistEntryBatch { query, .. }
+            | Self::LibraryRootPage { query, .. }
+            | Self::LibraryLocate { query, .. }
+            | Self::QueuePage { query, .. }
+            | Self::QueueBatch { query, .. }
+            | Self::QueueIdentityPage { query, .. }
+            | Self::QueueEntryLocations { query, .. }
+            | Self::LibraryMatchCounts { query, .. } => query.as_deref(),
+            Self::OtherTracksCount
+            | Self::Track { .. }
+            | Self::LibraryStats
+            | Self::LibraryRootCounts { .. }
+            | Self::LibraryRootStats { .. }
+            | Self::ScanTask { .. }
+            | Self::PlaylistEntry { .. }
+            | Self::DuplicateGroups { .. }
+            | Self::DuplicateMembers { .. }
+            | Self::RelocationTask { .. }
+            | Self::DuplicateReviewMembers { .. }
+            | Self::ProcessingTask { .. }
+            | Self::PlaylistSummary { .. } => None,
         }
     }
 
@@ -565,11 +622,6 @@ impl Query {
             }
         }
     }
-}
-
-/// Storage treats an empty search as unfiltered.
-fn filters_queue(query: &Option<String>) -> bool {
-    query.as_deref().is_some_and(|query| !query.is_empty())
 }
 
 #[cfg(test)]
@@ -928,8 +980,8 @@ mod tests {
             queue_structure: 1,
             ..content
         };
-        for filter in [None, Some(String::new()), Some("needle".to_owned())] {
-            let filtered = filter.as_deref().is_some_and(|filter| !filter.is_empty());
+        for filter in [None, Some("needle".to_owned())] {
+            let filtered = filter.is_some();
             let page = Query::QueueIdentityPage {
                 query: filter.clone(),
                 offset: 1,

@@ -381,9 +381,16 @@ fn other_uses_global_editor_and_retains_collection_filters_and_sort() {
     );
     key(&mut ui, &state, KeyCode::Esc);
     let cleared = ui.query_request(&state).unwrap();
-    assert!(
-        matches!(cleared.demand.query(), Query::OtherTracksPage { query: Some(query), favorite: Some(true), missing: Some(false), sort: LibrarySort::Album, .. } if query.is_empty())
-    );
+    assert!(matches!(
+        cleared.demand.query(),
+        Query::OtherTracksPage {
+            query: None,
+            favorite: Some(true),
+            missing: Some(false),
+            sort: LibrarySort::Album,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -753,7 +760,7 @@ fn track_search_changes_locate_unloaded_identity_and_same_query_keeps_pages() {
                     ..
                 } | Query::OtherTracksLocate {
                     track_id: 1,
-                    query: Some(_),
+                    query: None,
                     ..
                 }
             ));

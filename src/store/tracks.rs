@@ -104,10 +104,9 @@ fn bool_key(value: Option<bool>) -> &'static str {
 
 /// SQL literal substring matching, shared by occurrence and album projections.
 /// Query normalization follows library search; '%' and '_' are not wildcards.
+/// Core rejects empty search text before reads reach storage.
 pub(super) fn search_query(query: Option<&str>) -> Option<String> {
-    query
-        .filter(|query| !query.is_empty())
-        .map(str::to_lowercase)
+    query.map(str::to_lowercase)
 }
 
 fn directory_prefix(path: &Path) -> Result<String> {
@@ -679,11 +678,7 @@ impl Store {
         let Some(rest) = source.strip_prefix(&prefix).filter(|rest| !rest.is_empty()) else {
             return Ok(LibraryLocateResult::OutsideRoot);
         };
-        if !tree
-            && prefix.is_empty()
-            && query.is_none_or(str::is_empty)
-            && favorite.is_none()
-            && missing.is_none()
+        if !tree && prefix.is_empty() && query.is_none() && favorite.is_none() && missing.is_none()
         {
             let (offset, total) = self.unfiltered_library_rank(track_id, sort)?;
             return Ok(LibraryLocateResult::Located(LibraryLocation {
@@ -692,9 +687,7 @@ impl Store {
                 child: None,
             }));
         }
-        let query = query
-            .filter(|query| !query.is_empty())
-            .map(str::to_lowercase);
+        let query = search_query(query);
         let matches = self
             .conn
             .prepare_cached(&format!(
@@ -1030,9 +1023,7 @@ impl Store {
     ) -> Result<Page<rivu_protocol::model::DirectoryRow>> {
         use rivu_protocol::model::DirectoryRow;
         let prefix = directory_prefix(path)?;
-        let query = query
-            .filter(|query| !query.is_empty())
-            .map(str::to_lowercase);
+        let query = search_query(query);
         let scope = if prefix.is_empty() {
             ""
         } else {
@@ -1174,9 +1165,7 @@ impl Store {
         limit: usize,
     ) -> Result<Batch<Track, i64>> {
         let limit = batch_limit(limit)?;
-        let pattern = query
-            .filter(|value| !value.is_empty())
-            .map(str::to_lowercase);
+        let pattern = search_query(query);
         let mut stmt = if after.is_some() {
             self.conn.prepare_cached(&format!(
                 "SELECT {TRACK_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} AND tracks.id>?4 ORDER BY tracks.id LIMIT ?5"

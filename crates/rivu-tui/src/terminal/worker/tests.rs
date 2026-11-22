@@ -1032,7 +1032,7 @@ fn rejected_shutdown_remains_usable_and_disconnected_shutdown_is_not_retried() {
 }
 
 #[test]
-fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_queries() {
+fn borrowed_read_specs_preserve_absent_and_present_filters_and_stamp_actual_queries() {
     let mut state = TuiSnapshot::default();
     state.library.revision = 17;
     state.queue.revision = 9;
@@ -1068,25 +1068,25 @@ fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_querie
             offset: 0,
             limit: 2,
         };
-        let empty = ReadDemand {
+        let filtered = ReadDemand {
             kind,
-            filter: Some(""),
+            filter: Some("needle"),
             offset: 0,
             limit: 2,
         };
         let absent_spec = absent.own(&state);
-        let empty_spec = empty.own(&state);
+        let filtered_spec = filtered.own(&state);
         assert_eq!(absent_spec.borrowed(), absent);
-        assert_eq!(empty_spec.borrowed(), empty);
-        assert!(!absent.matches(&empty_spec, &state));
-        assert!(!empty.matches(&absent_spec, &state));
+        assert_eq!(filtered_spec.borrowed(), filtered);
+        assert!(!absent.matches(&filtered_spec, &state));
+        assert!(!filtered.matches(&absent_spec, &state));
         assert_eq!(
             absent_spec.stamp,
             absent_spec.query().stamp(absent_spec.revisions(&state))
         );
         assert_eq!(
-            empty_spec.stamp,
-            empty_spec.query().stamp(empty_spec.revisions(&state))
+            filtered_spec.stamp,
+            filtered_spec.query().stamp(filtered_spec.revisions(&state))
         );
         let mut next = state.clone();
         next.library.revision += 1;
@@ -1098,7 +1098,7 @@ fn borrowed_read_specs_preserve_absent_and_empty_filters_and_stamp_actual_querie
             )
         );
         assert_eq!(
-            empty.matches(&empty_spec, &next),
+            filtered.matches(&filtered_spec, &next),
             matches!(kind, ReadKind::Queue | ReadKind::QueueSelection(_))
         );
     }

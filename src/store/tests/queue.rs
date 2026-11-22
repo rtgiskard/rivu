@@ -84,7 +84,7 @@ fn queue_identity_projections_preserve_filtered_occurrences_and_scope() {
             .is_err()
     );
 
-    let unfiltered = store.queue_identity_page(Some(""), 4, 1).unwrap();
+    let unfiltered = store.queue_identity_page(None, 4, 1).unwrap();
     assert_eq!(unfiltered.total, 5);
     assert_eq!(
         unfiltered.rows,

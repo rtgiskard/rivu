@@ -333,8 +333,6 @@ pub(super) struct ReadSpec {
     // Complete terminal intent exports both protocol work and borrowed demand.
     // Retain its actual protocol query for allocation-free polling and stamping.
     query: Query,
-    // OtherTracks queries carry an intrinsic empty query even without a TUI filter.
-    has_filter: bool,
     pub(super) offset: usize,
     pub(super) limit: usize,
     pub(super) stamp: QueryStamp,
@@ -347,41 +345,18 @@ pub(super) struct QueryRequest {
 }
 
 impl ReadKind<'_> {
-    pub(super) fn filtered_query(
-        self,
-        offset: usize,
-        limit: usize,
-        filter: Option<String>,
-    ) -> Query {
-        let mut query = self.into_query(offset, limit);
-        match &mut query {
-            Query::QueuePage { query, .. }
-            | Query::QueueEntryLocations { query, .. }
-            | Query::LibraryPage { query, .. }
-            | Query::DirectoryPage { query, .. }
-            | Query::LibraryLocate { query, .. }
-            | Query::OtherTracksPage { query, .. }
-            | Query::OtherTracksLocate { query, .. }
-            | Query::PlaylistSummaries { query, .. }
-            | Query::PlaylistEntries { query, .. }
-            | Query::PlaylistEntryLocations { query, .. }
-                if filter.is_some() =>
-            {
-                *query = filter;
-            }
-            _ => {}
-        }
-        query
-    }
-
-    fn into_query(self, offset: usize, limit: usize) -> Query {
+    /// `filter` applies to views filtered by the TUI query. Global search
+    /// carries its own text; count, summary and track reads take no filter.
+    /// The filter stays borrowed so only the arm that consumes it allocates.
+    fn into_query(self, offset: usize, limit: usize, filter: Option<&str>) -> Query {
+        let filter = || filter.map(str::to_owned);
         match self {
             ReadKind::OtherTracksCount => Query::OtherTracksCount,
             ReadKind::LibrarySelection(track_id) => Query::LibraryLocate {
                 track_id,
                 path: PathBuf::new(),
                 tree: false,
-                query: None,
+                query: filter(),
                 favorite: None,
                 missing: None,
                 sort: LibrarySort::Id,
@@ -390,7 +365,7 @@ impl ReadKind<'_> {
                 track_id,
                 path: path.to_owned(),
                 tree: true,
-                query: None,
+                query: filter(),
                 favorite: None,
                 missing: None,
                 sort: LibrarySort::Id,
@@ -398,12 +373,12 @@ impl ReadKind<'_> {
             ReadKind::Track(track_id) => Query::Track { track_id },
             ReadKind::PlaylistSummary(playlist_id) => Query::PlaylistSummary { playlist_id },
             ReadKind::Queue => Query::QueuePage {
-                query: None,
+                query: filter(),
                 offset,
                 limit,
             },
             ReadKind::QueueSelection(queue_id) => Query::QueueEntryLocations {
-                query: None,
+                query: filter(),
                 queue_ids: vec![queue_id],
             },
             ReadKind::Search(query) => Query::LibraryPage {
@@ -422,13 +397,13 @@ impl ReadKind<'_> {
             } => match anchor {
                 Some(track_id) => Query::OtherTracksLocate {
                     track_id,
-                    query: Some(String::new()),
+                    query: filter(),
                     favorite,
                     missing,
                     sort,
                 },
                 None => Query::OtherTracksPage {
-                    query: Some(String::new()),
+                    query: filter(),
                     favorite,
                     missing,
                     sort,
@@ -438,19 +413,19 @@ impl ReadKind<'_> {
             },
             ReadKind::Directory(path) => Query::DirectoryPage {
                 path: path.to_owned(),
-                query: None,
+                query: filter(),
                 favorite: None,
                 missing: None,
                 offset,
                 limit,
             },
             ReadKind::Playlists => Query::PlaylistSummaries {
-                query: None,
+                query: filter(),
                 offset,
                 limit,
             },
             ReadKind::Playlist(playlist_id) => Query::PlaylistEntries {
-                query: None,
+                query: filter(),
                 playlist_id,
                 offset,
                 limit,
@@ -459,7 +434,7 @@ impl ReadKind<'_> {
                 playlist_id,
                 entry_id,
             } => Query::PlaylistEntryLocations {
-                query: None,
+                query: filter(),
                 playlist_id,
                 entry_ids: vec![entry_id],
             },
@@ -488,7 +463,7 @@ impl ReadKind<'_> {
         if previous == next {
             return ReadChanges::default();
         }
-        let query = self.filtered_query(0, 0, (!filter.is_empty()).then(|| filter.to_owned()));
+        let query = self.into_query(0, 0, (!filter.is_empty()).then_some(filter));
         let impact = query.stamp(previous).impact(query.stamp(next));
         ReadChanges {
             rows_changed: impact.rows_changed(),
@@ -499,11 +474,8 @@ impl ReadKind<'_> {
 
 impl ReadDemand<'_> {
     pub(super) fn own(self, state: &TuiSnapshot) -> ReadSpec {
-        let query =
-            self.kind
-                .filtered_query(self.offset, self.limit, self.filter.map(str::to_owned));
+        let query = self.kind.into_query(self.offset, self.limit, self.filter);
         let mut demand = ReadSpec {
-            has_filter: self.filter.is_some(),
             query,
             offset: self.offset,
             limit: self.limit,
@@ -528,67 +500,57 @@ impl ReadSpec {
     }
 
     pub(super) fn borrowed(&self) -> ReadDemand<'_> {
-        let (kind, filter) = match self.query.identity() {
-            QueryIdentity::QueuePage(filter) => (ReadKind::Queue, filter.as_deref()),
-            QueryIdentity::QueueEntryLocations([id], filter) => {
-                (ReadKind::QueueSelection(*id), filter.as_deref())
-            }
-            QueryIdentity::LibraryPage(query, ..) => (
-                ReadKind::Search(
-                    query
-                        .as_deref()
-                        .expect("Terminal search queries carry search text"),
-                ),
-                query.as_deref(),
+        let kind = match self.query.identity() {
+            QueryIdentity::QueuePage(_) => ReadKind::Queue,
+            QueryIdentity::QueueEntryLocations([id], _) => ReadKind::QueueSelection(*id),
+            QueryIdentity::LibraryPage(query, ..) => ReadKind::Search(
+                query
+                    .as_deref()
+                    .expect("Terminal search queries carry search text"),
             ),
-            QueryIdentity::LibraryLocate(track_id, path, tree, filter, ..) => (
+            QueryIdentity::LibraryLocate(track_id, path, tree, ..) => {
                 if tree {
                     ReadKind::DirectorySelection { track_id, path }
                 } else {
                     ReadKind::LibrarySelection(track_id)
-                },
-                filter.as_deref(),
-            ),
-            QueryIdentity::DirectoryPage(path, filter, ..) => {
-                (ReadKind::Directory(path), filter.as_deref())
+                }
             }
-            QueryIdentity::OtherTracksCount => (ReadKind::OtherTracksCount, None),
-            QueryIdentity::OtherTracksPage(filter, favorite, missing, sort) => (
-                ReadKind::OtherTracks {
-                    favorite,
-                    missing,
-                    sort,
-                    anchor: None,
-                },
-                filter.as_deref(),
-            ),
-            QueryIdentity::OtherTracksLocate(track_id, filter, favorite, missing, sort) => (
+            QueryIdentity::DirectoryPage(path, ..) => ReadKind::Directory(path),
+            QueryIdentity::OtherTracksCount => ReadKind::OtherTracksCount,
+            QueryIdentity::OtherTracksPage(_, favorite, missing, sort) => ReadKind::OtherTracks {
+                favorite,
+                missing,
+                sort,
+                anchor: None,
+            },
+            QueryIdentity::OtherTracksLocate(track_id, _, favorite, missing, sort) => {
                 ReadKind::OtherTracks {
                     favorite,
                     missing,
                     sort,
                     anchor: Some(track_id),
-                },
-                filter.as_deref(),
-            ),
-            QueryIdentity::PlaylistSummaries(filter) => (ReadKind::Playlists, filter.as_deref()),
-            QueryIdentity::PlaylistEntries(id, filter) => {
-                (ReadKind::Playlist(id), filter.as_deref())
+                }
             }
-            QueryIdentity::PlaylistEntryLocations(playlist_id, [entry_id], filter) => (
+            QueryIdentity::PlaylistSummaries(_) => ReadKind::Playlists,
+            QueryIdentity::PlaylistEntries(id, _) => ReadKind::Playlist(id),
+            QueryIdentity::PlaylistEntryLocations(playlist_id, [entry_id], _) => {
                 ReadKind::PlaylistSelection {
                     playlist_id,
                     entry_id: *entry_id,
-                },
-                filter.as_deref(),
-            ),
-            QueryIdentity::PlaylistSummary(id) => (ReadKind::PlaylistSummary(id), None),
-            QueryIdentity::Track(id) => (ReadKind::Track(id), None),
+                }
+            }
+            QueryIdentity::PlaylistSummary(id) => ReadKind::PlaylistSummary(id),
+            QueryIdentity::Track(id) => ReadKind::Track(id),
             _ => unreachable!("ReadSpec only contains terminal queries"),
         };
         ReadDemand {
             kind,
-            filter: self.has_filter.then_some(filter).flatten(),
+            // Global search text is the read itself, not a view filter.
+            filter: if matches!(kind, ReadKind::Search(_)) {
+                None
+            } else {
+                self.query.search()
+            },
             offset: self.offset,
             limit: self.limit,
         }

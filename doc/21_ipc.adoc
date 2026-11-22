@@ -855,8 +855,9 @@ Display track rows include their logical source `path`.
 `PlaylistSummaryBatch`, `PlaylistEntries`, `PlaylistEntryBatch`,
 `PlaylistEntryLocations`, and `AlbumTracks` accept an optional `query`.
 Summary searches match playlist names; track searches match effective title,
-artist, album, and file name. Filtering precedes count and pagination; an empty
-query does not restrict membership. Query identity includes the filter so a
+artist, album, and file name. Filtering precedes count and pagination. Omit
+`query` for an unfiltered read; every query kind rejects empty search text, so
+`Some` always selects match-dependent revisions. Query identity includes the filter so a
 response from an older search cannot satisfy a different projection.
 Queue and playlist entry rows retain their original absolute `position`; their
 `offset` is the matching row's zero-based ordinal in the filtered view. Location
@@ -874,8 +875,8 @@ differences do not split an album and child directories never merge. Blank/stale
 keys return empty member pages with total zero.
 
 Browsing uses case-insensitive SQLite substring matching on effective album
-titles and member artists. Artist matches include the whole album. Null/empty
-queries match all; sort is `title` (default: title, directory) or `artist` (summary
+titles and member artists. Artist matches include the whole album. An omitted
+`query` matches all; sort is `title` (default: title, directory) or `artist` (summary
 artist, title, directory), with binary ordering. Members and representatives use
 disc number, track number (nulls last), effective title, then ID. Summary artist
 is the sole nonempty effective artist, `Various artists` for multiple, or an empty

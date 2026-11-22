@@ -213,6 +213,34 @@ fn query_timeout_does_not_wait_for_physical_retirement() {
 }
 
 #[test]
+fn empty_search_text_is_rejected_before_admission() {
+    let (handle, _analysis, requests) = pcm_fixture();
+    for query in [
+        Query::QueueIdentityPage {
+            query: Some(String::new()),
+            offset: 0,
+            limit: 1,
+        },
+        Query::LibraryPage {
+            query: Some(String::new()),
+            favorite: None,
+            missing: None,
+            sort: rivu_protocol::model::LibrarySort::Id,
+            offset: 0,
+            limit: 1,
+        },
+    ] {
+        let response =
+            futures::executor::block_on(handle.submit_query(query, None, Some(Duration::ZERO)));
+        assert!(matches!(
+            response.result,
+            Err(QueryError::Message(message)) if message.contains("must not be empty")
+        ));
+        assert!(requests.try_recv().is_err(), "empty search reached Core");
+    }
+}
+
+#[test]
 fn directory_missing_query_composes_filters_ancestors_and_exact_pages() {
     use rivu_protocol::model::DirectoryRow;
     let (directory, core) = fixture_with_database(Some(10.0));

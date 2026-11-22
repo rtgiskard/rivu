@@ -95,12 +95,9 @@ impl EntryNavigationScope {
     }
 
     fn same_occurrences(self, other: Self) -> bool {
-        let query = Query::PlaylistEntryLocations {
-            query: None,
-            playlist_id: self.playlist_id,
-            entry_ids: Vec::new(),
-        };
-        query.stamp(self.revisions()) == query.stamp(other.revisions())
+        let stamp =
+            |revisions| Query::playlist_entry_locations_stamp(self.playlist_id, false, revisions);
+        stamp(self.revisions()) == stamp(other.revisions())
     }
 }
 
@@ -682,23 +679,24 @@ fn entry_query_result(
     filtered: bool,
 ) -> Result<Option<ViewResponse>, rivu_protocol::response::QueryError> {
     let result = response.result?;
-    // Stamps select metadata for filtered locations by presence, not search text.
-    // Query identity and selection generation own the actual filter value.
-    let query = match &result {
-        ViewResponse::PlaylistEntryLocations(_) => Query::PlaylistEntryLocations {
-            query: filtered.then(String::new),
-            playlist_id: scope.playlist_id,
-            entry_ids: Vec::new(),
-        },
-        _ => Query::PlaylistEntries {
+    let expected = scope.revisions();
+    let current = if let ViewResponse::PlaylistEntryLocations(_) = &result {
+        // Location stamps select metadata by filter presence, not search text.
+        // Query identity and selection generation own the actual filter value.
+        let stamp = |revisions| {
+            Query::playlist_entry_locations_stamp(scope.playlist_id, filtered, revisions)
+        };
+        stamp(response.revisions) == stamp(expected)
+    } else {
+        let query = Query::PlaylistEntries {
             query: None,
             playlist_id: scope.playlist_id,
             offset: 0,
             limit: 1,
-        },
+        };
+        query.stamp(response.revisions) == query.stamp(expected)
     };
-    let expected = scope.revisions();
-    Ok((query.stamp(response.revisions) == query.stamp(expected)).then_some(result))
+    Ok(current.then_some(result))
 }
 
 impl Playlists {

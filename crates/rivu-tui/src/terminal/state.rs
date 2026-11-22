@@ -596,11 +596,11 @@ impl View {
         }
     }
 
-    fn query_kind(&self, selection: bool) -> Option<ReadKind<'_>> {
+    fn query_kind<'a>(&'a self, query: &'a str, selection: bool) -> Option<ReadKind<'a>> {
         match self {
             Self::Recent(_) => None,
             Self::Queue => Some(ReadKind::Queue),
-            Self::LibraryResults(_) => Some(ReadKind::Search("")),
+            Self::LibraryResults(_) => Some(ReadKind::Search(query)),
             Self::Tree(tree) if tree.other_tracks => Some(tree.other_query()),
             Self::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
                 Some(ReadKind::Directory(&tree.directory))
@@ -632,14 +632,14 @@ impl View {
             return false;
         }
         let changes = self
-            .query_kind(false)
+            .query_kind(query, false)
             .map(|kind| kind.changes(previous, next, query))
             .unwrap_or_default();
         let rows_changed = changes.rows_changed;
         let coordinates_changed = changes.coordinates_changed;
         let query_changed = if matches!(self, Self::PlaylistDetail { detail, .. } if detail.entry_anchor.is_some())
         {
-            self.query_kind(true)
+            self.query_kind(query, true)
                 .is_some_and(|kind| kind.changes(previous, next, query).rows_changed)
         } else {
             rows_changed
@@ -651,15 +651,12 @@ impl View {
             {
                 detail.summary_dirty = true;
             }
-            let compact = Query::PlaylistEntryLocations {
-                query: (!query.is_empty()).then(String::new),
-                playlist_id: detail.playlist_id,
-                entry_ids: Vec::new(),
+            let filtered = !query.is_empty();
+            let stamp = |revisions| {
+                Query::playlist_entry_locations_stamp(detail.playlist_id, filtered, revisions)
             };
             let scope = Some(detail.playlist_id);
-            if compact.stamp(previous.query_revisions(scope))
-                != compact.stamp(next.query_revisions(scope))
-            {
+            if stamp(previous.query_revisions(scope)) != stamp(next.query_revisions(scope)) {
                 detail.entry_anchor = detail
                     .entry_anchor
                     .or(detail.selected_entry_id)

@@ -261,7 +261,14 @@ pub(super) fn run(
             query,
             favorite,
             missing,
-        } => list_library(i18n, data_dir, json, query, favorite, missing),
+        } => list_library(
+            i18n,
+            data_dir,
+            json,
+            super::args::search_text(query),
+            favorite,
+            missing,
+        ),
         LibraryAction::Other(
             action @ (OtherTracksAction::List { .. }
             | OtherTracksAction::Count { .. }
@@ -527,7 +534,7 @@ pub(super) fn other_tracks_query(action: OtherTracksAction) -> Result<Query> {
     Ok(match action {
         OtherTracksAction::Count { filter } => Query::LibraryMatchCounts {
             roots: Vec::new(),
-            query: filter.query,
+            query: super::args::search_text(filter.query),
             favorite: filter.favorite,
             missing: filter.missing,
             include_other: true,
@@ -538,7 +545,7 @@ pub(super) fn other_tracks_query(action: OtherTracksAction) -> Result<Query> {
             offset,
             limit,
         } => Query::OtherTracksPage {
-            query: filter.query,
+            query: super::args::search_text(filter.query),
             favorite: filter.favorite,
             missing: filter.missing,
             sort: sort.into(),
@@ -551,7 +558,7 @@ pub(super) fn other_tracks_query(action: OtherTracksAction) -> Result<Query> {
             sort,
         } => Query::OtherTracksLocate {
             track_id,
-            query: filter.query,
+            query: super::args::search_text(filter.query),
             favorite: filter.favorite,
             missing: filter.missing,
             sort: sort.into(),

@@ -404,10 +404,6 @@ fn album_search_matches_effective_metadata_without_filtering_members() {
         );
         let all = store.albums_page(None, sort, 0, 24).unwrap();
         assert_eq!(all.total, 4);
-        assert_eq!(
-            store.albums_page(Some(""), sort, 0, 24).unwrap().total,
-            all.total
-        );
         let absent = store.albums_page(Some("absent"), sort, 0, 24).unwrap();
         assert_eq!(absent.total, 0);
         assert!(absent.rows.is_empty());

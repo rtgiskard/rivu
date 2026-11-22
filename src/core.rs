@@ -263,6 +263,16 @@ impl CoreHandle {
         ticket: Option<QueryTicket>,
         reply_timeout: Option<Duration>,
     ) -> QueryResponse {
+        // Reject before admission: projection recovery, read slots, and SQLite
+        // snapshots must never be spent on a query that cannot run.
+        if query.search().is_some_and(str::is_empty) {
+            return QueryResponse {
+                revisions: self.state.read().query_revisions_for(&query),
+                result: Err(QueryError::Message(
+                    "Search text must not be empty; omit it to read unfiltered results".into(),
+                )),
+            };
+        }
         let (tx, rx) = oneshot::channel();
         let request = Request {
             operation: Operation::Query { query, ticket },
