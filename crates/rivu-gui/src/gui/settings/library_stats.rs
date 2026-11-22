@@ -22,8 +22,12 @@ pub(super) struct RootStats {
     next: usize,
     // A canceled or timed-out query still owns its physical slot until it returns.
     in_flight: crate::gui::query::ReadReservation,
-    error: Option<String>,
-    retired: bool,
+    blocked: Option<StatsBlock>,
+}
+
+enum StatsBlock {
+    Failed(String),
+    Retired,
 }
 
 struct Read {
@@ -73,8 +77,7 @@ impl RootStats {
             self.retention.begin(now);
         }
         self.next = 0;
-        self.error = None;
-        self.retired = false;
+        self.blocked = None;
     }
 
     pub(super) fn cancel(&mut self) {
@@ -111,11 +114,7 @@ impl RootStats {
     }
 
     fn prepare(&mut self) -> Option<Read> {
-        if self.in_flight.pending()
-            || self.retired
-            || self.error.is_some()
-            || self.next == self.roots.len()
-        {
+        if self.in_flight.pending() || self.blocked.is_some() || self.next == self.roots.len() {
             return None;
         }
         let worker = self.in_flight.begin()?;
@@ -134,13 +133,15 @@ impl RootStats {
         if !read.ticket.is_current() {
             return;
         }
-        self.error = Some(error);
+        self.blocked = Some(StatsBlock::Failed(error));
         self.values.clear();
         self.retention.clear();
     }
 
     fn complete(&mut self, read: Read, response: QueryResponse) {
-        if !self.in_flight.finish(read.worker) || !read.ticket.is_current() || self.error.is_some()
+        if !self.in_flight.finish(read.worker)
+            || !read.ticket.is_current()
+            || self.blocked.is_some()
         {
             return;
         }
@@ -151,7 +152,7 @@ impl RootStats {
             && read.query.stamp(response.revisions) != read.query.stamp(revisions(self.revision)))
         {
             self.owner.cancel();
-            self.retired = true;
+            self.blocked = Some(StatsBlock::Retired);
             return;
         }
         match response.result {
@@ -274,21 +275,22 @@ impl Settings {
                 )
                 .into();
         }
-        self.tr(
-            if self.root_stats.error.is_some() || self.root_stats.retired {
-                "settings-library-root-stats-unavailable"
-            } else {
-                "settings-library-root-stats-loading"
-            },
-        )
+        self.tr(if self.root_stats_retryable() {
+            "settings-library-root-stats-unavailable"
+        } else {
+            "settings-library-root-stats-loading"
+        })
     }
 
     pub(super) fn root_stats_retryable(&self) -> bool {
-        self.root_stats.error.is_some() || self.root_stats.retired
+        self.root_stats.blocked.is_some()
     }
 
     pub(super) fn root_stats_error(&self) -> Option<&str> {
-        self.root_stats.error.as_deref()
+        match &self.root_stats.blocked {
+            Some(StatsBlock::Failed(error)) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -418,7 +420,7 @@ mod tests {
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 1, 0);
         assert_eq!(stats.values[Path::new("/empty")].total, 0);
-        assert!(stats.error.is_none());
+        assert!(stats.blocked.is_none());
         assert!(stats.prepare().is_none());
         stats.retry(Instant::now());
         let read = stats.prepare().unwrap();
@@ -428,10 +430,10 @@ mod tests {
         };
         stats.complete(read, invalid);
         assert!(stats.values.is_empty());
-        assert!(stats.error.is_some());
+        assert!(matches!(stats.blocked, Some(StatsBlock::Failed(_))));
         assert!(stats.prepare().is_none());
         stats.retry(Instant::now());
-        assert!(stats.error.is_none());
+        assert!(stats.blocked.is_none());
         assert!(stats.prepare().is_some());
     }
 
@@ -450,9 +452,8 @@ mod tests {
                         result: Err(error.clone()),
                     },
                 );
-                assert!(stats.retired);
+                assert!(matches!(stats.blocked, Some(StatsBlock::Retired)));
                 assert!(!stats.in_flight.pending());
-                assert!(stats.error.is_none());
                 for _ in 0..3 {
                     assert!(!stats.sync(&roots, 7, Instant::now()));
                     assert!(stats.prepare().is_none());
@@ -469,7 +470,7 @@ mod tests {
                 stats.complete(next, loaded);
                 assert_eq!(stats.values[std::path::Path::new("/music")].total, 3);
                 assert!(stats.prepare().is_none());
-                assert!(!stats.retired);
+                assert!(stats.blocked.is_none());
             }
         }
     }
@@ -481,8 +482,7 @@ mod tests {
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 2, 99);
         assert!(stats.values.is_empty());
-        assert!(stats.error.is_none());
-        assert!(stats.retired);
+        assert!(matches!(stats.blocked, Some(StatsBlock::Retired)));
         assert!(!stats.in_flight.pending());
         assert!(stats.prepare().is_none());
 
@@ -498,7 +498,7 @@ mod tests {
             },
         );
         assert!(stats.values.is_empty());
-        assert!(stats.error.is_some());
+        assert!(matches!(stats.blocked, Some(StatsBlock::Failed(_))));
         assert!(!stats.in_flight.pending());
         assert!(stats.prepare().is_none());
     }
@@ -515,7 +515,7 @@ mod tests {
         values[0].path = "/other".into();
         stats.complete(read, invalid);
         assert!(stats.values.is_empty());
-        assert!(stats.error.is_some());
+        assert!(matches!(stats.blocked, Some(StatsBlock::Failed(_))));
     }
 
     #[test]
@@ -525,7 +525,7 @@ mod tests {
         let read = stats.prepare().unwrap();
         stats.fail(&read, "Timed out".into());
         stats.retry(Instant::now());
-        assert!(stats.error.is_none());
+        assert!(stats.blocked.is_none());
         assert!(stats.in_flight.pending());
         assert!(stats.prepare().is_none());
         complete_ok(&mut stats, read, 1, 99);
