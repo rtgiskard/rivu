@@ -1916,6 +1916,38 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
 }
 
 #[test]
+fn neural_activation_command_frames_preserve_prepared_model_and_runtime() {
+    use rivu_protocol::model::{NeuralActivation, NeuralRuntime};
+
+    let runtime = NeuralRuntime {
+        worker: "/bundle/runtime/worker.py".into(),
+        interpreter: "/venv/bin/python".into(),
+    };
+    let mut encoded = Vec::new();
+    for activation in [
+        NeuralActivation::Speech {
+            manifest: "/bundle/native.json".into(),
+            runtime: None,
+        },
+        NeuralActivation::Speech {
+            manifest: "/bundle/speech.json".into(),
+            runtime: Some(runtime.clone()),
+        },
+        NeuralActivation::Separation {
+            manifest: "/bundle/separation.json".into(),
+            runtime,
+        },
+    ] {
+        assert_command_round_trip(
+            &mut encoded,
+            Command::NeuralActivate {
+                activation: Box::new(activation),
+            },
+        );
+    }
+}
+
+#[test]
 fn shared_configuration_encoding_rejects_oversize_and_recovers() {
     let config = Arc::new(rivu_format::config::ConfigSettings {
         ui_font: "x".repeat(MAX_RESPONSE),

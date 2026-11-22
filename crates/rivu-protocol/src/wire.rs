@@ -18,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 55;
+pub const PROTOCOL_VERSION: u8 = 56;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -591,6 +591,9 @@ pub enum WireCommand {
         key: crate::model::AlbumKey,
         revision: u64,
         name: String,
+    },
+    NeuralActivate {
+        activation: Box<crate::model::NeuralActivation>,
     },
 }
 
@@ -1427,6 +1430,7 @@ impl From<Command> for WireCommand {
             },
             Command::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
             Command::NeuralEdit { patch } => Self::NeuralEdit { patch },
+            Command::NeuralActivate { activation } => Self::NeuralActivate { activation },
             Command::ProcessingGraphEdit {
                 expected_revision,
                 edit,
@@ -1780,6 +1784,7 @@ impl TryFrom<WireCommand> for Command {
             },
             WireCommand::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
             WireCommand::NeuralEdit { patch } => Self::NeuralEdit { patch },
+            WireCommand::NeuralActivate { activation } => Self::NeuralActivate { activation },
             WireCommand::ProcessingGraphEdit {
                 expected_revision,
                 edit,

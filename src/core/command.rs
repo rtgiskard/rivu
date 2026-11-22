@@ -9,6 +9,7 @@ pub(super) enum CommandExecution {
     DeferredOptimization,
     DeferredSourceTags,
     DeferredProcessingResume,
+    DeferredNeuralActivation(Box<NeuralActivation>),
 }
 
 #[derive(Debug)]
@@ -264,6 +265,9 @@ impl Core {
             } => self.equalizer_edit(expected_revision, edit)?,
             Command::DenoiseEdit { patch } => self.denoise_edit(*patch)?,
             Command::NeuralEdit { patch } => self.neural_edit(*patch)?,
+            Command::NeuralActivate { activation } => {
+                return Ok(CommandExecution::DeferredNeuralActivation(activation));
+            }
             Command::ProcessingGraphEdit {
                 expected_revision,
                 edit,

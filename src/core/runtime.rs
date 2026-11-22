@@ -332,6 +332,7 @@ impl CoreRuntime {
             processing: rivu_processing::Service::new(),
             pending_processing_audition: None,
             pending_processing_resume: None,
+            neural_activations: processing::NeuralActivations::default(),
             scan_tx,
             scan_rx,
             active_scan: None,

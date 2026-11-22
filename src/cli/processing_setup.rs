@@ -1,9 +1,6 @@
 use super::args::{ProcessingSetup, SetupModel};
 use anyhow::{Context, Result, bail, ensure};
-use rivu_protocol::{
-    model::{Command, NeuralPatch},
-    response::StateSections,
-};
+use rivu_protocol::model::{Command, NeuralActivation, NeuralRuntime};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -87,56 +84,32 @@ fn script_result<T: serde::de::DeserializeOwned>(command: &mut Process, stage: &
 }
 
 fn activate(data_dir: &Path, model: SetupModel, prepared: &Prepared) -> Result<()> {
-    let mut session = rivu_client::client_session(data_dir);
-    let mut patch = NeuralPatch::default();
-    if !model.native() {
-        let worker = prepared
-            .worker
-            .as_ref()
-            .context("Prepared Python bundle omitted worker")?;
-        let state = session.get_state(StateSections {
-            configuration: true,
-            ..Default::default()
-        })?;
-        let configuration = state.configuration.context("Missing configuration state")?;
-        let neural = &configuration.config.neural;
-        let other = if matches!(model, SetupModel::Separate) {
-            neural.speech_manifest.as_ref()
-        } else {
-            neural.separation_manifest.as_ref()
-        };
-        if neural.worker != *worker
-            && let Some(other) = other
-        {
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&fs::read(other).with_context(|| {
-                    format!("Reading other selected model {}", other.display())
-                })?)
-                .context("Reading other selected model manifest")?;
-            ensure!(
-                manifest.get("backend").and_then(|value| value.as_str()) == Some("onnx"),
-                "Activation would replace the shared worker and invalidate the other selected Python model ({}); leave this bundle prepared or explicitly clear the other model first",
-                other.display()
-            );
+    let python_runtime = || -> Result<NeuralRuntime> {
+        Ok(NeuralRuntime {
+            worker: prepared
+                .worker
+                .clone()
+                .context("Prepared Python bundle omitted worker")?,
+            interpreter: prepared
+                .interpreter
+                .clone()
+                .context("Prepared Python bundle omitted interpreter")?,
+        })
+    };
+    let manifest = prepared.model_manifest.clone();
+    let activation = if matches!(model, SetupModel::Separate) {
+        NeuralActivation::Separation {
+            manifest,
+            runtime: python_runtime()?,
         }
-        patch.worker = Some(worker.clone());
-        let interpreter = prepared
-            .interpreter
-            .clone()
-            .context("Prepared Python bundle omitted interpreter")?;
-        if matches!(model, SetupModel::Separate) {
-            patch.separation_interpreter = Some(interpreter);
-        } else {
-            patch.speech_interpreter = Some(interpreter);
-        }
-    }
-    if matches!(model, SetupModel::Separate) {
-        patch.separation_manifest = Some(Some(prepared.model_manifest.clone()));
     } else {
-        patch.speech_manifest = Some(Some(prepared.model_manifest.clone()));
-    }
-    let ack = session.request_command(Command::NeuralEdit {
-        patch: Box::new(patch),
+        NeuralActivation::Speech {
+            manifest,
+            runtime: (!model.native()).then(python_runtime).transpose()?,
+        }
+    };
+    let ack = rivu_client::client_session(data_dir).request_command(Command::NeuralActivate {
+        activation: Box::new(activation),
     })?;
     ensure!(
         ack.is_success(),

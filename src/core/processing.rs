@@ -8,6 +8,137 @@ pub(super) struct PendingProcessingResume {
     pub(super) reply: Option<oneshot::Sender<CoreResponse>>,
 }
 
+#[derive(Default)]
+pub(super) struct NeuralActivations {
+    waiting: VecDeque<(NeuralActivation, Option<oneshot::Sender<CoreResponse>>)>,
+    running: Option<NeuralActivationTask>,
+}
+
+struct NeuralActivationTask {
+    worker: async_executor::Task<Result<CheckedNeuralActivation>>,
+    reply: Option<oneshot::Sender<CoreResponse>>,
+}
+
+struct SelectedWorker {
+    worker: PathBuf,
+    other: PathBuf,
+}
+
+pub(super) struct CheckedNeuralActivation {
+    speech: bool,
+    manifest: PathBuf,
+    runtime: Option<NeuralRuntime>,
+    baseline: Option<SelectedWorker>,
+    coexistence: Result<()>,
+}
+
+impl NeuralActivations {
+    pub(super) async fn next_finished(&mut self) -> Result<CheckedNeuralActivation> {
+        match self.running.as_mut() {
+            Some(task) => (&mut task.worker).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+fn neural_manifest(path: &Path) -> Result<serde_json::Value> {
+    use std::io::Read;
+
+    const LIMIT: usize = 1024 * 1024;
+    let mut contents = Vec::new();
+    rivu_utils::regular_file::open_regular_file(path)?
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut contents)?;
+    ensure!(contents.len() <= LIMIT, "Model manifest exceeds 1 MiB");
+    serde_json::from_slice(&contents).context("Decoding model manifest")
+}
+
+impl CheckedNeuralActivation {
+    fn check(
+        speech: bool,
+        manifest: PathBuf,
+        runtime: Option<NeuralRuntime>,
+        baseline: Option<SelectedWorker>,
+    ) -> Result<Self> {
+        let metadata = neural_manifest(&manifest)
+            .with_context(|| format!("Reading prepared model manifest {}", manifest.display()))?;
+        ensure!(
+            metadata["operation"] == if speech { "speech" } else { "separate" },
+            "Prepared model operation does not match activation target"
+        );
+        let mut coexistence = Ok(());
+        if let Some(runtime) = &runtime {
+            ensure!(
+                metadata.get("backend").is_none() || metadata["backend"] == "python",
+                "Prepared model backend does not match Python activation"
+            );
+            let worker = runtime
+                .worker
+                .canonicalize()
+                .context("Resolving prepared worker")?;
+            ensure!(worker.is_file(), "Prepared worker is not a regular file");
+            let manifest_path = manifest
+                .canonicalize()
+                .context("Resolving prepared manifest")?;
+            let interpreter = std::path::absolute(&runtime.interpreter)?;
+            let bound = &metadata["runtime"];
+            ensure!(
+                bound["worker"].as_str().map(Path::new) == Some(worker.as_path())
+                    && bound["model_manifest"].as_str().map(Path::new)
+                        == Some(manifest_path.as_path())
+                    && bound["interpreter"].as_str().map(Path::new) == Some(interpreter.as_path()),
+                "Activation runtime differs from the provisioned model runtime"
+            );
+            if let Some(baseline) = &baseline
+                && baseline.worker != runtime.worker
+                && !baseline
+                    .worker
+                    .canonicalize()
+                    .is_ok_and(|selected| selected == worker)
+            {
+                coexistence = match neural_manifest(&baseline.other).with_context(|| {
+                    format!(
+                        "Reading other selected model manifest {}",
+                        baseline.other.display()
+                    )
+                }) {
+                    Ok(other) if other["backend"] == "onnx" => Ok(()),
+                    Ok(_) => Err(anyhow::anyhow!(
+                        "Activation would replace the shared worker and invalidate the other selected Python model ({}). Leave this bundle prepared or explicitly clear the other model first",
+                        baseline.other.display()
+                    )),
+                    Err(error) => Err(error),
+                };
+            }
+        } else {
+            ensure!(
+                metadata["backend"] == "onnx",
+                "Prepared model backend does not match native speech activation"
+            );
+        }
+        Ok(Self {
+            speech,
+            manifest,
+            runtime,
+            baseline,
+            coexistence,
+        })
+    }
+}
+
+fn other_neural_manifest(
+    neural: &rivu_format::config::NeuralConfig,
+    speech: bool,
+) -> Option<&Path> {
+    if speech {
+        neural.separation_manifest.as_deref()
+    } else {
+        neural.speech_manifest.as_deref()
+    }
+}
+
+const MAX_NEURAL_ACTIVATIONS: usize = rivu_protocol::wire::MAX_CLIENTS;
+
 impl Core {
     pub(in crate::core) fn toggle_processing(
         &mut self,
@@ -710,6 +841,124 @@ impl Core {
         );
         self.commit_processing_config(config)
     }
+
+    pub(super) fn queue_neural_activation(
+        &mut self,
+        activation: NeuralActivation,
+        reply: Option<oneshot::Sender<CoreResponse>>,
+    ) {
+        let pending = &mut self.neural_activations;
+        if pending.waiting.len() + pending.running.is_some() as usize == MAX_NEURAL_ACTIVATIONS {
+            self.complete_background(
+                reply,
+                Err(anyhow::anyhow!("Too many pending model activations")),
+            );
+            return;
+        }
+        pending.waiting.push_back((activation, reply));
+        self.start_neural_activation();
+    }
+
+    fn start_neural_activation(&mut self) {
+        let pending = &mut self.neural_activations;
+        if pending.running.is_some() {
+            return;
+        }
+        let Some((activation, reply)) = pending.waiting.pop_front() else {
+            return;
+        };
+        let (speech, manifest, runtime) = match activation {
+            NeuralActivation::Speech { manifest, runtime } => (true, manifest, runtime),
+            NeuralActivation::Separation { manifest, runtime } => (false, manifest, Some(runtime)),
+        };
+        let baseline = runtime.as_ref().and_then(|_| {
+            let current = &self.preferences.settings().neural;
+            other_neural_manifest(current, speech).map(|other| SelectedWorker {
+                worker: current.worker.clone(),
+                other: other.to_path_buf(),
+            })
+        });
+        let workers = self.workers.clone();
+        let worker = self.executor.spawn(async move {
+            workers
+                .execute(move || {
+                    CheckedNeuralActivation::check(speech, manifest, runtime, baseline)
+                })
+                .await?
+        });
+        self.neural_activations.running = Some(NeuralActivationTask { worker, reply });
+    }
+
+    pub(super) fn finish_neural_activation(&mut self, result: Result<CheckedNeuralActivation>) {
+        let task = self
+            .neural_activations
+            .running
+            .take()
+            .expect("active model activation");
+        let result = result.and_then(|checked| self.commit_neural_activation(checked));
+        self.complete_background(task.reply, result);
+        self.start_neural_activation();
+    }
+
+    pub(super) fn retire_neural_activations(&mut self) {
+        if let Some(task) = self.neural_activations.running.take() {
+            let _ = futures::executor::block_on(
+                std::panic::AssertUnwindSafe(task.worker).catch_unwind(),
+            );
+            self.reply_to_command(
+                task.reply,
+                Err(anyhow::anyhow!("Core stopped before model activation")),
+            );
+        }
+        while let Some((_, reply)) = self.neural_activations.waiting.pop_front() {
+            self.reply_to_command(
+                reply,
+                Err(anyhow::anyhow!("Core stopped before model activation")),
+            );
+        }
+    }
+
+    fn commit_neural_activation(&mut self, checked: CheckedNeuralActivation) -> Result<()> {
+        let CheckedNeuralActivation {
+            speech,
+            manifest,
+            runtime,
+            baseline,
+            coexistence,
+        } = checked;
+        if let Some(runtime) = &runtime {
+            let current = &self.preferences.settings().neural;
+            if current.worker != runtime.worker
+                && let Some(other) = other_neural_manifest(current, speech)
+            {
+                ensure!(
+                    baseline.is_some_and(|baseline| {
+                        current.worker == baseline.worker && other == baseline.other.as_path()
+                    }),
+                    "Other selected model or shared worker changed during activation. Try activation again"
+                );
+                coexistence?;
+            }
+        }
+
+        let mut config = self.preferences.checkpoint();
+        let target = &mut config.neural;
+        let (selected, interpreter) = if speech {
+            (&mut target.speech_manifest, &mut target.speech_interpreter)
+        } else {
+            (
+                &mut target.separation_manifest,
+                &mut target.separation_interpreter,
+            )
+        };
+        *selected = Some(manifest);
+        if let Some(runtime) = runtime {
+            target.worker = runtime.worker;
+            *interpreter = runtime.interpreter;
+        }
+        self.commit_processing_config(config)
+    }
+
     pub(in crate::core) fn start_processing(
         &mut self,
         track_id: i64,

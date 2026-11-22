@@ -162,6 +162,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
         processing: rivu_processing::Service::new(),
         pending_processing_audition: None,
         pending_processing_resume: None,
+        neural_activations: super::processing::NeuralActivations::default(),
         scan_tx,
         scan_rx,
         active_scan: None,

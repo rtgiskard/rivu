@@ -1016,6 +1016,10 @@ pub enum Command {
     NeuralEdit {
         patch: Box<NeuralPatch>,
     },
+    /// Activate a prepared model if its worker can coexist with the current selection.
+    NeuralActivate {
+        activation: Box<NeuralActivation>,
+    },
     ProcessingGraphEdit {
         expected_revision: u64,
         edit: Box<GraphEdit>,

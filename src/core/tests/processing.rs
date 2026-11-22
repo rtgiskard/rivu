@@ -1576,6 +1576,278 @@ fn manifest_patch_distinguishes_json_clear_and_preserves_binary_absence() {
     assert_eq!(patch.speech_manifest, None);
 }
 
+fn request_neural_activation(core: &mut Core, command: Command) -> oneshot::Receiver<CoreResponse> {
+    let (reply, response) = oneshot::channel();
+    assert!(
+        core.business_event(dispatch::BusinessEvent::Request(Request {
+            operation: Operation::Command(command),
+            reply: Some(reply),
+        }))
+    );
+    response
+}
+
+fn finish_neural_activation(
+    core: &mut Core,
+    mut response: oneshot::Receiver<CoreResponse>,
+) -> CommandReceipt {
+    let (_sender, requests) = mpsc::bounded(1);
+    drive_until(core, requests, |event| {
+        matches!(event, dispatch::BusinessEvent::NeuralActivation(_))
+    });
+    let Some(CoreResponse::Ack(receipt)) = response.try_recv().unwrap() else {
+        panic!("expected activation receipt");
+    };
+    receipt
+}
+
+fn neural_activation_ack(core: &mut Core, command: Command) -> CommandReceipt {
+    let response = request_neural_activation(core, command);
+    finish_neural_activation(core, response)
+}
+
+fn write_activation_manifest(manifest: &Path, operation: &str, worker: &Path, interpreter: &Path) {
+    std::fs::write(
+        manifest,
+        serde_json::json!({
+            "operation": operation,
+            "runtime": {
+                "worker": worker.canonicalize().unwrap(),
+                "model_manifest": manifest,
+                "interpreter": std::path::absolute(interpreter).unwrap(),
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn neural_activation_rejects_stale_worker_and_keeps_the_first_model_usable() {
+    let (directory, mut core) = fixture();
+    let path = directory.path().canonicalize().unwrap();
+    let worker = path.join("speech.sh");
+    let manifest = path.join("speech.json");
+    let interpreter = PathBuf::from("/bin/sh");
+    std::fs::write(&worker, "cat >/dev/null && cat \"$0.frame\"\n").unwrap();
+    write_activation_manifest(&manifest, "speech", &worker, &interpreter);
+    let expected = source(directory.path());
+    let response = serde_json::to_vec(&serde_json::json!({
+        "version": 4, "task_id": "1", "type": "complete",
+        "sample_rate": 48000, "channels": 2, "frames": expected.len() / 2,
+        "outputs": {"speech": "input"},
+        "model": {"id": "speech-fixture", "sha256": "a".repeat(64)},
+    }))
+    .unwrap();
+    let mut frame = vec![0];
+    frame.extend_from_slice(&(response.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&response);
+    std::fs::write(worker.with_extension("sh.frame"), frame).unwrap();
+
+    let separation = path.join("separation.json");
+    let other_worker = path.join("separation.sh");
+    std::fs::write(&other_worker, "exit 1\n").unwrap();
+    write_activation_manifest(&separation, "separate", &other_worker, &interpreter);
+    let speech = Command::NeuralActivate {
+        activation: Box::new(NeuralActivation::Speech {
+            manifest,
+            runtime: Some(NeuralRuntime {
+                worker,
+                interpreter: interpreter.clone(),
+            }),
+        }),
+    };
+    let separate = Command::NeuralActivate {
+        activation: Box::new(NeuralActivation::Separation {
+            manifest: separation.clone(),
+            runtime: NeuralRuntime {
+                worker: other_worker.clone(),
+                interpreter: interpreter.clone(),
+            },
+        }),
+    };
+    core.command(Command::NeuralEdit {
+        patch: Box::new(NeuralPatch {
+            speech_wet_mix: Some(0.0),
+            ..Default::default()
+        }),
+    })
+    .unwrap();
+    let speech = request_neural_activation(&mut core, speech);
+    let queued_separate = request_neural_activation(&mut core, separate.clone());
+    assert!(finish_neural_activation(&mut core, speech).is_success());
+    let baseline = Arc::clone(core.preferences.settings());
+    let config_path = core.state.configuration.config_path.clone();
+    let saved = std::fs::read(&config_path).unwrap();
+    let receipt = finish_neural_activation(&mut core, queued_separate);
+    assert!(
+        receipt
+            .error()
+            .unwrap()
+            .contains("replace the shared worker")
+    );
+    assert!(Arc::ptr_eq(core.preferences.settings(), &baseline));
+    assert_eq!(std::fs::read(&config_path).unwrap(), saved);
+
+    let id = core
+        .start_processing(1, ProcessingOperation::Speech, None)
+        .unwrap();
+    complete(&mut core);
+    let status = core.processing_status(id).unwrap();
+    assert_eq!(status.phase, ProcessingPhase::Complete, "{status:?}");
+    assert_eq!(status.model_id.as_deref(), Some("speech-fixture"));
+    let result = core.processing.results()[0]
+        .outputs
+        .denoised
+        .as_ref()
+        .unwrap();
+    assert_eq!(pcm_samples(result), expected);
+
+    let separate = request_neural_activation(&mut core, separate);
+    let patch = serde_json::from_str(r#"{"speech_manifest":null,"threads":4}"#).unwrap();
+    core.command(Command::NeuralEdit { patch }).unwrap();
+    assert!(finish_neural_activation(&mut core, separate).is_success());
+    let neural = &core.preferences.settings().neural;
+    assert_eq!(neural.speech_manifest, None);
+    assert_eq!(neural.speech_interpreter, interpreter);
+    assert_eq!(neural.separation_manifest, Some(separation));
+    assert_eq!(neural.worker, other_worker);
+    assert_eq!(neural.threads, 4);
+}
+
+#[test]
+fn neural_activation_allows_the_same_worker_and_native_speech() {
+    let (directory, mut core) = fixture();
+    let directory = directory.path().canonicalize().unwrap();
+    let worker = directory.join("worker.py");
+    let alias = directory.join("alias.py");
+    let replacement = directory.join("other.py");
+    let speech = directory.join("speech.json");
+    let other_speech = directory.join("other_speech.json");
+    let native = directory.join("native.json");
+    let separation = directory.join("separation.json");
+    let other_separation = directory.join("other_separation.json");
+    let speech_interpreter = Path::new("/bin/sh");
+    let separation_interpreter = Path::new("/bin/cat");
+    std::fs::write(&worker, "").unwrap();
+    std::fs::write(&replacement, "").unwrap();
+    std::os::unix::fs::symlink(&worker, &alias).unwrap();
+    write_activation_manifest(&speech, "speech", &worker, speech_interpreter);
+    write_activation_manifest(&separation, "separate", &worker, separation_interpreter);
+    write_activation_manifest(&other_speech, "speech", &replacement, speech_interpreter);
+    write_activation_manifest(
+        &other_separation,
+        "separate",
+        &replacement,
+        separation_interpreter,
+    );
+    std::fs::write(&native, r#"{"operation":"speech","backend":"onnx"}"#).unwrap();
+
+    let activate_speech = |manifest, runtime| Command::NeuralActivate {
+        activation: Box::new(NeuralActivation::Speech { manifest, runtime }),
+    };
+    let activate_separation = |manifest, worker| Command::NeuralActivate {
+        activation: Box::new(NeuralActivation::Separation {
+            manifest,
+            runtime: NeuralRuntime {
+                worker,
+                interpreter: separation_interpreter.into(),
+            },
+        }),
+    };
+    let speech_response = request_neural_activation(
+        &mut core,
+        activate_speech(
+            speech.clone(),
+            Some(NeuralRuntime {
+                worker,
+                interpreter: speech_interpreter.into(),
+            }),
+        ),
+    );
+    let shared_separation = request_neural_activation(
+        &mut core,
+        activate_separation(separation.clone(), alias.clone()),
+    );
+    assert!(finish_neural_activation(&mut core, speech_response).is_success());
+    assert!(finish_neural_activation(&mut core, shared_separation).is_success());
+    let neural = &core.preferences.settings().neural;
+    assert_eq!(neural.speech_manifest, Some(speech));
+    assert_eq!(neural.separation_manifest.as_ref(), Some(&separation));
+    assert_eq!(neural.worker, alias);
+
+    let receipt = neural_activation_ack(
+        &mut core,
+        activate_speech(
+            other_speech,
+            Some(NeuralRuntime {
+                worker: replacement.clone(),
+                interpreter: speech_interpreter.into(),
+            }),
+        ),
+    );
+    assert!(
+        receipt
+            .error()
+            .unwrap()
+            .contains("replace the shared worker")
+    );
+
+    assert!(neural_activation_ack(&mut core, activate_speech(native.clone(), None)).is_success());
+    let neural = &core.preferences.settings().neural;
+    assert_eq!(neural.worker, alias);
+    assert_eq!(neural.speech_interpreter.as_path(), speech_interpreter);
+    assert!(
+        neural_activation_ack(
+            &mut core,
+            activate_separation(other_separation.clone(), replacement.clone()),
+        )
+        .is_success()
+    );
+    let neural = &core.preferences.settings().neural;
+    assert_eq!(neural.speech_manifest, Some(native));
+    assert_eq!(neural.separation_manifest, Some(other_separation));
+    assert_eq!(neural.worker, replacement);
+}
+
+#[test]
+fn neural_activation_rejects_python_manifest_without_its_bound_runtime() {
+    let (directory, mut core) = fixture();
+    let directory = directory.path().canonicalize().unwrap();
+    let manifest = directory.join("speech.json");
+    let worker = directory.join("worker.py");
+    let mismatched_worker = directory.join("other.py");
+    let interpreter = Path::new("/bin/sh");
+    for path in [&worker, &mismatched_worker] {
+        std::fs::write(path, "").unwrap();
+    }
+    write_activation_manifest(&manifest, "speech", &worker, interpreter);
+    let baseline = Arc::clone(core.preferences.settings());
+    for (runtime, expected) in [
+        (None, "does not match native speech activation"),
+        (
+            Some(NeuralRuntime {
+                worker: mismatched_worker,
+                interpreter: interpreter.into(),
+            }),
+            "differs from the provisioned model runtime",
+        ),
+    ] {
+        let receipt = neural_activation_ack(
+            &mut core,
+            Command::NeuralActivate {
+                activation: Box::new(NeuralActivation::Speech {
+                    manifest: manifest.clone(),
+                    runtime,
+                }),
+            },
+        );
+        assert!(receipt.error().unwrap().contains(expected));
+        assert!(Arc::ptr_eq(core.preferences.settings(), &baseline));
+        assert!(!core.state.configuration.config_path.exists());
+    }
+}
+
 #[test]
 fn audition_starts_original_queue_identity_without_creating_processed_tracks() {
     let (directory, mut core) = fixture();

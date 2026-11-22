@@ -7,6 +7,7 @@ pub(super) enum BusinessEvent {
     Scan(ScanEvent),
     Relocation(RelocationFinished),
     Processing(rivu_processing::Event),
+    NeuralActivation(Result<processing::CheckedNeuralActivation>),
     Export(Result<()>),
     ExternalAdmission(admission::Event),
     Optimization(Result<DatabaseOptimization>),
@@ -136,6 +137,7 @@ impl Core {
             active_optimization,
             active_source_tags,
             processing,
+            neural_activations,
             mpris_status,
             ..
         } = self;
@@ -152,6 +154,7 @@ impl Core {
             scan = scan_rx.recv().fuse() => BusinessEvent::Scan(scan.ok()?),
             relocation = relocation_rx.recv().fuse() => BusinessEvent::Relocation(relocation.ok()?),
             event = processing.receiver.recv().fuse() => BusinessEvent::Processing(event.ok()?),
+            result = neural_activations.next_finished().fuse() => BusinessEvent::NeuralActivation(result),
             _ = async {
                 if awaiting_ffmpeg {
                     audio::ffmpeg_load_completed().await;
@@ -229,6 +232,7 @@ impl Core {
                 self.resume_pending_scan();
             }
             BusinessEvent::Processing(event) => self.processing_event(event),
+            BusinessEvent::NeuralActivation(result) => self.finish_neural_activation(result),
             BusinessEvent::ExternalAdmission(event) => self.external_admission_event(event),
             BusinessEvent::Export(result) => {
                 let (reply, result) = self.finish_export(result);
@@ -499,6 +503,10 @@ impl Core {
                             .as_mut()
                             .expect("audition resume was accepted")
                             .reply = request.reply;
+                        return;
+                    }
+                    Ok(CommandExecution::DeferredNeuralActivation(activation)) => {
+                        self.queue_neural_activation(*activation, request.reply);
                         return;
                     }
                     Err(error) => Err(error.error),

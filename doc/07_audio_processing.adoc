@@ -487,9 +487,9 @@ with `--data-dir` or the bundle with `--directory PATH`. Existing bundles are
 never overwritten. Updates require a new bundle and its emitted paths. Results
 are JSON (`--json` selects compact output). The external installer's diagnostics
 are passed through to stderr as-is, even with `--json`.
-`--activate` submits the prepared paths through the running Core's neural-settings
-interface. It does not edit configuration directly, add graph nodes or start
-inference. Activation failure leaves the prepared bundle available.
+`--activate` asks the running Core to select the prepared model. Activation
+changes only the standalone settings for that model and its runtime. Activation
+failure leaves the prepared bundle available.
 Standalone Python operations share one worker setting; see
 <<python-worker-selection,worker selection>> before activating a different bundle.
 
@@ -595,13 +595,12 @@ and manifest from the preparation tools and selected environment. Use the
 emitted paths. Update Python bundles the same way instead of editing hashed
 files in place.
 
-Application inference accepts model manifests that are regular files or symlinks
-to them; FIFOs are rejected without waiting for a writer. This is an inference
-check, not a setup or offline provisioning guarantee. Python application inference
-uses worker protocol version 4 and requires Linux `pidfd_open` support and
-permission. Reprovision earlier bundles with updated tools and configure the
-emitted paths; inference does not rewrite them or fall back to another runtime.
-See link:26_audio_processing.adoc#runtime-contracts[Runtime contracts].
+Application inference and setup activation accept model manifests that are
+regular files or symlinks to them. Both reject FIFOs without waiting for a
+writer. Python application inference uses worker protocol version 4 and
+requires Linux `pidfd_open` support and permission. Reprovision earlier bundles
+with updated tools and configure the emitted paths. Inference uses the bound
+runtime. See link:26_audio_processing.adoc#runtime-contracts[Runtime contracts].
 Benchmark and corpus file adapters are separate from application inference;
 their output limits and evidence boundaries are documented in
 link:26_audio_processing.adoc#evidence-and-performance[Evidence and performance].
@@ -609,12 +608,14 @@ link:26_audio_processing.adoc#evidence-and-performance[Evidence and performance]
 [[python-worker-selection]]
 Standalone speech and separation share one worker setting, but each Python
 manifest is bound to its own bundle's worker. Sharing an interpreter does not
-make different bundle workers interchangeable. Two different bundle workers
-cannot be configured simultaneously for standalone Python operations. Activation
-rejects replacing the shared worker while the other Python backend is selected;
-clear that manifest explicitly before switching. Native ONNX speech does not
-consume this worker; graph nodes carry independent runtime settings. Replace
-all placeholder paths below with emitted paths from the corresponding preparation:
+make different bundle workers interchangeable. Both Python models can stay
+selected when they use the same worker. Core checks the prepared model's
+operation, backend and bound Python runtime before saving setup activation.
+If replacing the worker would invalidate the other selected Python model,
+Core rejects activation and preserves the active settings.
+Clear the other manifest explicitly to switch workers. Native ONNX speech does
+not consume this worker. Graph nodes carry independent runtime settings.
+Use the paths emitted by model preparation in place of the examples below.
 
 [source,shell]
 ----
