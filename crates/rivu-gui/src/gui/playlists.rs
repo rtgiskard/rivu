@@ -68,7 +68,10 @@ pub(in crate::gui) enum PlaylistEvent {
     ClearMenus,
     CancelInteraction,
     QueueReplace(RefCell<Option<crate::gui::coordination::queue_replace::QueueReplacement>>),
-    AppendPlaylist(i64),
+    AppendPlaylist {
+        id: i64,
+        revision: u64,
+    },
     ResolveLibrary(
         RefCell<Option<Vec<crate::gui::library::LibraryNode>>>,
         crate::gui::DragDestination,
@@ -572,9 +575,6 @@ impl Playlists {
     ) {
         cx.emit(PlaylistEvent::QueueReplace(RefCell::new(Some(replacement))));
     }
-    fn append_playlist_to_queue(&self, id: i64, cx: &mut Context<Self>) {
-        cx.emit(PlaylistEvent::AppendPlaylist(id));
-    }
     fn open_object_menu(
         &self,
         request: crate::gui::ContentMenuRequest,
@@ -902,15 +902,25 @@ impl Playlists {
                     )
                     .debug_selector(|| "playlist-row-play".into()),
                 )
-                .child(rivu_ui::menu_item(
-                    "playlist-row-queue",
-                    self.tr("li-queue"),
-                    cx,
-                    Self::playlist_action_callback(rendered_action, move |this, window, cx| {
-                        this.dismiss_playlist_action(window, cx);
-                        this.append_playlist_to_queue(id, cx);
-                    }),
-                ))
+                .child(
+                    rivu_ui::menu_item(
+                        "playlist-row-queue",
+                        self.tr("li-queue"),
+                        cx,
+                        Self::playlist_action_callback(rendered_action, move |this, window, cx| {
+                            this.dismiss_playlist_action(window, cx);
+                            if let Some(revision) = entry_revision {
+                                cx.emit(PlaylistEvent::AppendPlaylist { id, revision });
+                            } else {
+                                this.report_error(
+                                    this.i18n.text("li-source-changed").to_owned(),
+                                    cx,
+                                );
+                            }
+                        }),
+                    )
+                    .debug_selector(|| "playlist-row-queue".into()),
+                )
                 .child(rivu_ui::menu_separator(theme))
                 .child(rivu_ui::disabled_control(
                     theme,
@@ -2880,6 +2890,50 @@ mod content_menu_keyboard_tests {
             );
         })
         .unwrap();
+    }
+
+    #[gpui::test]
+    fn playlist_append_rejects_a_changed_rendered_revision(cx: &mut TestAppContext) {
+        let (_directory, runtime, _save, app, handle) = fixture(cx);
+        let append_position = |cx: &mut TestAppContext| {
+            open_row_menu(&app, 1, cx);
+            draw(handle, cx);
+            VisualTestContext::from_window(handle, cx)
+                .debug_bounds("playlist-row-queue")
+                .unwrap()
+                .center()
+        };
+        let stale_append = append_position(cx);
+        assert!(
+            futures::executor::block_on(runtime.handle.request_command(Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![1, 1],
+            }))
+            .is_success()
+        );
+        // The Core changes after rendering, without a new GUI frame.
+        click_row(handle, stale_append, cx);
+        app.read_with(cx, |app, cx| {
+            assert!(app.playlists.read(cx).playlist_action.is_none());
+            assert_eq!(app.error.as_deref(), Some("Source changed. Try again."));
+        });
+        let queue_total = || {
+            // Wait for any previously submitted command to finish.
+            assert!(
+                futures::executor::block_on(
+                    runtime
+                        .handle
+                        .request_command(Command::Volume { value: 0.0 }),
+                )
+                .is_success()
+            );
+            runtime.handle.gui_snapshot().queue.total
+        };
+        assert_eq!(queue_total(), 0);
+
+        let current_append = append_position(cx);
+        click_row(handle, current_append, cx);
+        assert_eq!(queue_total(), 2);
     }
 
     #[gpui::test]

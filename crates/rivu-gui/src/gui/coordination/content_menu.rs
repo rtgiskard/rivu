@@ -946,18 +946,22 @@ impl WindowView {
     pub(in crate::gui) fn append_playlist_to_queue(
         &mut self,
         playlist_id: i64,
+        revision: u64,
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        let Some(revision) = self
+        if self
             .state
             .library
             .playlist_entry_revisions
             .get(&playlist_id)
             .copied()
-        else {
+            != Some(revision)
+        {
+            self.error = Some(self.i18n.text("li-source-changed").to_owned());
+            cx.notify();
             return;
-        };
+        }
         self.send_content_collection(
             rivu_protocol::model::CollectionSource::Playlist {
                 playlist_id,

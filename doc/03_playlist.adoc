@@ -61,8 +61,9 @@ before reordering. Order survives restart, with new playlists appended; it does
 not affect tracks or Queue. A changed catalog rejects an in-progress drag.
 
 Hover a catalog row for Play and its actions menu; they target that row, not the
-selected playlist. Empty or unknown playlists leave Queue unchanged. Append
-rejects changed contents rather than copying a stale or partial list. See
+selected playlist. Empty or unknown playlists leave Queue unchanged. If the
+playlist's contents change after the Append action is displayed, nothing is
+added to Queue. Reopen the row menu and choose Append again. See
 link:04_playback.adoc#transport-and-timing[Playback] for Play, Append and confirmation.
 
 The row menu also offers Add current track, Remove duplicates, Rename, and Delete.

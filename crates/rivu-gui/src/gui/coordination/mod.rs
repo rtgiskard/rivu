@@ -291,7 +291,9 @@ impl WindowView {
                             this.request_queue_replace(replacement, cx);
                         }
                     }
-                    PlaylistEvent::AppendPlaylist(id) => this.append_playlist_to_queue(*id, cx),
+                    PlaylistEvent::AppendPlaylist { id, revision } => {
+                        this.append_playlist_to_queue(*id, *revision, cx);
+                    }
                     PlaylistEvent::ResolveLibrary(nodes, destination) => {
                         if let Some(nodes) = nodes.borrow_mut().take() {
                             this.library.update(cx, |owner, cx| {
