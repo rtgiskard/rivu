@@ -369,15 +369,6 @@ impl DirectoryTree {
         key: &TreeBranch,
         generation: u64,
         page: Page<DirectoryRow>,
-    ) -> bool {
-        self.accept_at(key, generation, page, Instant::now())
-    }
-
-    fn accept_at(
-        &mut self,
-        key: &TreeBranch,
-        generation: u64,
-        page: Page<DirectoryRow>,
         now: Instant,
     ) -> bool {
         let Some(branch) = self.branches.get_mut(key) else {
@@ -596,11 +587,7 @@ impl DirectoryTree {
     }
 
     /// Display-only: retained root geometry while refreshed forest rows remain visible.
-    pub(super) fn display_root_total(&self) -> Option<usize> {
-        self.display_root_total_at(Instant::now())
-    }
-
-    fn display_root_total_at(&self, now: Instant) -> Option<usize> {
+    pub(super) fn display_root_total(&self, now: Instant) -> Option<usize> {
         let forest = TreeBranch::default();
         let branch = self.branches.get(&forest)?;
         branch.total.or_else(|| {
@@ -614,7 +601,12 @@ impl DirectoryTree {
     }
 
     /// Only the optional tail changes; keep physical-root pages and expansions.
-    pub(super) fn sync_forest(&mut self, roots: &[PathBuf], other_tracks: bool) -> bool {
+    pub(super) fn sync_forest(
+        &mut self,
+        roots: &[PathBuf],
+        other_tracks: bool,
+        now: Instant,
+    ) -> bool {
         let total = roots.len() + usize::from(other_tracks);
         if self.root_total() == Some(total) {
             return false;
@@ -626,6 +618,7 @@ impl DirectoryTree {
             &forest,
             0,
             forest_page(roots, other_tracks, offset, self.page_size),
+            now,
         );
         if !other_tracks {
             let other = forest
@@ -713,11 +706,9 @@ impl DirectoryTree {
     }
 
     pub(super) fn refresh_deadline(&self) -> Option<Instant> {
-        self.pages
-            .values()
-            .any(|page| page.retained)
-            .then(|| self.retention.deadline())
-            .flatten()
+        self.retention
+            .deadline()
+            .filter(|_| self.pages.values().any(|page| page.retained))
     }
 
     fn settle_refresh(&mut self) {
@@ -1033,11 +1024,7 @@ impl DirectoryTree {
         self.item_at(index, None)
     }
 
-    pub(super) fn display_item(&self, index: usize) -> Option<TreeItem> {
-        self.display_item_at(index, Instant::now())
-    }
-
-    fn display_item_at(&self, index: usize, now: Instant) -> Option<TreeItem> {
+    pub(super) fn display_item(&self, index: usize, now: Instant) -> Option<TreeItem> {
         self.item_at(index, Some(now))
     }
 
@@ -1472,17 +1459,17 @@ mod tests {
         tree.refresh(start + Duration::from_millis(150));
         assert_eq!(tree.refresh_deadline(), Some(deadline));
         assert!(matches!(
-            tree.display_item_at(0, before),
+            tree.display_item(0, before),
             Some(TreeItem::Entry(_))
         ));
         assert!(matches!(tree.item(0), Some(TreeItem::Placeholder { .. })));
         assert_eq!(tree.root_total(), None);
         assert_eq!(
-            tree.display_root_total_at(before),
+            tree.display_root_total(before),
             Some(2),
             "the header keeps the retained count instead of flashing Loading"
         );
-        assert_eq!(tree.display_root_total_at(deadline), None);
+        assert_eq!(tree.display_root_total(deadline), None);
         assert!(!tree.row_matches(
             0,
             &super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/a")))
@@ -1492,11 +1479,11 @@ mod tests {
         tree.defer_selection(0);
         assert!(tree.ready_selection().is_none());
         assert_eq!(tree.requests_for_range(0..2), vec![(forest.clone(), 0)]);
-        assert!(!tree.accept_at(&forest, 1, page(&["/late"], 1), start));
+        assert!(!tree.accept(&forest, 1, page(&["/late"], 1), start));
         tree.begin(forest.clone(), 0, 2);
         assert!(!tree.expire_refresh(before));
         assert!(matches!(
-            tree.display_item_at(0, deadline),
+            tree.display_item(0, deadline),
             Some(TreeItem::Placeholder { .. })
         ));
         assert!(tree.expire_refresh(deadline));
@@ -1506,7 +1493,7 @@ mod tests {
         );
         assert_eq!(tree.row_count(), 2);
         assert!(tree.refresh_deadline().is_none());
-        assert!(tree.accept_at(
+        assert!(tree.accept(
             &forest,
             2,
             page(&["/new"], 1),
@@ -1539,7 +1526,7 @@ mod tests {
             let page = page(&paths, total);
             let pointer = page.rows.as_ptr();
             tree.begin(forest.clone(), 0, index as u64 + 2);
-            assert!(tree.accept_at(
+            assert!(tree.accept(
                 &forest,
                 index as u64 + 2,
                 page,
@@ -1565,7 +1552,7 @@ mod tests {
         accept(&mut tree, &forest, 1, 2, &["/b"], 2);
         tree.refresh(start);
         tree.begin(forest.clone(), 0, 3);
-        assert!(tree.accept_at(
+        assert!(tree.accept(
             &forest,
             3,
             page(&["/a"], 2),
@@ -1579,7 +1566,7 @@ mod tests {
         assert!(tree.expire_refresh(start + Duration::from_millis(200)));
         for index in 0..2 {
             assert!(matches!(
-                tree.display_item_at(index, start + Duration::from_millis(200)),
+                tree.display_item(index, start + Duration::from_millis(200)),
                 Some(TreeItem::Placeholder { .. })
             ));
         }
@@ -1589,14 +1576,14 @@ mod tests {
             "expired pages must not revive"
         );
         tree.begin(forest.clone(), 0, 4);
-        assert!(tree.accept_at(
+        assert!(tree.accept(
             &forest,
             4,
             page(&["/fresh"], 2),
             start + Duration::from_secs(1)
         ));
         assert!(matches!(
-            tree.display_item_at(0, start + Duration::from_secs(1)),
+            tree.display_item(0, start + Duration::from_secs(1)),
             Some(TreeItem::Entry(_))
         ));
         tree.refresh(start + Duration::from_secs(1));
@@ -1604,7 +1591,7 @@ mod tests {
         assert!(tree.pages.values().all(|page| page.rows.is_empty()));
         for (offset, token) in [(0, 5), (1, 6)] {
             tree.begin(forest.clone(), offset, token);
-            assert!(tree.accept_at(
+            assert!(tree.accept(
                 &forest,
                 token,
                 page(&["/fresh"], 2),
@@ -1649,7 +1636,8 @@ mod tests {
                     },
                     bitrate_track(7)
                 ],
-            }
+            },
+            Instant::now(),
         ));
         let selected = super::super::LibraryNode::Track(7);
         tree.focus_selection(&selected, 2);
@@ -1659,11 +1647,11 @@ mod tests {
         let deadline = tree.refresh_deadline().unwrap();
         assert!(!tree.invalidate_payloads_at(start + std::time::Duration::from_millis(150)));
         assert!(matches!(
-            tree.display_item_at(2, deadline - std::time::Duration::from_nanos(1)),
+            tree.display_item(2, deadline - std::time::Duration::from_nanos(1)),
             Some(TreeItem::Entry(_))
         ));
         assert!(matches!(
-            tree.display_item_at(2, deadline),
+            tree.display_item(2, deadline),
             Some(TreeItem::Placeholder { .. })
         ));
         assert_eq!(tree.root_total(), Some(1));
@@ -1693,7 +1681,8 @@ mod tests {
                     },
                     bitrate_track(7)
                 ],
-            }
+            },
+            Instant::now(),
         ));
         assert!(tree.cached_row(&root, 1).is_some());
         assert_eq!(tree.selected_index(), Some(2));
@@ -1743,11 +1732,11 @@ mod tests {
         let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
         let forest = TreeBranch::default();
         tree.begin(forest.clone(), 0, 1);
-        tree.accept(&forest, 1, forest_page(&roots, true, 0, 2));
-        assert!(tree.sync_forest(&roots, false));
+        tree.accept(&forest, 1, forest_page(&roots, true, 0, 2), Instant::now());
+        assert!(tree.sync_forest(&roots, false, Instant::now()));
         assert!(tree.cached_rows(&forest, 0..2).is_some());
         assert_eq!(tree.root_total(), Some(2));
-        assert!(tree.sync_forest(&roots, true));
+        assert!(tree.sync_forest(&roots, true, Instant::now()));
         let TreeItem::Entry(entry) = tree.item(2).unwrap() else {
             panic!("Other follows the last root across a page boundary");
         };
@@ -1756,13 +1745,13 @@ mod tests {
         tree.begin(other.clone(), 0, 2);
         let selected = super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/b")));
         tree.focus_selection(&selected, 1);
-        assert!(tree.sync_forest(&roots, false));
+        assert!(tree.sync_forest(&roots, false, Instant::now()));
         assert!(!tree.request_pending(&other, 2));
         assert_eq!(tree.selected_index(), Some(1));
         assert_eq!(tree.row_count(), 2);
         assert!(tree.cached_rows(&forest, 0..2).is_some());
-        assert!(!tree.accept(&other, 2, page(&[], 0)));
-        assert!(!tree.sync_forest(&roots, false));
+        assert!(!tree.accept(&other, 2, page(&[], 0), Instant::now()));
+        assert!(!tree.sync_forest(&roots, false, Instant::now()));
     }
 
     fn branch(path: &str) -> TreeBranch {
@@ -1802,7 +1791,7 @@ mod tests {
         total: usize,
     ) {
         tree.begin(key.clone(), offset, generation);
-        assert!(tree.accept(key, generation, page(paths, total)));
+        assert!(tree.accept(key, generation, page(paths, total), Instant::now()));
     }
 
     #[test]
@@ -1839,11 +1828,11 @@ mod tests {
         assert_eq!(tree.row_count(), 4);
         assert_eq!(tree.requests_for_range(0..2), Vec::new());
         assert_eq!(tree.requests_for_range(2..4), vec![(forest.clone(), 2)]);
-        assert!(!tree.accept(&forest, 2, page(&["/old", "/stale"], 4)));
+        assert!(!tree.accept(&forest, 2, page(&["/old", "/stale"], 4), Instant::now()));
 
         tree.begin(forest.clone(), 2, 3);
         tree.cancel_request(&forest, 2);
-        assert!(tree.accept(&forest, 3, page(&["/c", "/d"], 4)));
+        assert!(tree.accept(&forest, 3, page(&["/c", "/d"], 4), Instant::now()));
         assert!(tree.requests_for_range(0..4).is_empty());
 
         tree.begin(forest.clone(), 2, 4);
@@ -1855,7 +1844,7 @@ mod tests {
         assert_eq!(tree.status(&forest), BranchStatus::Error);
         assert_eq!(tree.projection_revision(), revision);
         assert!(tree.requests_for_range(0..4).is_empty());
-        assert!(!tree.accept(&branch("/a"), 5, page(&["/a/stale"], 1)));
+        assert!(!tree.accept(&branch("/a"), 5, page(&["/a/stale"], 1), Instant::now()));
     }
 
     #[test]
@@ -1897,7 +1886,7 @@ mod tests {
         assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
         assert!(matches!(tree.item(1), Some(TreeItem::Entry(_))));
         assert_eq!(tree.requests_for_range(2..3), vec![(nested, 0)]);
-        assert!(!tree.accept(&forest, 6, page(&["/stale"], 1)));
+        assert!(!tree.accept(&forest, 6, page(&["/stale"], 1), Instant::now()));
         assert!(!tree.configure_page_size(3));
     }
 
@@ -1956,7 +1945,7 @@ mod tests {
             branch: key, offset: 0, depth: 0, status: BranchStatus::Loading,
         }) if key == forest));
         assert!(tree.requests_for_range(0..1).is_empty());
-        assert!(tree.accept(&forest, 1, page(&[], 0)));
+        assert!(tree.accept(&forest, 1, page(&[], 0), Instant::now()));
         assert_eq!(tree.row_count(), 0);
         assert_eq!(tree.status(&forest), BranchStatus::Empty);
         assert!(tree.item(0).is_none());
@@ -1991,7 +1980,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(tree.accept(&forest, 3, page(&["/a"], 1)));
+        assert!(tree.accept(&forest, 3, page(&["/a"], 1), Instant::now()));
         assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
         assert!(tree.requests_for_range(0..1).is_empty());
         tree.clear();
@@ -2052,14 +2041,14 @@ mod tests {
             tree.retry(&root);
             assert_eq!(tree.requests_for_range(1..2), vec![(root.clone(), 0)]);
             tree.begin(root.clone(), 0, 3);
-            assert!(!tree.accept(&root, 2, page(&["/a/stale"], 1)));
+            assert!(!tree.accept(&root, 2, page(&["/a/stale"], 1), Instant::now()));
             assert_eq!(tree.status(&root), BranchStatus::Loading);
             assert_eq!(tree.row_count(), 2);
             assert_eq!(tree.selected_index(), Some(0));
             assert_eq!(tree.parent_index(1), Some(0));
             assert_eq!(tree.projection_revision(), revision);
             let paths: &[&str] = if empty { &[] } else { &["/a/target"] };
-            assert!(tree.accept(&root, 3, page(paths, paths.len())));
+            assert!(tree.accept(&root, 3, page(paths, paths.len()), Instant::now()));
             let status = if empty {
                 BranchStatus::Empty
             } else {
@@ -2230,16 +2219,16 @@ mod tests {
         let mut tree = DirectoryTree::default();
         tree.begin(branch(""), 0, 1);
         tree.begin(branch(""), 0, 2);
-        assert!(!tree.accept(&branch(""), 1, page(&["/stale"], 1)));
+        assert!(!tree.accept(&branch(""), 1, page(&["/stale"], 1), Instant::now()));
         tree.fail(&branch(""), 2);
         assert!(tree.requests_for_range(0..1).is_empty());
         accept(&mut tree, &branch(""), 0, 3, &["/a"], 1);
         tree.expand(&branch("/a"));
         tree.begin(branch("/a"), 0, 4);
         tree.collapse(&branch("/a"));
-        assert!(!tree.accept(&branch("/a"), 4, page(&["/a/stale"], 1)));
+        assert!(!tree.accept(&branch("/a"), 4, page(&["/a/stale"], 1), Instant::now()));
         tree.invalidate();
-        assert!(!tree.accept(&branch(""), 3, page(&["/stale"], 1)));
+        assert!(!tree.accept(&branch(""), 3, page(&["/stale"], 1), Instant::now()));
         assert!(!tree.expanded(&branch("/a")));
     }
 
@@ -2334,6 +2323,7 @@ mod tests {
                     },
                 ],
             },
+            Instant::now(),
         ));
         assert_eq!(
             tree.selected_locations,
@@ -2480,8 +2470,8 @@ mod tests {
         tree.begin(overlap.clone(), 0, 4);
         assert!(tree.request_pending(&nested, 3));
         assert!(tree.request_pending(&overlap, 4));
-        assert!(tree.accept(&nested, 3, page(&["/music/sub/first"], 1)));
-        assert!(tree.accept(&overlap, 4, page(&["/music/sub/second"], 1)));
+        assert!(tree.accept(&nested, 3, page(&["/music/sub/first"], 1), Instant::now()));
+        assert!(tree.accept(&overlap, 4, page(&["/music/sub/second"], 1), Instant::now()));
         accept(&mut tree, &empty, 0, 5, &[], 0);
         assert_eq!(tree.root_total(), Some(4));
         assert_eq!(tree.row_count(), 7);
@@ -2501,8 +2491,8 @@ mod tests {
             }))
         ));
         tree.invalidate();
-        assert!(!tree.accept(&nested, 3, page(&["/stale"], 1)));
-        assert!(!tree.accept(&overlap, 4, page(&["/stale"], 1)));
+        assert!(!tree.accept(&nested, 3, page(&["/stale"], 1), Instant::now()));
+        assert!(!tree.accept(&overlap, 4, page(&["/stale"], 1), Instant::now()));
         tree.begin(overlap.clone(), 0, 6);
         tree.fail(&overlap, 6);
         tree.retry(&overlap);
@@ -2669,7 +2659,7 @@ mod tests {
             assert!(!tree.branches.contains_key(&child));
             assert_eq!(tree.branches.len(), 2);
             assert!(!tree.request_pending(&child, generation + 2));
-            assert!(!tree.accept(&child, generation + 2, page(&["/stale"], 1)));
+            assert!(!tree.accept(&child, generation + 2, page(&["/stale"], 1), Instant::now()));
             tree.fail(&child, generation + 2);
             assert!(!tree.branches.contains_key(&child));
             assert!(tree.pages.len() <= MAX_CACHED_PAGES);
@@ -2679,11 +2669,16 @@ mod tests {
         let child = branch("/a/visited-127");
         tree.expand(&child);
         tree.begin(child.clone(), 0, 1_000);
-        assert!(!tree.accept(&child, 393, page(&["/stale"], 1)));
+        assert!(!tree.accept(&child, 393, page(&["/stale"], 1), Instant::now()));
         tree.fail(&child, 393);
         tree.cancel_request(&child, 393);
         assert!(tree.request_pending(&child, 1_000));
-        assert!(tree.accept(&child, 1_000, page(&["/a/visited-127/current"], 1)));
+        assert!(tree.accept(
+            &child,
+            1_000,
+            page(&["/a/visited-127/current"], 1),
+            Instant::now()
+        ));
         assert!(matches!(tree.item(129), Some(TreeItem::Entry(row))
             if matches!(row.row, DirectoryRow::Directory { ref path }
                 if path == Path::new("/a/visited-127/current"))));
@@ -2703,17 +2698,17 @@ mod tests {
             if index % 2 == 0 {
                 tree.fail(&key, index + 10);
             } else {
-                assert!(tree.accept(&key, index + 10, page(&[], 0)));
+                assert!(tree.accept(&key, index + 10, page(&[], 0), Instant::now()));
             }
             assert!(tree.request_pending(&pending, 1));
             assert!(tree.branches.len() <= MAX_CACHED_PAGES + 1);
         }
         let evicted = branch("/visited-0");
         assert!(!tree.branches.contains_key(&evicted));
-        assert!(!tree.accept(&evicted, 10, page(&["/stale"], 1)));
+        assert!(!tree.accept(&evicted, 10, page(&["/stale"], 1), Instant::now()));
         tree.fail(&evicted, 10);
         assert!(!tree.branches.contains_key(&evicted));
-        assert!(tree.accept(&pending, 1, page(&[], 0)));
+        assert!(tree.accept(&pending, 1, page(&[], 0), Instant::now()));
 
         let failed = branch("/failed");
         tree.begin(failed.clone(), 0, 100);
@@ -2735,7 +2730,7 @@ mod tests {
         tree.cancel_pending();
         assert!(tree.branches.is_empty());
         assert!(tree.branches.capacity() <= 64);
-        assert!(!tree.accept(&branch("/pending-0"), 1_000, page(&[], 0)));
+        assert!(!tree.accept(&branch("/pending-0"), 1_000, page(&[], 0), Instant::now()));
     }
 
     #[test]
@@ -2760,7 +2755,7 @@ mod tests {
         tree.begin(nested.clone(), 1, 6);
         tree.collapse(&root);
         assert!(!tree.request_pending(&nested, 6));
-        assert!(!tree.accept(&nested, 6, page(&["/stale"], 2)));
+        assert!(!tree.accept(&nested, 6, page(&["/stale"], 2), Instant::now()));
         for index in 2..40 {
             accept(
                 &mut tree,

@@ -4,7 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Context, Task};
+use gpui::Context;
+
+use crate::deadline::DeadlineWake;
 
 struct PendingText {
     token: u64,
@@ -17,8 +19,7 @@ struct PendingText {
 pub struct LoadingText<K> {
     delay: Duration,
     pending: HashMap<K, PendingText>,
-    timer: Option<Task<()>>,
-    wake_at: Option<Instant>,
+    wake: DeadlineWake,
 }
 
 impl<K> LoadingText<K> {
@@ -26,8 +27,7 @@ impl<K> LoadingText<K> {
         Self {
             delay,
             pending: HashMap::new(),
-            timer: None,
-            wake_at: None,
+            wake: DeadlineWake::default(),
         }
     }
 }
@@ -68,8 +68,7 @@ impl<K: Eq + Hash + 'static> LoadingText<K> {
 
     pub fn clear(&mut self) {
         self.pending.clear();
-        self.timer = None;
-        self.wake_at = None;
+        self.wake.cancel();
     }
 
     pub fn show(&self, owner: &K, failed: bool) -> bool {
@@ -80,60 +79,62 @@ impl<K: Eq + Hash + 'static> LoadingText<K> {
                 .is_some_and(|pending| pending.visible)
     }
 
-    fn advance(&mut self, now: Instant) -> Option<Instant> {
+    fn advance(&mut self, now: Instant) -> (Option<Instant>, bool) {
         let mut next = None;
+        let mut changed = false;
         for pending in self.pending.values_mut() {
+            if pending.visible {
+                continue;
+            }
             if pending.ready_at <= now {
                 pending.visible = true;
+                changed = true;
             } else {
                 next = Some(next.map_or(pending.ready_at, |deadline: Instant| {
                     deadline.min(pending.ready_at)
                 }));
             }
         }
-        next
+        (next, changed)
     }
 
     pub fn schedule<T: 'static>(
         &mut self,
         cx: &mut Context<T>,
-        locate: impl Fn(&mut T) -> &mut Self + Clone + 'static,
+        locate: impl Fn(&mut T) -> &mut Self + 'static,
     ) {
+        let now = cx.background_executor().now();
         let next = self
             .pending
             .values()
             .filter(|pending| !pending.visible)
             .map(|pending| pending.ready_at)
             .min();
-        if self.wake_at == next {
+        if self.wake.is_armed_for(next) {
             return;
         }
-        self.timer = None;
-        self.wake_at = None;
-        if next.is_none() {
-            return;
-        }
-        let now = Instant::now();
-        let Some(deadline) = self.advance(now) else {
-            return;
+        let next = if next.is_some_and(|at| at <= now) {
+            self.advance(now).0
+        } else {
+            next
         };
-        self.wake_at = Some(deadline);
-        let timer = cx
-            .background_executor()
-            .timer(deadline.saturating_duration_since(now));
-        self.timer = Some(cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |this, cx| {
-                let loading = locate(this);
-                if loading.wake_at != Some(deadline) {
-                    return;
-                }
-                loading.timer = None;
-                loading.wake_at = None;
-                loading.schedule(cx, locate.clone());
+        self.arm(next, cx, locate);
+    }
+
+    fn arm<T: 'static>(
+        &mut self,
+        next: Option<Instant>,
+        cx: &mut Context<T>,
+        locate: impl Fn(&mut T) -> &mut Self + 'static,
+    ) {
+        self.wake.arm(next, cx, move |this, now, cx| {
+            let loading = locate(this);
+            let (next, changed) = loading.advance(now);
+            loading.arm(next, cx, locate);
+            if changed {
                 cx.notify();
-            });
-        }));
+            }
+        });
     }
 }
 
@@ -151,7 +152,7 @@ mod tests {
         assert!(!text.show(&"rows", false));
         assert!(text.show(&"rows", true));
         text.finish(&"rows", 1);
-        assert_eq!(text.advance(start + LOADING_TEXT_DELAY), None);
+        assert_eq!(text.advance(start + LOADING_TEXT_DELAY), (None, false));
         assert!(!text.show(&"rows", false));
         assert!(text.show(&"rows", true));
     }
@@ -165,12 +166,15 @@ mod tests {
         text.finish(&"rows", 1);
         assert_eq!(
             text.advance(start + LOADING_TEXT_DELAY),
-            Some(start + Duration::from_millis(250))
+            (Some(start + Duration::from_millis(250)), false)
         );
         assert!(!text.show(&"rows", false));
         // Re-dispatching the same logical request must not perpetually reset its clock.
         text.begin("rows", 2, start + Duration::from_millis(200));
-        assert_eq!(text.advance(start + Duration::from_millis(250)), None);
+        assert_eq!(
+            text.advance(start + Duration::from_millis(250)),
+            (None, true)
+        );
         assert!(text.show(&"rows", false));
     }
 
@@ -180,15 +184,18 @@ mod tests {
         let mut text = LoadingText::new(LOADING_TEXT_DELAY);
         text.begin("catalog", 1, start);
         text.begin("entries", 2, start + Duration::from_millis(50));
-        assert_eq!(text.advance(start), Some(start + LOADING_TEXT_DELAY));
+        assert_eq!(
+            text.advance(start),
+            (Some(start + LOADING_TEXT_DELAY), false)
+        );
         assert_eq!(
             text.advance(start + LOADING_TEXT_DELAY),
-            Some(start + Duration::from_millis(200))
+            (Some(start + Duration::from_millis(200)), true)
         );
         assert!(text.show(&"catalog", false));
         assert!(!text.show(&"entries", false));
         text.retain(|_, _| false);
-        assert_eq!(text.advance(start + Duration::from_secs(1)), None);
+        assert_eq!(text.advance(start + Duration::from_secs(1)), (None, false));
         assert!(!text.show(&"catalog", false));
         assert!(!text.show(&"entries", false));
     }

@@ -45,12 +45,9 @@ impl<T> PagedRows<T> {
         self.total
     }
     /// Display-only: retained geometry while stale rows remain visible; never authorizes.
-    pub(super) fn display_total(&self) -> Option<usize> {
-        self.display_total_with_clock(Instant::now)
-    }
-    fn display_total_with_clock(&self, now: impl FnOnce() -> Instant) -> Option<usize> {
+    pub(super) fn display_total(&self, now: Instant) -> Option<usize> {
         self.total.or_else(|| {
-            (!self.retained.is_empty() && self.retention.visible(now())).then_some(self.layout_len)
+            (!self.retained.is_empty() && self.retention.visible(now)).then_some(self.layout_len)
         })
     }
     pub(super) fn len(&self) -> usize {
@@ -67,18 +64,11 @@ impl<T> PagedRows<T> {
         let offset = index / self.page_size * self.page_size;
         self.pages.get(&offset)?.get(index - offset)
     }
-    pub(super) fn display(&self, index: usize) -> Option<&T> {
-        self.display_with_clock(index, Instant::now)
-    }
-    fn display_with_clock(&self, index: usize, now: impl FnOnce() -> Instant) -> Option<&T> {
+    pub(super) fn display(&self, index: usize, now: Instant) -> Option<&T> {
         if index >= self.len() {
             return None;
         }
-        self.get(index).or_else(|| self.retained_at(index, now()))
-    }
-    #[cfg(test)]
-    pub(super) fn display_at(&self, index: usize, now: Instant) -> Option<&T> {
-        self.display_with_clock(index, || now)
+        self.get(index).or_else(|| self.retained_at(index, now))
     }
     fn retained_at(&self, index: usize, now: Instant) -> Option<&T> {
         if !self.retention.visible(now) {
@@ -107,28 +97,12 @@ impl<T> PagedRows<T> {
         *self = Self::default();
     }
     /// Keep only viewport presentation; get/iter/position remain authoritative.
-    pub(super) fn invalidate(&mut self) {
-        self.refresh_at(Instant::now());
-    }
     pub(super) fn refresh_at(&mut self, now: Instant) {
-        self.expire(now);
-        self.retention.begin(now);
-        if self.retention.visible(now) {
-            self.retained.append(&mut self.pages);
-        } else {
-            self.pages.clear();
-        }
-        self.retired = false;
         self.total = None;
         self.layout_len = self.layout_len.max(1);
-        if self.visible.is_empty() {
-            self.visible = 0..1;
-        }
         // A data revision can reorder IDs; a positional pin is no longer authoritative.
         self.pinned = None;
-        self.pending = None;
-        self.failures.clear();
-        self.trim_retained();
+        self.invalidate_payload(now);
     }
     pub(super) fn refresh_deadline(&self) -> Option<Instant> {
         self.retention.deadline()
@@ -149,12 +123,21 @@ impl<T> PagedRows<T> {
         self.failures.clear();
     }
     /// Retain stale technical fields briefly without changing list identity or geometry.
-    pub(super) fn invalidate_payload(&mut self) {
-        let (total, layout_len, pinned) = (self.total, self.layout_len, self.pinned);
-        self.invalidate();
-        self.total = total;
-        self.layout_len = layout_len;
-        self.pinned = pinned;
+    pub(super) fn invalidate_payload(&mut self, now: Instant) {
+        self.expire(now);
+        self.retention.begin(now);
+        if self.retention.visible(now) {
+            self.retained.append(&mut self.pages);
+        } else {
+            self.pages.clear();
+        }
+        self.retired = false;
+        self.pending = None;
+        if self.visible.is_empty() {
+            self.visible = 0..1;
+        }
+        self.failures.clear();
+        self.trim_retained();
     }
     /// Change batch boundaries without invalidating current counts or selection position.
     pub(super) fn configure_page_size(&mut self, page_size: usize) {
@@ -324,13 +307,13 @@ mod tests {
         rows.retry();
         assert_eq!(rows.refresh_deadline(), Some(deadline));
         assert_eq!(
-            rows.display_at(0, deadline - std::time::Duration::from_nanos(1)),
+            rows.display(0, deadline - std::time::Duration::from_nanos(1)),
             Some(&0)
         );
         assert_eq!(rows.get(0), None);
         assert_eq!(rows.position(|row| *row == 0), None);
         assert_eq!(rows.iter().next(), None);
-        assert_eq!(rows.display_at(0, deadline), None);
+        assert_eq!(rows.display(0, deadline), None);
         rows.begin(0, 20);
         assert!(!rows.accept_at(
             rivu_protocol::model::Page {
@@ -348,7 +331,7 @@ mod tests {
             },
             now
         ));
-        assert_eq!(rows.display_at(0, now), Some(&19));
+        assert_eq!(rows.display(0, now), Some(&19));
         rows.refresh_at(now);
         assert!(rows.expire(deadline));
         assert!(!rows.expire(deadline));
@@ -362,7 +345,7 @@ mod tests {
         rows.refresh_at(now);
         rows.begin(0, 20);
         rows.fail("offline".into());
-        assert_eq!(rows.display_at(0, now), None);
+        assert_eq!(rows.display(0, now), None);
         assert_eq!(rows.error(0), Some("offline"));
         rows.retry();
         assert_eq!(
@@ -388,19 +371,19 @@ mod tests {
                 now
             ));
             assert_eq!(rows.total(), Some(total));
-            assert_eq!(rows.display_at(0, now), (total > 0).then_some(&0));
-            assert_eq!(rows.display_at(1, now), None);
+            assert_eq!(rows.display(0, now), (total > 0).then_some(&0));
+            assert_eq!(rows.display(1, now), None);
         }
 
         fill(&mut rows, 0, 100);
         rows.refresh_at(now);
         rows.clear();
-        assert_eq!(rows.display_at(3, now), None, "query reset");
+        assert_eq!(rows.display(3, now), None, "query reset");
         fill(&mut rows, 0, 100);
         rows.refresh_at(now);
         rows.begin(0, 20);
         rows.retire_pending();
-        assert_eq!(rows.display_at(3, now), None, "rejected snapshot");
+        assert_eq!(rows.display(3, now), None, "rejected snapshot");
     }
 
     use super::*;
@@ -431,12 +414,12 @@ mod tests {
             },
             deadline
         ));
-        assert_eq!(rows.display_at(0, deadline), Some(&0));
-        assert_eq!(rows.display_at(20, deadline), None);
+        assert_eq!(rows.display(0, deadline), Some(&0));
+        assert_eq!(rows.display(20, deadline), None);
         rows.refresh_at(deadline);
         assert_eq!(rows.refresh_deadline(), None);
         assert!(rows.retained.is_empty());
-        assert_eq!(rows.display_at(0, deadline), None);
+        assert_eq!(rows.display(0, deadline), None);
 
         for offset in [0, 20] {
             rows.begin(offset, 20);
@@ -453,8 +436,8 @@ mod tests {
             rows.refresh_deadline(),
             Some(deadline + rivu_presentation::refresh::REFRESH_RETENTION)
         );
-        assert_eq!(rows.display_at(0, deadline), Some(&0));
-        assert_eq!(rows.display_at(20, deadline), Some(&20));
+        assert_eq!(rows.display(0, deadline), Some(&0));
+        assert_eq!(rows.display(20, deadline), Some(&20));
     }
 
     #[test]
@@ -465,14 +448,14 @@ mod tests {
         fill(&mut rows, 20, 100);
         rows.demand(0..30, 20);
         rows.refresh_at(now);
-        assert_eq!(rows.display_at(3, now), Some(&3));
-        assert_eq!(rows.display_at(23, now), Some(&23));
+        assert_eq!(rows.display(3, now), Some(&3));
+        assert_eq!(rows.display(23, now), Some(&23));
         assert_eq!(rows.get(3), None);
         assert_eq!(rows.iter().next(), None);
         assert_eq!(rows.position(|row| *row == 3), None);
         assert_eq!(rows.total(), None);
         assert_eq!(
-            rows.display_total_with_clock(|| now),
+            rows.display_total(now),
             Some(100),
             "count stays with retained rows"
         );
@@ -485,16 +468,16 @@ mod tests {
             },
             now,
         );
-        assert_eq!(rows.display_at(3, now), Some(&103));
-        assert_eq!(rows.display_at(23, now), Some(&23));
+        assert_eq!(rows.display(3, now), Some(&103));
+        assert_eq!(rows.display(23, now), Some(&23));
         rows.refresh_at(now);
-        assert_eq!(rows.display_at(3, now), Some(&103));
-        assert_eq!(rows.display_at(23, now), Some(&23));
+        assert_eq!(rows.display(3, now), Some(&103));
+        assert_eq!(rows.display(23, now), Some(&23));
         assert_eq!(rows.demand(60..70, 20), Some(60));
-        assert_eq!(rows.display_at(3, now), None);
-        assert_eq!(rows.display_at(23, now), None);
+        assert_eq!(rows.display(3, now), None);
+        assert_eq!(rows.display(23, now), None);
         assert_eq!(
-            rows.display_total_with_clock(|| now),
+            rows.display_total(now),
             None,
             "count leaves with the last retained row"
         );
@@ -516,7 +499,7 @@ mod tests {
         assert_eq!(rows.demand(20..40, 10), Some(20));
         rows.begin(20, 10);
         rows.retire_pending();
-        rows.invalidate();
+        rows.refresh_at(Instant::now());
         assert_eq!(rows.demand(20..40, 10), Some(20));
     }
 
@@ -528,7 +511,7 @@ mod tests {
             if total > 0 {
                 rows.demand(80..90, 20);
             }
-            rows.invalidate();
+            rows.refresh_at(Instant::now());
             assert_eq!(rows.total(), None);
             assert_eq!(rows.len(), total.max(1));
             let offset = if total == 0 { 0 } else { 80 };
@@ -548,7 +531,7 @@ mod tests {
         assert!(rows.is_empty());
         assert_eq!(rows.demand(0..1, 25), None);
 
-        rows.invalidate();
+        rows.refresh_at(Instant::now());
         rows.configure_page_size(30);
         assert_eq!(rows.total(), None);
         assert_eq!(rows.demand(rows.visible(), 30), Some(0));
@@ -598,7 +581,7 @@ mod tests {
         fill(&mut rows, 199_980, 200_000);
         assert_eq!(rows.get(199_999), Some(&199_999));
         assert_eq!(rows.position(|row| *row == 199_999), Some(199_999));
-        rows.invalidate();
+        rows.refresh_at(Instant::now());
         rows.set_total(3);
         assert_eq!(rows.get(199_999), None);
         assert_eq!(rows.demand(199_990..200_000, 20), Some(0));
@@ -652,7 +635,7 @@ mod tests {
         let mut rows = PagedRows::default();
         fill(&mut rows, 180, 400);
         rows.pin(Some(183));
-        rows.invalidate();
+        rows.refresh_at(Instant::now());
         rows.begin(0, 20);
         rows.accept(Page {
             total: 400,
@@ -699,7 +682,7 @@ mod tests {
         let mut rows = PagedRows::default();
         fill(&mut rows, 80, 100);
         rows.demand(80..90, 20);
-        rows.invalidate();
+        rows.refresh_at(Instant::now());
         fill(&mut rows, 80, 7);
         assert_eq!(rows.len(), 7);
         assert_eq!(rows.get(80), None);

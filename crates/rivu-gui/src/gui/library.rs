@@ -45,7 +45,7 @@ use gpui::{App, Context, SharedString, Window, prelude::*};
 use rivu_protocol::model::{Command, DirectoryRow};
 use rivu_ui::search::{SearchEvent, SearchSubmitted};
 use std::path::Path;
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use tree::TreeItem;
 pub(super) use tree::{BranchStatus, DirectoryTree, TreeBranch};
@@ -145,11 +145,13 @@ impl Library {
                 }
             });
         let mut library = LibraryBrowser::default();
+        let now = cx.background_executor().now();
         library.refresh_tree(state.system.config.query_batch_size as usize);
-        library.sync_projection(state.query_revisions(None));
+        library.sync_projection(state.query_revisions(None), now);
         library.sync_root_counts(
             &state.system.config.library_roots,
             state.library.structure_revision,
+            now,
         );
         Self {
             context,
@@ -171,7 +173,7 @@ impl Library {
     }
 
     pub(in crate::gui) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
-        let now = Instant::now();
+        let now = cx.background_executor().now();
         // Expiry can change cached presentation without changing query authority.
         let expired = self.library.expire_refresh(now);
         let display_changed = display_changed(&self.state, &state);
@@ -184,7 +186,7 @@ impl Library {
             .refresh_tree(state.system.config.query_batch_size as usize);
         let projection_changed = self
             .library
-            .sync_projection_at(state.query_revisions(None), now);
+            .sync_projection(state.query_revisions(None), now);
         if projection_changed {
             self.requests.cancel_directory_demand();
         }
@@ -216,15 +218,19 @@ impl Library {
     }
 
     fn schedule_refresh_wake(&mut self, cx: &mut Context<Self>) {
-        self.refresh_wake
-            .schedule(self.library.refresh_deadline(), cx, |this, now, cx| {
+        rivu_ui::refresh::RefreshWake::sync(
+            self,
+            cx,
+            |this| &mut this.refresh_wake,
+            |this| this.library.refresh_deadline(),
+            |this, now, cx| {
                 let changed = this.library.expire_refresh(now);
                 if changed {
                     this.sync_search_caption(cx);
                 }
-                this.schedule_refresh_wake(cx);
                 changed
-            });
+            },
+        );
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -393,7 +399,8 @@ impl Library {
         token: u64,
         cx: &mut Context<Self>,
     ) {
-        self.loading_text.begin(branch, token, Instant::now());
+        self.loading_text
+            .begin(branch, token, cx.background_executor().now());
         self.loading_text
             .schedule(cx, |this| &mut this.loading_text);
     }
@@ -734,9 +741,9 @@ mod library_root_tests {
         // Viewport demand starts native query-reader work. Wait for its accepted
         // projection rather than assuming a fixed number of draws completes it.
         window
-            .condition(app, |this, _| {
+            .condition(app, |this, cx| {
                 let tree = this.library.tree();
-                this.library.search_counts() == Some((0, 0))
+                this.library.search_counts(cx.background_executor().now()) == Some((0, 0))
                     && tree.row_count() == roots.len()
                     && roots.iter().enumerate().all(|(index, root)| {
                         matches!(tree.item(index), Some(TreeItem::Entry(row))
@@ -748,7 +755,7 @@ mod library_root_tests {
     }
 
     fn assert_roots(window: &mut VisualTestContext, app: &Entity<Library>, roots: &[PathBuf]) {
-        app.update(&mut window.cx, |this, _| {
+        app.update(&mut window.cx, |this, cx| {
             let tree = this.library.tree();
             let rendered = (0..tree.row_count())
                 .map(|index| match tree.item(index) {
@@ -763,7 +770,10 @@ mod library_root_tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(rendered, roots);
-            assert_eq!(this.library.search_counts(), Some((0, 0)));
+            assert_eq!(
+                this.library.search_counts(cx.background_executor().now()),
+                Some((0, 0))
+            );
         });
     }
 

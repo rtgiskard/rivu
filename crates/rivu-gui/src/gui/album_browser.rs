@@ -285,17 +285,19 @@ impl AlbumBrowser {
         let tracks_search = cx.new(|cx| new_search(&i18n, SearchScope::Tracks, cx));
         let album_subscription = cx.subscribe(&album_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
-            if let Some(change) = this.model.set_query(query.clone()) {
+            let now = cx.background_executor().now();
+            if let Some(change) = this.model.set_query(query.clone(), now) {
                 this.reset_grid();
-                this.reload(change, cx);
+                this.reload(change, now, cx);
             }
         });
         let tracks_subscription = cx.subscribe(&tracks_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
-            if let Some(change) = this.model.set_tracks_query(query.clone()) {
+            let now = cx.background_executor().now();
+            if let Some(change) = this.model.set_tracks_query(query.clone(), now) {
                 this.track_scroll
                     .scroll_to_item_strict(0, ScrollStrategy::Top);
-                this.reload(change, cx);
+                this.reload(change, now, cx);
             }
         });
         Self {
@@ -380,9 +382,10 @@ impl AlbumBrowser {
         if self.model.albums_need_refresh(revisions) || (self.model.visible() && !visible) {
             self.capture_grid_anchor();
         }
-        let change = self.model.sync(visible, revisions, page_size);
+        let now = cx.background_executor().now();
+        let change = self.model.sync(visible, revisions, page_size, now);
         let data_changed = change.data.any();
-        self.apply_data_change(change.data, cx);
+        self.apply_data_change(change.data, now, cx);
         self.schedule_refresh(cx);
         if change.visibility && !visible {
             self.loading_text.clear();
@@ -410,8 +413,8 @@ impl AlbumBrowser {
         self.covers.clear(cx);
     }
 
-    fn apply_data_change(&mut self, change: DataChange, cx: &mut App) {
-        self.clear_stale_counts(change, cx);
+    fn apply_data_change(&mut self, change: DataChange, now: Instant, cx: &mut App) {
+        self.clear_stale_counts(change, now, cx);
         if (self.model.selected().is_none() && change.albums)
             || (self.model.selected().is_some() && change.tracks)
         {
@@ -420,34 +423,38 @@ impl AlbumBrowser {
     }
 
     /// Counts stay with retained rows and disappear only with them.
-    fn clear_stale_counts(&mut self, change: DataChange, cx: &mut App) {
-        if change.albums && self.model.albums().display_total().is_none() {
+    fn clear_stale_counts(&mut self, change: DataChange, now: Instant, cx: &mut App) {
+        if change.albums && self.model.albums().display_total(now).is_none() {
             self.album_search
                 .update(cx, |search, cx| search.clear_counts(cx));
         }
-        if change.tracks && self.model.tracks().display_total().is_none() {
+        if change.tracks && self.model.tracks().display_total(now).is_none() {
             self.tracks_search
                 .update(cx, |search, cx| search.clear_counts(cx));
         }
     }
 
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
-        self.refresh_wake
-            .schedule(self.model.refresh_deadline(), cx, |this, now, cx| {
+        RefreshWake::sync(
+            self,
+            cx,
+            |this| &mut this.refresh_wake,
+            |this| this.model.refresh_deadline(),
+            |this, now, cx| {
                 let expired = this.model.expire_refresh(now);
-                this.clear_stale_counts(expired, cx);
+                this.clear_stale_counts(expired, now, cx);
                 if expired.albums {
                     this.sync_covers(cx);
                 }
-                this.schedule_refresh(cx);
                 expired.any()
-            });
+            },
+        );
     }
 
-    fn reload(&mut self, change: DataChange, cx: &mut Context<Self>) {
+    fn reload(&mut self, change: DataChange, now: Instant, cx: &mut Context<Self>) {
         self.loading_text.clear();
         self.clear_covers(cx);
-        self.apply_data_change(change, cx);
+        self.apply_data_change(change, now, cx);
         self.schedule_refresh(cx);
         if !self.model.visible() {
             return;
@@ -471,7 +478,8 @@ impl AlbumBrowser {
             return;
         }
         if let Some(page) = &page {
-            self.loading_text.begin((), page.generation, Instant::now());
+            self.loading_text
+                .begin((), page.generation, cx.background_executor().now());
             self.loading_text
                 .schedule(cx, |this| &mut this.loading_text);
         }
@@ -497,8 +505,9 @@ impl AlbumBrowser {
                         if this.model.albums_need_refresh(revisions) {
                             this.capture_grid_anchor();
                         }
-                        let data = this.model.timeout(&query, generation, response, revisions);
-                        this.apply_data_change(data, cx);
+                        let now = cx.background_executor().now();
+                        let data = this.model.timeout(&query, generation, response, revisions, now);
+                        this.apply_data_change(data, now, cx);
                         this.schedule_refresh(cx);
                         this.sync_covers(cx);
                         cx.notify();
@@ -514,15 +523,17 @@ impl AlbumBrowser {
                     if this.model.albums_need_refresh(revisions) {
                         this.capture_grid_anchor();
                     }
+                    let now = cx.background_executor().now();
                     let completion = this.model.complete_page(
                         &query,
                         generation,
                         response,
                         revisions,
                         this.i18n.text("gl-album-response"),
+                        now,
                     );
                     let published = completion.published;
-                    this.apply_completion(completion, cx);
+                    this.apply_completion(completion, now, cx);
                     if published != Published::None {
                         this.model.prepare_count(&query, generation)
                     } else {
@@ -545,8 +556,9 @@ impl AlbumBrowser {
                     if this.model.albums_need_refresh(revisions) {
                         this.capture_grid_anchor();
                     }
-                    let completion = this.model.complete_count(&count, response, revisions);
-                    this.apply_completion(completion, cx);
+                    let now = cx.background_executor().now();
+                    let completion = this.model.complete_count(&count, response, revisions, now);
+                    this.apply_completion(completion, now, cx);
                 });
             }
             let _ = this.update(cx, |this, cx| {
@@ -557,14 +569,19 @@ impl AlbumBrowser {
         .detach();
     }
 
-    fn apply_completion(&mut self, completion: model::Completion, cx: &mut Context<Self>) {
+    fn apply_completion(
+        &mut self,
+        completion: model::Completion,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
         // Equal payloads still restore row controls that were disabled while stale.
         let changed =
             completion.changed || completion.data.any() || completion.published != Published::None;
         // Failure or rejection may also withdraw retained cards and their cover demand.
         let albums_changed = completion.data.albums
             || (completion.changed && completion.published != Published::Tracks);
-        self.apply_data_change(completion.data, cx);
+        self.apply_data_change(completion.data, now, cx);
         if let Some((matches, total)) = completion.counts {
             let search = match completion.published {
                 Published::Albums => &self.album_search,
@@ -587,7 +604,7 @@ impl AlbumBrowser {
     }
 
     pub(super) fn retry(&mut self, cx: &mut Context<Self>) {
-        self.model.retry();
+        self.model.retry(cx.background_executor().now());
         self.schedule_refresh(cx);
         self.request_next(cx);
         cx.notify();
@@ -657,13 +674,14 @@ impl AlbumBrowser {
 
     fn open(&mut self, key: AlbumKey, cx: &mut Context<Self>) {
         self.capture_grid_anchor();
-        let change = self.model.select(Some(key));
+        let now = cx.background_executor().now();
+        let change = self.model.select(Some(key), now);
         if change.reset_tracks {
             self.tracks_search.update(cx, |search, cx| search.reset(cx));
             self.track_scroll
                 .scroll_to_item_strict(0, ScrollStrategy::Top);
         }
-        self.reload(change.data, cx);
+        self.reload(change.data, now, cx);
     }
 
     fn reset_grid(&mut self) {
@@ -760,9 +778,14 @@ impl AlbumBrowser {
             return;
         }
         let albums = self.model.albums();
+        let now = cx.background_executor().now();
         let changed = self.covers.sync(
             self.demand.clone(),
-            |index| albums.display(index).map(|album| &album.representative),
+            |index| {
+                albums
+                    .display(index, now)
+                    .map(|album| &album.representative)
+            },
             &self.manager,
             &self.images,
             cx,
@@ -831,10 +854,18 @@ impl AlbumBrowser {
         }
     }
 
-    fn card(&self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn card(
+        &self,
+        index: usize,
+        now: Instant,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
-        let current = self.model.albums().get(index).is_some();
-        let Some(album) = self.model.albums().display(index) else {
+        let albums = self.model.albums();
+        let summary = albums.get(index);
+        let current = summary.is_some();
+        let Some(album) = summary.or_else(|| albums.display(index, now)) else {
             return self
                 .loading_row(index, cx)
                 .flex_1()
@@ -1074,7 +1105,8 @@ impl Render for AlbumBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scroll_views.borrow_mut().begin_panel(self.panel_id);
         let theme = rivu_ui::theme::palette(cx);
-        let total = self.model.display_total();
+        let now = cx.background_executor().now();
+        let total = self.model.display_total(now);
         let header;
         if let Some(key) = self.model.selected() {
             let play_key = key.clone();
@@ -1090,8 +1122,9 @@ impl Render for AlbumBrowser {
                             IconButtonDensity::Regular,
                             cx,
                             |this, _, cx| {
-                                let change = this.model.select(None);
-                                this.reload(change.data, cx);
+                                let now = cx.background_executor().now();
+                                let change = this.model.select(None, now);
+                                this.reload(change.data, now, cx);
                             },
                         ),
                 )
@@ -1208,9 +1241,10 @@ impl Render for AlbumBrowser {
                         IconButtonDensity::Regular,
                         cx,
                         |this, _, cx| {
-                            let change = this.model.toggle_sort();
+                            let now = cx.background_executor().now();
+                            let change = this.model.toggle_sort(now);
                             this.reset_grid();
-                            this.reload(change, cx);
+                            this.reload(change, now, cx);
                         },
                     ),
                 );
@@ -1240,12 +1274,14 @@ impl Render for AlbumBrowser {
                     "album-tracks",
                     self.model.tracks().len(),
                     &self.track_scroll,
-                    cx.processor(|this, range: Range<usize>, window, cx| {
+                    cx.processor(move |this, range: Range<usize>, window, cx| {
                         let row_height = rivu_ui::list_row_height(window, cx);
                         range
                             .map(|index| {
-                                let current = this.model.tracks().get(index).is_some();
-                                let Some(track) = this.model.tracks().display(index) else {
+                                let tracks = this.model.tracks();
+                                let row = tracks.get(index);
+                                let current = row.is_some();
+                                let Some(track) = row.or_else(|| tracks.display(index, now)) else {
                                     return this
                                         .track_loading_row(index, row_height, cx)
                                         .into_any_element();
@@ -1413,7 +1449,7 @@ impl Render for AlbumBrowser {
                                 .h(layout.row_height)
                                 .pb_2();
                             for index in start..end {
-                                cards = cards.child(this.card(index, window, cx));
+                                cards = cards.child(this.card(index, now, window, cx));
                             }
                             cards
                         })
@@ -1509,7 +1545,8 @@ mod tests {
             let images = ArtworkImageRegistry::default();
             let mut model = super::AlbumModel::default();
             let revisions = QueryRevisions::default();
-            model.sync(true, revisions, 2);
+            let now = cx.update(|cx| cx.background_executor().now());
+            model.sync(true, revisions, 2, now);
             let cards = model.prepare().unwrap();
             let card = AlbumSummary {
                 key: AlbumKey {
@@ -1532,6 +1569,7 @@ mod tests {
                 },
                 revisions,
                 "wrong response",
+                now,
             );
             model.retire_worker();
             let mut covers = AlbumCovers::default();
@@ -1547,7 +1585,7 @@ mod tests {
                 ..revisions
             };
             assert!(!model.albums_need_refresh(current));
-            let change = model.sync(true, current, 2);
+            let change = model.sync(true, current, 2, now);
             assert!(!change.data.any());
             assert!(!change.visibility && !change.demand);
             assert_eq!(model.albums().get(0), Some(&card));
@@ -1644,12 +1682,16 @@ mod tests {
             )
         });
         let revisions = runtime.handle.gui_snapshot().query_revisions(None);
-        let pending = browser.update(cx, |browser, _| {
-            browser.model.sync(true, revisions, 2);
-            browser.model.select(Some(rivu_protocol::model::AlbumKey {
-                directory: directory.path().join("album"),
-                title: "Album".into(),
-            }));
+        let pending = browser.update(cx, |browser, cx| {
+            let now = cx.background_executor().now();
+            browser.model.sync(true, revisions, 2, now);
+            browser.model.select(
+                Some(rivu_protocol::model::AlbumKey {
+                    directory: directory.path().join("album"),
+                    title: "Album".into(),
+                }),
+                now,
+            );
             browser.model.prepare().unwrap()
         });
         let window = cx.add_window(|_, _| LoadingTrack(browser.clone()));
@@ -1659,7 +1701,7 @@ mod tests {
             .unwrap();
 
         let error = "Album page failed: Unicode 路径\nFull diagnostic";
-        browser.update(cx, |browser, _| {
+        browser.update(cx, |browser, cx| {
             browser.model.timeout(
                 &pending.query,
                 pending.generation,
@@ -1668,6 +1710,7 @@ mod tests {
                     result: Err(QueryError::Message(error.into())),
                 },
                 revisions,
+                cx.background_executor().now(),
             );
         });
         cx.update_window(handle, |_, window, cx| {

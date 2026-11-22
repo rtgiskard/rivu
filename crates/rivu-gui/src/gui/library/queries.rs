@@ -103,6 +103,7 @@ impl Library {
         let Some(read) = self.prepare_root_count_read(
             &state.system.config.library_roots,
             state.library.structure_revision,
+            cx.background_executor().now(),
         ) else {
             return;
         };
@@ -209,6 +210,7 @@ impl Library {
             &self.state.system.config.library_roots,
             self.state.query_revisions(None),
             &response,
+            cx.background_executor().now(),
         ) && let Err(error) = response.result
         {
             self.report_error(error.to_string(), cx);
@@ -216,7 +218,9 @@ impl Library {
     }
 
     pub(super) fn sync_search_caption(&self, cx: &mut Context<Self>) {
-        let (matched, total) = self.library.search_count_parts();
+        let (matched, total) = self
+            .library
+            .search_count_parts(cx.background_executor().now());
         self.library_search.update(cx, |search, cx| {
             if !self.library.filtered() && total.is_none() {
                 search.clear_counts(cx);
@@ -233,6 +237,7 @@ impl Library {
         let (_, request) = self.library.prepare_search_counts(
             &self.state.system.config.library_roots,
             self.state.query_revisions(None),
+            cx.background_executor().now(),
         );
         self.sync_search_caption(cx);
         self.schedule_refresh_wake(cx);
@@ -319,6 +324,7 @@ impl Library {
             page_size,
             &state.system.config.library_roots,
             state.query_revisions(None),
+            cx.background_executor().now(),
         );
         self.schedule_refresh_wake(cx);
         if request.published {
@@ -365,6 +371,7 @@ impl Library {
                             &read,
                             this.state.query_revisions(None),
                             response,
+                            cx.background_executor().now(),
                         ) {
                             this.report_error(error, cx);
                         }
@@ -379,9 +386,12 @@ impl Library {
                 this.refresh(cx);
                 if timed_out {
                     this.abandon_directory_read(&read);
-                } else if let Some(error) =
-                    this.complete_directory_read(&read, this.state.query_revisions(None), response)
-                {
+                } else if let Some(error) = this.complete_directory_read(
+                    &read,
+                    this.state.query_revisions(None),
+                    response,
+                    cx.background_executor().now(),
+                ) {
                     this.report_error(error, cx);
                 }
                 this.resume_library_navigation(cx);
@@ -428,7 +438,7 @@ impl Library {
     }
 
     pub(in crate::gui) fn refresh_filter(&mut self, cx: &mut Context<Self>) {
-        self.library.refresh_filter();
+        self.library.refresh_filter(cx.background_executor().now());
         self.request_directory_page(TreeBranch::default(), 0, cx);
     }
 }
@@ -484,7 +494,12 @@ mod tests {
         assert!(response.result.is_ok());
         let revisions = response.revisions;
         let mut library = LibraryBrowser::default();
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, std::time::Instant::now())
+                .1
+                .is_none()
+        );
         let load_other_total =
             |library: &mut LibraryBrowser, roots: &[std::path::PathBuf], revisions| {
                 let request = library.prepare_other_count().unwrap();
@@ -493,11 +508,18 @@ mod tests {
                     response.result,
                     Ok(ViewResponse::OtherTracksCount(_))
                 ));
-                assert!(library.publish_other_count(&request, roots, revisions, &response));
+                assert!(library.publish_other_count(
+                    &request,
+                    roots,
+                    revisions,
+                    &response,
+                    std::time::Instant::now()
+                ));
                 library.retire_other_count(&request);
             };
         let load_totals = |library: &mut LibraryBrowser, roots: &[std::path::PathBuf]| {
-            let (generation, offsets) = library.begin_root_counts(roots, revisions.structure);
+            let (generation, offsets) =
+                library.begin_root_counts(roots, revisions.structure, std::time::Instant::now());
             if let Some(offset) = offsets {
                 let response = runtime.handle.query(Query::LibraryRootCounts {
                     roots: roots.to_vec(),
@@ -509,14 +531,16 @@ mod tests {
             }
         };
         library.refresh_search("needle".into());
-        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let (_, request) =
+            library.prepare_search_counts(&roots, revisions, std::time::Instant::now());
         let request = request.unwrap();
         library.cancel_pending_reads();
         let cancelled =
             futures::executor::block_on(super::library_search_counts(&runtime.handle, &request));
         assert!(matches!(cancelled, Err(super::CountBlock::Retired)));
         assert!(!library.accept_search_counts(request, &roots, revisions, cancelled));
-        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let (_, request) =
+            library.prepare_search_counts(&roots, revisions, std::time::Instant::now());
         let request = request.unwrap();
         let result =
             futures::executor::block_on(super::library_search_counts(&runtime.handle, &request))
@@ -526,28 +550,53 @@ mod tests {
         assert_eq!(result.roots.get(&parent), Some(&1));
         assert_eq!(result.roots.get(&sibling), Some(&1));
         assert!(library.accept_search_counts(request, &roots, revisions, Ok(result)));
-        assert_eq!(library.search_count_parts(), (Some(3), None));
-        assert_eq!(library.root_count_label(&parent), "1 / -");
+        assert_eq!(
+            library.search_count_parts(std::time::Instant::now()),
+            (Some(3), None)
+        );
+        assert_eq!(
+            library.root_count_label(&parent, std::time::Instant::now()),
+            "1 / -"
+        );
         load_totals(&mut library, &roots);
         load_other_total(&mut library, &roots, revisions);
-        assert_eq!(library.search_counts(), Some((3, 5)));
+        assert_eq!(
+            library.search_counts(std::time::Instant::now()),
+            Some((3, 5))
+        );
         library.refresh_search("not indexed".into());
-        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let (_, request) =
+            library.prepare_search_counts(&roots, revisions, std::time::Instant::now());
         let request = request.unwrap();
-        assert_eq!(library.search_count_parts(), (None, Some(5)));
-        assert_eq!(library.root_count_label(&parent), "- / 2");
-        assert_eq!(library.other_count_label(), "- / 1");
+        assert_eq!(
+            library.search_count_parts(std::time::Instant::now()),
+            (None, Some(5))
+        );
+        assert_eq!(
+            library.root_count_label(&parent, std::time::Instant::now()),
+            "- / 2"
+        );
+        assert_eq!(
+            library.other_count_label(std::time::Instant::now()),
+            "- / 1"
+        );
         let result =
             futures::executor::block_on(super::library_search_counts(&runtime.handle, &request))
                 .unwrap();
         assert_eq!(result.matched, 0);
         assert_eq!(result.other_matched, 0);
         assert!(library.accept_search_counts(request, &roots, revisions, Ok(result)));
-        assert_eq!(library.search_counts(), Some((0, 5)));
+        assert_eq!(
+            library.search_counts(std::time::Instant::now()),
+            Some((0, 5))
+        );
         assert!(!library.other_tracks_empty());
         assert_eq!(library.tree().root_total(), Some(3));
         library.refresh_search("needle".into());
-        let pending = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let pending = library
+            .prepare_search_counts(&roots, revisions, std::time::Instant::now())
+            .1
+            .unwrap();
         for root in &roots {
             // A query on an independent IPC worker is not a command FIFO fence.
             let ack = futures::executor::block_on(runtime.handle.request_command(
@@ -564,9 +613,14 @@ mod tests {
         assert!(library.accept_search_counts(pending, &roots, revisions, obsolete));
         assert!(library.root_counts_retired());
         assert!(!library.root_count_failed(&parent));
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, std::time::Instant::now())
+                .1
+                .is_none()
+        );
         let revisions = runtime.handle.query(Query::OtherTracksCount).revisions;
-        let (_, request) = library.prepare_search_counts(&[], revisions);
+        let (_, request) = library.prepare_search_counts(&[], revisions, std::time::Instant::now());
         let request = request.unwrap();
         let result =
             futures::executor::block_on(super::library_search_counts(&runtime.handle, &request))
@@ -576,6 +630,9 @@ mod tests {
         assert!(result.roots.is_empty());
         assert!(library.accept_search_counts(request, &[], revisions, Ok(result)));
         load_other_total(&mut library, &[], revisions);
-        assert_eq!(library.search_counts(), Some((3, 5)));
+        assert_eq!(
+            library.search_counts(std::time::Instant::now()),
+            Some((3, 5))
+        );
     }
 }

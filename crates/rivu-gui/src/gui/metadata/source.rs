@@ -11,7 +11,7 @@ use rivu_ui::{
     FocusScope, IconButton, IconButtonDensity, IconButtonStyle, Popover, caption, column,
     disabled_control, menu_item,
 };
-use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SourceAction {
@@ -408,15 +408,17 @@ impl Metadata {
         true
     }
 
-    fn source_reason(&self) -> Option<SharedString> {
-        source_support(self.metadata.track()).err().map(|reason| {
-            self.tr(match reason {
-                SupportReason::Unavailable => "gl-tags-unavailable",
-                SupportReason::Missing => "gl-tags-missing",
-                SupportReason::Cue => "gl-tags-cue",
-                SupportReason::Unsupported => "gl-tags-unsupported",
+    fn source_reason(&self, now: Instant) -> Option<SharedString> {
+        source_support(self.metadata.display_track_at(now))
+            .err()
+            .map(|reason| {
+                self.tr(match reason {
+                    SupportReason::Unavailable => "gl-tags-unavailable",
+                    SupportReason::Missing => "gl-tags-missing",
+                    SupportReason::Cue => "gl-tags-cue",
+                    SupportReason::Unsupported => "gl-tags-unsupported",
+                })
             })
-        })
     }
 
     pub(super) fn source_status(&self) -> Option<SharedString> {
@@ -513,7 +515,7 @@ impl Metadata {
         let bounds = self.source_menu.bounds.get(&panel)?.get()?;
         let theme = rivu_ui::theme::palette(cx);
         let identity = self.metadata.editor_identity();
-        let reason = self.source_reason();
+        let reason = self.source_reason(cx.background_executor().now());
         let supported = reason.is_none();
         let enabled = self.source_menu_enabled();
         let allows = |action| {
@@ -563,7 +565,7 @@ impl Metadata {
                     move |this, window, cx| {
                         if this.metadata.editor_identity() == identity
                             && this.source_menu_enabled()
-                            && this.source_reason().is_none()
+                            && this.source_reason(cx.background_executor().now()).is_none()
                             && identity.is_some_and(|id| {
                                 this.metadata
                                     .source
@@ -585,7 +587,7 @@ impl Metadata {
                 move |this, window, cx| {
                     if this.metadata.editor_identity() == identity
                         && this.source_menu_enabled()
-                        && this.source_reason().is_none()
+                        && this.source_reason(cx.background_executor().now()).is_none()
                         && identity
                             .is_some_and(|id| this.metadata.source.allows(id.track_id, load_action))
                     {
@@ -646,7 +648,7 @@ impl Metadata {
             return;
         }
         if matches!(action, SourceAction::Load(_) | SourceAction::Save)
-            && self.source_reason().is_some()
+            && self.source_reason(cx.background_executor().now()).is_some()
         {
             return;
         }

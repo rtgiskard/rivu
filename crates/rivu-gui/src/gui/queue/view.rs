@@ -207,7 +207,10 @@ impl Queue {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
-        let matched = self.model.rows.display_total();
+        let matched = self
+            .model
+            .rows
+            .display_total(cx.background_executor().now());
         let total = self.state.queue.total;
         self.queue_search.update(cx, |search, cx| {
             if let Some(matched) = matched {
@@ -385,10 +388,11 @@ impl Queue {
                                 .focused
                                 .then(|| this.model.active().map(|row| row.id))
                                 .flatten();
+                            let now = cx.background_executor().now();
                             range
                                 .map(|index| {
                                     if this.model.rows.get(index).is_none()
-                                        && let Some(entry) = this.model.rows.display(index)
+                                        && let Some(entry) = this.model.rows.display(index, now)
                                     {
                                         return track_list_row(
                                             theme,

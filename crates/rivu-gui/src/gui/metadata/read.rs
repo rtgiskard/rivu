@@ -107,11 +107,12 @@ impl MetadataReadCoordinator {
         &mut self,
         session: &mut MetadataSession,
         visible: bool,
-        now: Instant,
+        quiet_now: Instant,
+        retention_now: Instant,
     ) -> Option<MetadataReadTask> {
         let track_id = self.selected.filter(|&id| session.selected() == Some(id))?;
         if self.needs_refresh {
-            session.invalidate_at(now);
+            session.invalidate_at(retention_now);
         }
         if !visible || !self.needs_refresh || self.worker.is_some() {
             return None;
@@ -126,7 +127,7 @@ impl MetadataReadCoordinator {
         Some(MetadataReadTask {
             read,
             delay: self.quiet_until.map_or(Duration::ZERO, |deadline| {
-                deadline.saturating_duration_since(now)
+                deadline.saturating_duration_since(quiet_now)
             }),
             ticket: self.projection.ticket(),
         })
@@ -298,7 +299,7 @@ mod tests {
             let mut owner = MetadataReadCoordinator::default();
             let mut session = MetadataSession::default();
             request(&mut owner, &mut session, 1, now);
-            let first = owner.prepare(&mut session, true, now).unwrap();
+            let first = owner.prepare(&mut session, true, now, now).unwrap();
             assert!(owner.submit(first.read, &session, environment(true)));
             assert!(owner.timeout(
                 first.read,
@@ -313,21 +314,21 @@ mod tests {
                 session.read_state(),
                 &MetadataReadState::Failed("timed out".into())
             );
-            assert!(owner.prepare(&mut session, true, now).is_none());
+            assert!(owner.prepare(&mut session, true, now, now).is_none());
             request(
                 &mut owner,
                 &mut session,
                 if replacement { 2 } else { 1 },
                 now,
             );
-            assert!(owner.prepare(&mut session, true, now).is_none());
+            assert!(owner.prepare(&mut session, true, now, now).is_none());
             assert!(matches!(
                 finish(&mut owner, &mut session, first.read, true),
                 ReadCompletion::Retired
             ));
             // The deliberately successful late reply did not replace timeout state.
             assert_eq!(session.selected(), Some(if replacement { 2 } else { 1 }));
-            let next = owner.prepare(&mut session, true, now).unwrap();
+            let next = owner.prepare(&mut session, true, now, now).unwrap();
             assert_eq!(next.read.track_id, if replacement { 2 } else { 1 });
             assert!(owner.submit(next.read, &session, environment(true)));
             assert!(matches!(
@@ -343,7 +344,7 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         request(&mut owner, &mut session, 2, now);
         assert!(!owner.timeout(
@@ -355,14 +356,14 @@ mod tests {
                 result: Err(QueryError::Message("obsolete".into())),
             }
         ));
-        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(owner.prepare(&mut session, true, now, now).is_none());
         assert!(matches!(
             finish(&mut owner, &mut session, first.read, true),
             ReadCompletion::Retired
         ));
         assert_eq!(
             owner
-                .prepare(&mut session, true, now)
+                .prepare(&mut session, true, now, now)
                 .unwrap()
                 .read
                 .track_id,
@@ -376,16 +377,21 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         request(&mut owner, &mut session, 2, now + Duration::from_millis(20));
-        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(owner.prepare(&mut session, true, now, now).is_none());
         assert!(matches!(
             finish(&mut owner, &mut session, first.read, true),
             ReadCompletion::Retired
         ));
         let next = owner
-            .prepare(&mut session, true, now + Duration::from_millis(50))
+            .prepare(
+                &mut session,
+                true,
+                now + Duration::from_millis(50),
+                now + Duration::from_millis(50),
+            )
             .unwrap();
         assert_eq!(next.read.track_id, 2);
         assert_eq!(
@@ -401,14 +407,24 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        assert!(owner.prepare(&mut session, false, now).is_none());
+        assert!(owner.prepare(&mut session, false, now, now).is_none());
         let first = owner
-            .prepare(&mut session, true, now + Duration::from_millis(30))
+            .prepare(
+                &mut session,
+                true,
+                now + Duration::from_millis(30),
+                now + Duration::from_millis(30),
+            )
             .unwrap();
         assert!(!owner.submit(first.read, &session, environment(false)));
-        assert!(owner.prepare(&mut session, false, now).is_none());
+        assert!(owner.prepare(&mut session, false, now, now).is_none());
         let reopened = owner
-            .prepare(&mut session, true, now + Duration::from_millis(100))
+            .prepare(
+                &mut session,
+                true,
+                now + Duration::from_millis(100),
+                now + Duration::from_millis(100),
+            )
             .unwrap();
         assert_eq!(reopened.delay, Duration::ZERO);
     }
@@ -419,17 +435,22 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         owner.cancel();
-        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(owner.prepare(&mut session, true, now, now).is_none());
         assert!(matches!(
             finish(&mut owner, &mut session, first.read, false),
             ReadCompletion::Retired
         ));
-        assert!(owner.prepare(&mut session, false, now).is_none());
+        assert!(owner.prepare(&mut session, false, now, now).is_none());
         let reopened = owner
-            .prepare(&mut session, true, now + Duration::from_millis(100))
+            .prepare(
+                &mut session,
+                true,
+                now + Duration::from_millis(100),
+                now + Duration::from_millis(100),
+            )
             .unwrap();
         assert_eq!(reopened.delay, Duration::ZERO);
         assert!(owner.submit(reopened.read, &session, environment(true)));
@@ -441,10 +462,10 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         finish(&mut owner, &mut session, first.read, false);
-        assert!(owner.prepare(&mut session, true, now).is_some());
+        assert!(owner.prepare(&mut session, true, now, now).is_some());
     }
 
     #[test]
@@ -453,18 +474,18 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         session.clear_selection();
         owner.sync(None, QueryRevisions::default(), now);
-        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(owner.prepare(&mut session, true, now, now).is_none());
         request(&mut owner, &mut session, 1, now);
-        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(owner.prepare(&mut session, true, now, now).is_none());
         assert!(matches!(
             finish(&mut owner, &mut session, first.read, true),
             ReadCompletion::Retired
         ));
-        let next = owner.prepare(&mut session, true, now).unwrap();
+        let next = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(next.read, &session, environment(true)));
         assert!(!session.accepts_load(first.read.token));
     }
@@ -475,7 +496,7 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         session.clear_selection();
         session.select(1);
@@ -483,7 +504,7 @@ mod tests {
             finish(&mut owner, &mut session, first.read, true),
             ReadCompletion::Retired
         ));
-        assert!(owner.prepare(&mut session, true, now).is_some());
+        assert!(owner.prepare(&mut session, true, now, now).is_some());
     }
 
     #[test]
@@ -514,7 +535,7 @@ mod tests {
             let mut session = MetadataSession::default();
             session.select(1);
             owner.request(1, scoped, now);
-            let first = owner.prepare(&mut session, true, now).unwrap();
+            let first = owner.prepare(&mut session, true, now, now).unwrap();
             assert!(owner.submit(first.read, &session, live()));
             let completion = owner.finish(
                 first.read,
@@ -531,9 +552,9 @@ mod tests {
                 session.read_state(),
                 &MetadataReadState::Failed("Core unavailable".into())
             );
-            assert!(owner.prepare(&mut session, true, now).is_none());
+            assert!(owner.prepare(&mut session, true, now, now).is_none());
             owner.request(1, scoped, now);
-            let retry = owner.prepare(&mut session, true, now).unwrap();
+            let retry = owner.prepare(&mut session, true, now, now).unwrap();
             assert!(owner.submit(retry.read, &session, live()));
             assert!(matches!(
                 owner.finish(
@@ -548,7 +569,7 @@ mod tests {
                 ),
                 ReadCompletion::Loaded(_)
             ));
-            assert!(owner.prepare(&mut session, true, now).is_none());
+            assert!(owner.prepare(&mut session, true, now, now).is_none());
         }
     }
 
@@ -568,12 +589,16 @@ mod tests {
             let mut owner = MetadataReadCoordinator::default();
             let mut session = MetadataSession::default();
             request(&mut owner, &mut session, 1, now);
-            let first = owner.prepare(&mut session, true, now).unwrap();
+            let first = owner.prepare(&mut session, true, now, now).unwrap();
             assert!(owner.submit(first.read, &session, environment(true)));
             let changed = now + Duration::from_millis(100);
             owner.sync(Some(1), revisions, changed);
             assert!(!first.ticket.is_current());
-            assert!(owner.prepare(&mut session, true, changed).is_none());
+            assert!(
+                owner
+                    .prepare(&mut session, true, changed, changed)
+                    .is_none()
+            );
             assert!(matches!(
                 owner.finish(
                     first.read,
@@ -587,8 +612,8 @@ mod tests {
                 ),
                 ReadCompletion::Retired
             ));
-            assert!(session.track().is_none());
-            let next = owner.prepare(&mut session, true, changed).unwrap();
+            assert!(session.display_track_at(changed).is_none());
+            let next = owner.prepare(&mut session, true, changed, changed).unwrap();
             assert_eq!(next.delay, first.delay);
             assert!(owner.submit(
                 next.read,
@@ -607,7 +632,7 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         let mut changed = response();
         changed.revisions.library = 1;
@@ -618,13 +643,13 @@ mod tests {
             ReadCompletion::Retired
         ));
         assert!(!session.accepts_load(first.read.token));
-        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(owner.prepare(&mut session, true, now, now).is_none());
         let revisions = QueryRevisions {
             library: 1,
             ..Default::default()
         };
         owner.sync(Some(1), revisions, now);
-        assert!(owner.prepare(&mut session, true, now).is_some());
+        assert!(owner.prepare(&mut session, true, now, now).is_some());
     }
 
     #[test]
@@ -633,7 +658,7 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         session.clear_selection();
         owner.sync(None, QueryRevisions::default(), now);
@@ -641,9 +666,9 @@ mod tests {
             finish(&mut owner, &mut session, first.read, true),
             ReadCompletion::Retired
         ));
-        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(owner.prepare(&mut session, true, now, now).is_none());
         request(&mut owner, &mut session, 2, now);
-        assert!(owner.prepare(&mut session, true, now).is_some());
+        assert!(owner.prepare(&mut session, true, now, now).is_some());
     }
 
     #[test]
@@ -655,7 +680,7 @@ mod tests {
             let mut owner = MetadataReadCoordinator::default();
             let mut session = MetadataSession::default();
             request(&mut owner, &mut session, 1, now);
-            let first = owner.prepare(&mut session, true, now).unwrap();
+            let first = owner.prepare(&mut session, true, now, now).unwrap();
             assert!(owner.submit(first.read, &session, environment(true)));
             assert!(matches!(
                 owner.finish(
@@ -674,13 +699,13 @@ mod tests {
             assert!(!first.ticket.is_current());
             for _ in 0..3 {
                 owner.sync(Some(1), QueryRevisions::default(), now);
-                assert!(owner.prepare(&mut session, true, now).is_none());
+                assert!(owner.prepare(&mut session, true, now, now).is_none());
             }
             // An existing explicit request can reopen unchanged demand.
             request(&mut owner, &mut session, 1, now);
-            let retry = owner.prepare(&mut session, true, now).unwrap();
+            let retry = owner.prepare(&mut session, true, now, now).unwrap();
             assert!(!session.retire_load(first.read.token));
-            assert!(owner.prepare(&mut session, true, now).is_none());
+            assert!(owner.prepare(&mut session, true, now, now).is_none());
             assert!(session.accepts_load(retry.read.token));
             assert!(owner.submit(retry.read, &session, environment(true)));
         }
@@ -694,7 +719,7 @@ mod tests {
         let mut owner = MetadataReadCoordinator::default();
         let mut session = MetadataSession::default();
         request(&mut owner, &mut session, 1, now);
-        let first = owner.prepare(&mut session, true, now).unwrap();
+        let first = owner.prepare(&mut session, true, now, now).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         assert!(matches!(
             owner.finish(
@@ -716,9 +741,9 @@ mod tests {
             session.read_state(),
             &MetadataReadState::Failed("wrong response".into())
         );
-        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(owner.prepare(&mut session, true, now, now).is_none());
         request(&mut owner, &mut session, 1, now);
-        assert!(owner.prepare(&mut session, true, now).is_some());
+        assert!(owner.prepare(&mut session, true, now, now).is_some());
     }
     #[test]
     fn refreshing_details_expire_while_the_original_reader_keeps_its_slot() {
@@ -731,7 +756,7 @@ mod tests {
         let loaded = session.begin_load(1);
         assert!(session.accept_load(loaded, Some(track(1, "loaded"))));
         owner.request(1, QueryRevisions::default(), start);
-        let first = owner.prepare(&mut session, true, start).unwrap();
+        let first = owner.prepare(&mut session, true, start, start).unwrap();
         assert!(owner.submit(first.read, &session, environment(true)));
         let deadline = session.deadline();
         let revisions = QueryRevisions {
@@ -741,7 +766,12 @@ mod tests {
         owner.sync(Some(1), revisions, start + Duration::from_millis(150));
         assert!(
             owner
-                .prepare(&mut session, true, start + Duration::from_millis(150))
+                .prepare(
+                    &mut session,
+                    true,
+                    start + Duration::from_millis(150),
+                    start + Duration::from_millis(150)
+                )
                 .is_none()
         );
         assert_eq!(session.deadline(), deadline);
@@ -758,7 +788,8 @@ mod tests {
                 .prepare(
                     &mut session,
                     true,
-                    start + rivu_presentation::refresh::REFRESH_RETENTION
+                    start + rivu_presentation::refresh::REFRESH_RETENTION,
+                    start + rivu_presentation::refresh::REFRESH_RETENTION,
                 )
                 .is_none()
         );
@@ -775,13 +806,18 @@ mod tests {
             ),
             ReadCompletion::Retired
         ));
-        assert!(session.track().is_none());
+        assert!(
+            session
+                .display_track_at(start + rivu_presentation::refresh::REFRESH_RETENTION)
+                .is_none()
+        );
         assert!(
             owner
                 .prepare(
                     &mut session,
                     true,
-                    start + rivu_presentation::refresh::REFRESH_RETENTION
+                    start + rivu_presentation::refresh::REFRESH_RETENTION,
+                    start + rivu_presentation::refresh::REFRESH_RETENTION,
                 )
                 .is_some()
         );

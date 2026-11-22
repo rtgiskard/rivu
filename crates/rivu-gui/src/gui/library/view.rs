@@ -219,6 +219,7 @@ impl Library {
         let demand_owner = cx.weak_entity();
         let view = list_viewport(
             VirtualList::new(("library-directory-tree", panel_id), row_count, scroll, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                let now = cx.background_executor().now();
                 let row_height = rivu_ui::tree_row_height(window, cx);
                 let inline_action = |view: gpui::Stateful<Div>| {
                     view.min_h_0().h(row_height - px(2.)).py_0()
@@ -233,7 +234,7 @@ impl Library {
                 let render_scope = std::rc::Rc::new(this.library_row_scope());
                 range
                     .filter_map(|index| {
-                        let item = this.library.tree().display_item(index)?;
+                        let item = this.library.tree().display_item(index, now)?;
                         let visible = match item {
                             TreeItem::Entry(visible) => visible,
                             TreeItem::Placeholder {
@@ -415,7 +416,7 @@ impl Library {
                                     }),
                             )
                             .when(visible.depth == 0 && path.is_some(), |view| {
-                                let count = this.library.root_count_label(path.expect("root path"));
+                                let count = this.library.root_count_label(path.expect("root path"), now);
                                 view.child(
                                     row()
                                         .gap_1()
@@ -426,7 +427,7 @@ impl Library {
                                 )
                             })
                             .when(matches!(entry, DirectoryRow::OtherTracks), |view| {
-                                view.child(rivu_ui::caption(theme, this.library.other_count_label())
+                                view.child(rivu_ui::caption(theme, this.library.other_count_label(now))
                                     .font_features(crate::gui::appearance::fonts::tabular_numbers()))
                             });
                         let name_cell = div()
@@ -648,7 +649,8 @@ impl Library {
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
         self.finish_library_locate_render(window, cx);
-        let total = self.library.tree().display_root_total();
+        let now = cx.background_executor().now();
+        let total = self.library.tree().display_root_total(now);
         let range_pending = self.library_range_pending();
         let selected_directories = self.library.selected_nodes().len();
         let selection_label = if range_pending {
@@ -874,7 +876,7 @@ impl Library {
         );
         // Track counts describe contents, not the configured root projection.
         // Keep its viewport mounted so root changes can demand a fresh forest.
-        let (matched, total) = self.library.search_count_parts();
+        let (matched, total) = self.library.search_count_parts(now);
         if matched == Some(0) && (total != Some(0) || self.library.tree().row_count() == 0) {
             panel = panel.child(caption(
                 theme,

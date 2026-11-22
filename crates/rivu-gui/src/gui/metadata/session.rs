@@ -174,9 +174,6 @@ impl MetadataSession {
             track_id,
         })
     }
-    pub(in crate::gui) fn track(&self) -> Option<&Track> {
-        self.display_track_at(Instant::now())
-    }
     pub(super) fn display_track_at(&self, now: Instant) -> Option<&Track> {
         if self.details_expired || self.retention.expired(now) {
             return None;
@@ -191,14 +188,13 @@ impl MetadataSession {
         }
     }
     pub(super) fn authoritative_track(&self) -> Option<&Track> {
-        if self.selected.is_none() && self.playback_tag_commit.is_some() {
+        if self.details_expired
+            || self.retention.deadline().is_some()
+            || (self.selected.is_none() && self.playback_tag_commit.is_some())
+        {
             return None;
         }
-        self.retention
-            .deadline()
-            .is_none()
-            .then(|| self.track())
-            .flatten()
+        self.source_track()
     }
     pub(in crate::gui) fn track_snapshot(&self) -> Option<Arc<Track>> {
         match &self.availability {
@@ -206,8 +202,10 @@ impl MetadataSession {
             _ => None,
         }
     }
-    pub(in crate::gui) fn availability(&self) -> &MetadataAvailability {
-        if matches!(self.availability, MetadataAvailability::Present(_)) && self.track().is_none() {
+    pub(in crate::gui) fn availability(&self, now: Instant) -> &MetadataAvailability {
+        if matches!(self.availability, MetadataAvailability::Present(_))
+            && self.display_track_at(now).is_none()
+        {
             &MetadataAvailability::Unknown
         } else {
             &self.availability
@@ -266,11 +264,11 @@ impl MetadataSession {
     }
 
     pub(super) fn begin_source(&mut self, action: SourceAction) -> Option<(SourceToken, Command)> {
-        if !self.editable() || self.any_saving() {
+        if self.any_saving() {
             return None;
         }
         let identity = self.editor_identity()?;
-        let track = self.track()?;
+        let track = self.authoritative_track()?;
         let track_id = track.id;
         if !self.source.allows(track_id, action) {
             return None;
@@ -565,7 +563,10 @@ mod tests {
         let load = session.begin_load(1);
         assert!(session.accept_load(load, Some(track(1, "returned"))));
         assert!(!session.complete_save(save));
-        assert_eq!(session.track().unwrap().title, "returned");
+        assert_eq!(
+            session.display_track_at(Instant::now()).unwrap().title,
+            "returned"
+        );
     }
 
     #[test]
@@ -597,7 +598,10 @@ mod tests {
         assert!(session.accepts_load(read));
         assert!(session.accept_load(read, Some(track(1, "refreshed"))));
         assert!(session.complete_save(save));
-        assert_eq!(session.track().unwrap().title, "refreshed");
+        assert_eq!(
+            session.display_track_at(Instant::now()).unwrap().title,
+            "refreshed"
+        );
     }
 
     #[test]
@@ -610,7 +614,7 @@ mod tests {
         assert!(session.accept_load(read, None));
         session.sync_playback(Some(&Arc::new(track(1, "stale"))));
         assert!(session.complete_save(save));
-        assert!(session.track().is_none());
+        assert!(session.display_track_at(Instant::now()).is_none());
     }
     #[test]
     fn stale_details_expire_once_without_authorizing_writes_or_losing_source_drafts() {
@@ -619,7 +623,7 @@ mod tests {
         let mut session = loaded();
         let start = Instant::now();
         let (save, _) = session.begin_save(&SavedValue::PlayCount(7)).unwrap();
-        let staged = database_tags(session.track().unwrap());
+        let staged = database_tags(session.display_track_at(Instant::now()).unwrap());
         session.source.stage(staged.clone());
         session.invalidate_at(start);
         let deadline = session.deadline();
@@ -648,10 +652,15 @@ mod tests {
         let read = session.begin_load(1);
         assert!(session.accept_load(read, Some(track(1, "fresh"))));
         assert!(session.editable());
-        assert_eq!(session.source.values(session.track().unwrap()), staged);
+        assert_eq!(
+            session
+                .source
+                .values(session.display_track_at(Instant::now()).unwrap()),
+            staged
+        );
         session.invalidate_at(start + Duration::from_secs(1));
         session.select(2);
-        assert!(session.track().is_none());
+        assert!(session.display_track_at(Instant::now()).is_none());
         assert!(session.deadline().is_none());
     }
 

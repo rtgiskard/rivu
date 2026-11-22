@@ -94,7 +94,11 @@ impl Queue {
             this.apply_queue_search(query.clone(), cx);
         });
         let mut model = QueueBrowser::default();
-        model.sync(state.query_revisions(None), state.queue.total);
+        model.sync(
+            state.query_revisions(None),
+            state.queue.total,
+            cx.background_executor().now(),
+        );
         Self {
             context,
             state,
@@ -149,12 +153,13 @@ impl Queue {
     }
 
     fn schedule_refresh_wake(&mut self, cx: &mut Context<Self>) {
-        self.refresh_wake
-            .schedule(self.model.rows.refresh_deadline(), cx, |this, now, cx| {
-                let changed = this.model.rows.expire(now);
-                this.schedule_refresh_wake(cx);
-                changed
-            });
+        rivu_ui::refresh::RefreshWake::sync(
+            self,
+            cx,
+            |this| &mut this.refresh_wake,
+            |this| this.model.rows.refresh_deadline(),
+            |this, now, _| this.model.rows.expire(now),
+        );
     }
 
     fn retain_loading(&mut self, cx: &mut Context<Self>) {
@@ -305,7 +310,7 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     fn test_queue(
         cx: &mut gpui::TestAppContext,
@@ -344,7 +349,8 @@ mod tests {
                     .demand_page(0..1, this.state.system.config.query_batch_size as usize)
                     .unwrap();
                 this.loading = LoadingText::new(Duration::ZERO);
-                this.loading.begin((), token, Instant::now());
+                this.loading
+                    .begin((), token, cx.background_executor().now());
                 if already_visible {
                     this.loading.schedule(cx, |this| &mut this.loading);
                     assert!(this.loading.show(&(), false));

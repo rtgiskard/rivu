@@ -458,6 +458,7 @@ impl Metadata {
             &mut self.metadata,
             self.visible || self.preview_demand,
             Instant::now(),
+            cx.background_executor().now(),
         );
         self.schedule_metadata_expiry(cx);
         let Some(task) = task else {
@@ -467,11 +468,11 @@ impl Metadata {
         self.run_metadata_read(task, cx);
     }
 
-    fn source_peak_current(&self, peak: &SourcePeak) -> bool {
+    fn source_peak_current(&self, peak: &SourcePeak, now: Instant) -> bool {
         self.metadata.identity() == Some(peak.track_id)
             && peak.source_serial == self.metadata.source.generation()
             && peak.reload == self.source_peak_reload
-            && self.metadata.track().is_some_and(|track| {
+            && self.metadata.display_track_at(now).is_some_and(|track| {
                 track.id == peak.track_id
                     && track.path == peak.path
                     && (track.cue.is_none() && !track.missing) == peak.eligible
@@ -479,16 +480,17 @@ impl Metadata {
     }
 
     fn prepare_source_peak(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
         if !self.read_demand()
             || self.source_peak_reading
             || self
                 .source_peak
                 .as_ref()
-                .is_some_and(|peak| self.source_peak_current(peak))
+                .is_some_and(|peak| self.source_peak_current(peak, now))
         {
             return;
         }
-        let Some(track) = self.metadata.track() else {
+        let Some(track) = self.metadata.display_track_at(now) else {
             return;
         };
         if self.metadata.identity() != Some(track.id) {
@@ -519,7 +521,7 @@ impl Metadata {
             let peak = read.await;
             let _ = this.update(cx, |this, cx| {
                 this.source_peak_reading = false;
-                if this.source_peak_current(&peak) {
+                if this.source_peak_current(&peak, cx.background_executor().now()) {
                     this.source_peak = Some(peak);
                     cx.notify();
                 } else {
@@ -613,15 +615,16 @@ impl Metadata {
     }
 
     fn schedule_metadata_expiry(&mut self, cx: &mut Context<Self>) {
-        if self.metadata.expire(Instant::now()) {
+        if self.metadata.expire(cx.background_executor().now()) {
             cx.notify();
         }
-        self.refresh_wake
-            .schedule(self.metadata.deadline(), cx, |this, now, cx| {
-                let changed = this.metadata.expire(now);
-                this.schedule_metadata_expiry(cx);
-                changed
-            });
+        RefreshWake::sync(
+            self,
+            cx,
+            |this| &mut this.refresh_wake,
+            |this| this.metadata.deadline(),
+            |this, now, _| this.metadata.expire(now),
+        );
     }
 
     pub(in crate::gui) fn clear_selection(&mut self, cx: &mut Context<Self>) {
@@ -861,7 +864,7 @@ impl Metadata {
         let theme = rivu_ui::theme::palette(cx);
         let hint = self
             .metadata
-            .track()
+            .display_track_at(cx.background_executor().now())
             .map_or(DecoderHint::Auto, |track| track.decoder_hint);
         let label = match hint {
             DecoderHint::Auto => self.tr("gl-auto"),
@@ -1020,7 +1023,8 @@ impl Metadata {
         width: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let value: SharedString = self.metadata.track().map_or_else(
+        let now = cx.background_executor().now();
+        let value: SharedString = self.metadata.display_track_at(now).map_or_else(
             || self.tr("gl-not-loaded"),
             |track| self.metadata.source.field_text(field, track).into(),
         );
@@ -1093,7 +1097,9 @@ impl Metadata {
             .children(metadata_copy(
                 label.clone(),
                 value.clone(),
-                self.metadata.track().map(|_| self.tr("gl-copy-value")),
+                self.metadata
+                    .display_track_at(now)
+                    .map(|_| self.tr("gl-copy-value")),
                 cx,
             ));
         let value = if value.is_empty() { "-".into() } else { value };
@@ -1260,7 +1266,8 @@ impl Metadata {
             });
         });
         self.prepare_artwork(cx);
-        let track = self.metadata.track();
+        let now = cx.background_executor().now();
+        let track = self.metadata.display_track_at(now);
         let tag_numbers = track.map(|track| self.metadata.source.numbers(track));
         let id = track.map(|track| track.id);
         let favorite = track.is_some_and(|track| track.favorite);
@@ -1273,10 +1280,10 @@ impl Metadata {
         let peak_value: SharedString = self
             .source_peak
             .as_ref()
-            .filter(|peak| self.source_peak_current(peak))
+            .filter(|peak| self.source_peak_current(peak, now))
             .and_then(|peak| peak.value)
             .map_or_else(|| "-".into(), |value| value.to_string().into());
-        let presence_status = match self.metadata.availability() {
+        let presence_status = match self.metadata.availability(now) {
             MetadataAvailability::Unknown if identity.is_none() => {
                 self.context.i18n.text("gl-no-track")
             }

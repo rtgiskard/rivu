@@ -121,12 +121,12 @@ struct DuplicateReview {
 }
 
 impl DuplicateReview {
-    fn open(&mut self, revisions: QueryRevisions) -> Option<u64> {
+    fn open(&mut self, revisions: QueryRevisions, now: Instant) -> Option<u64> {
         let cancel = self.task_id();
         self.busy = None;
         self.epoch = self.epoch.wrapping_add(1);
         self.open = true;
-        self.reset(revisions);
+        self.reset(revisions, now);
         cancel
     }
 
@@ -139,7 +139,7 @@ impl DuplicateReview {
         cancel
     }
 
-    fn reset(&mut self, revisions: QueryRevisions) -> bool {
+    fn reset(&mut self, revisions: QueryRevisions, now: Instant) -> bool {
         if self.busy.is_some() {
             return false;
         }
@@ -147,7 +147,7 @@ impl DuplicateReview {
         self.fingerprint = None;
         self.members_dirty = false;
         self.feedback = None;
-        self.request_groups(0, revisions);
+        self.request_groups(0, revisions, now);
         true
     }
 
@@ -355,7 +355,7 @@ impl DuplicateReview {
         true
     }
 
-    fn select_group(&mut self, fingerprint: &str, revisions: QueryRevisions) -> bool {
+    fn select_group(&mut self, fingerprint: &str, revisions: QueryRevisions, now: Instant) -> bool {
         if self.busy.is_some()
             || self.confirming
             || self.groups_dirty
@@ -365,7 +365,7 @@ impl DuplicateReview {
             return false;
         }
         self.feedback = None;
-        self.request_members(fingerprint.into(), 0, revisions);
+        self.request_members(fingerprint.into(), 0, revisions, now);
         true
     }
 
@@ -376,6 +376,7 @@ impl DuplicateReview {
         generation: u64,
         offset: usize,
         revisions: QueryRevisions,
+        now: Instant,
     ) -> bool {
         let projection = if groups {
             &self.groups_projection
@@ -396,31 +397,37 @@ impl DuplicateReview {
             return false;
         }
         if groups {
-            self.request_groups(offset, revisions);
+            self.request_groups(offset, revisions, now);
         } else if let Some(fingerprint) = self.fingerprint.clone() {
-            self.request_members(fingerprint, offset, revisions);
+            self.request_members(fingerprint, offset, revisions, now);
         } else {
             return false;
         }
         true
     }
 
-    fn request_groups(&mut self, offset: usize, revisions: QueryRevisions) {
+    fn request_groups(&mut self, offset: usize, revisions: QueryRevisions, now: Instant) {
         if self.groups_offset != offset {
             self.groups = None;
             self.groups_retention.clear();
         }
         self.groups_offset = offset;
         if self.groups.is_some() {
-            self.groups_retention.begin(Instant::now());
+            self.groups_retention.begin(now);
         }
-        self.sync_queries(revisions);
+        self.sync_queries(revisions, now);
         self.groups_projection.cancel();
         self.groups_dirty = true;
         self.groups_failed = false;
     }
 
-    fn request_members(&mut self, fingerprint: String, offset: usize, revisions: QueryRevisions) {
+    fn request_members(
+        &mut self,
+        fingerprint: String,
+        offset: usize,
+        revisions: QueryRevisions,
+        now: Instant,
+    ) {
         if self.fingerprint.as_ref() != Some(&fingerprint) || self.members_offset != offset {
             if self.fingerprint.as_ref() != Some(&fingerprint) {
                 self.clear_selection();
@@ -431,10 +438,10 @@ impl DuplicateReview {
         }
         self.fingerprint = Some(fingerprint);
         self.members_offset = offset;
-        self.sync_queries(revisions);
+        self.sync_queries(revisions, now);
         self.members_projection.cancel();
         if !self.members.is_empty() {
-            self.members_retention.begin(Instant::now());
+            self.members_retention.begin(now);
         }
         self.members_current = false;
         self.members_dirty = true;
@@ -537,6 +544,7 @@ impl DuplicateReview {
         generation: u64,
         response: QueryResponse,
         revisions: QueryRevisions,
+        now: Instant,
     ) -> bool {
         if !self.accepts_groups(epoch, query, generation, revisions) {
             return false;
@@ -555,10 +563,10 @@ impl DuplicateReview {
         match response.result {
             Ok(ViewResponse::DuplicateGroups(page)) => {
                 if self.groups_offset > 0 && self.groups_offset >= page.total {
-                    self.request_groups(0, revisions);
+                    self.request_groups(0, revisions, now);
                     return false;
                 }
-                let unchanged = self.visible_groups(Instant::now()) == Some(&page);
+                let unchanged = self.visible_groups(now) == Some(&page);
                 if !unchanged {
                     self.groups = Some(page);
                 }
@@ -582,18 +590,7 @@ impl DuplicateReview {
         generation: u64,
         result: (QueryResponse, Vec<Option<bool>>, SelectedMembers),
         revisions: QueryRevisions,
-    ) -> bool {
-        self.accept_members_at(epoch, query, generation, result, revisions, Instant::now)
-    }
-
-    fn accept_members_at(
-        &mut self,
-        epoch: u64,
-        query: &Query,
-        generation: u64,
-        result: (QueryResponse, Vec<Option<bool>>, SelectedMembers),
-        revisions: QueryRevisions,
-        now: impl FnOnce() -> Instant,
+        now: Instant,
     ) -> bool {
         let (response, existence, selected) = result;
         if !self.accepts_members(epoch, query, generation, revisions) {
@@ -646,7 +643,7 @@ impl DuplicateReview {
             Ok(ViewResponse::DuplicateMembers(page)) => {
                 if self.members_offset > 0 && self.members_offset >= page.total {
                     if let Some(hash) = self.fingerprint.clone() {
-                        self.request_members(hash, 0, revisions);
+                        self.request_members(hash, 0, revisions, now);
                     }
                     return false;
                 }
@@ -657,7 +654,7 @@ impl DuplicateReview {
                     .map(|(value, exists)| Member { value, exists })
                     .collect::<Vec<_>>();
                 let unchanged =
-                    self.visible_members(now()) == members && self.members_total == page.total;
+                    self.visible_members(now) == members && self.members_total == page.total;
                 self.members_total = page.total;
                 if !unchanged {
                     self.members = members;
@@ -694,11 +691,7 @@ impl DuplicateReview {
         })
     }
 
-    fn sync_queries(&mut self, revisions: QueryRevisions) -> bool {
-        self.sync_queries_at(revisions, Instant::now())
-    }
-
-    fn sync_queries_at(&mut self, revisions: QueryRevisions, now: Instant) -> bool {
+    fn sync_queries(&mut self, revisions: QueryRevisions, now: Instant) -> bool {
         let groups_query = self.groups_query();
         let groups_changed = self.groups_projection.sync(&groups_query, revisions);
         if groups_changed {
@@ -901,7 +894,10 @@ impl Duplicates {
 
     pub(super) fn open(&mut self, cx: &mut Context<Self>) {
         self.state = self.context.snapshot();
-        if let Some(id) = self.duplicate_review.open(self.state.query_revisions(None)) {
+        if let Some(id) = self.duplicate_review.open(
+            self.state.query_revisions(None),
+            cx.background_executor().now(),
+        ) {
             let _ = self.context.handle().send(Command::CancelRelocation { id });
         }
         self.start_duplicate_groups(cx);
@@ -933,21 +929,25 @@ impl Duplicates {
     }
 
     fn request_duplicate_groups(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.duplicate_review
-            .request_groups(offset, self.state.query_revisions(None));
+        self.duplicate_review.request_groups(
+            offset,
+            self.state.query_revisions(None),
+            cx.background_executor().now(),
+        );
         self.start_duplicate_groups(cx);
     }
 
     fn schedule_duplicate_expiry(&mut self, cx: &mut Context<Self>) {
-        if self.duplicate_review.expire(Instant::now()) {
+        if self.duplicate_review.expire(cx.background_executor().now()) {
             cx.notify();
         }
-        self.refresh_wake
-            .schedule(self.duplicate_review.deadline(), cx, |this, now, cx| {
-                let changed = this.duplicate_review.expire(now);
-                this.schedule_duplicate_expiry(cx);
-                changed
-            });
+        RefreshWake::sync(
+            self,
+            cx,
+            |this| &mut this.refresh_wake,
+            |this| this.duplicate_review.deadline(),
+            |this, now, _| this.duplicate_review.expire(now),
+        );
     }
     fn start_duplicate_groups(&mut self, cx: &mut Context<Self>) {
         self.schedule_duplicate_expiry(cx);
@@ -1018,6 +1018,7 @@ impl Duplicates {
                     generation,
                     response,
                     this.state.query_revisions(None),
+                    cx.background_executor().now(),
                 ) {
                     this.start_duplicate_groups(cx);
                     return;
@@ -1039,6 +1040,7 @@ impl Duplicates {
             fingerprint,
             offset,
             self.state.query_revisions(None),
+            cx.background_executor().now(),
         );
         self.start_duplicate_members(cx);
     }
@@ -1159,6 +1161,7 @@ impl Duplicates {
                     generation,
                     (response, existence, selected),
                     this.state.query_revisions(None),
+                    cx.background_executor().now(),
                 ) {
                     this.start_duplicate_members(cx);
                     return;
@@ -1174,9 +1177,10 @@ impl Duplicates {
         if !self.context.handle().is_connected() {
             return;
         }
-        let data_changed = self
-            .duplicate_review
-            .sync_queries(self.state.query_revisions(None));
+        let data_changed = self.duplicate_review.sync_queries(
+            self.state.query_revisions(None),
+            cx.background_executor().now(),
+        );
         if !self.duplicate_review.open {
             return;
         }
@@ -1349,7 +1353,7 @@ impl Duplicates {
         let review = &self.duplicate_review;
         let busy = review.busy.is_some();
         let mut groups = column().flex_shrink_0().gap_2();
-        let now = Instant::now();
+        let now = cx.background_executor().now();
         let members_visible = !review.members_retention.expired(now);
         if let Some(page) = review.visible_groups(now) {
             if page.total == 0 {
@@ -1377,10 +1381,11 @@ impl Duplicates {
                             "",
                             cx,
                             move |this, _, cx| {
-                                if this
-                                    .duplicate_review
-                                    .select_group(&hash, this.state.query_revisions(None))
-                                {
+                                if this.duplicate_review.select_group(
+                                    &hash,
+                                    this.state.query_revisions(None),
+                                    cx.background_executor().now(),
+                                ) {
                                     this.start_duplicate_members(cx);
                                     cx.notify();
                                 }
@@ -1919,10 +1924,10 @@ impl Duplicates {
                                     IconButtonDensity::Regular,
                                     cx,
                                     |this, _, cx| {
-                                        if this
-                                            .duplicate_review
-                                            .reset(this.state.query_revisions(None))
-                                        {
+                                        if this.duplicate_review.reset(
+                                            this.state.query_revisions(None),
+                                            cx.background_executor().now(),
+                                        ) {
                                             this.start_duplicate_groups(cx);
                                             cx.notify();
                                         }
@@ -2078,6 +2083,7 @@ impl Duplicates {
                                 generation,
                                 next,
                                 this.state.query_revisions(None),
+                                cx.background_executor().now(),
                             )
                         {
                             return;
@@ -2138,6 +2144,7 @@ mod tests {
         model::{Command, DuplicateMember, Page, RelocationPhase, RelocationTaskStatus, Track},
         response::{QueryResponse, QueryRevisions, ViewResponse},
     };
+    use std::time::Instant;
 
     #[test]
     fn retained_pager_cannot_rebind_to_another_group_or_review() {
@@ -2145,29 +2152,36 @@ mod tests {
         let mut review = review();
         let epoch = review.epoch;
         let generation = review.members_projection.generation();
-        assert!(review.select_group("replacement", revisions));
-        assert!(!review.change_page(false, epoch, generation, 8, revisions));
+        assert!(review.select_group("replacement", revisions, Instant::now()));
+        assert!(!review.change_page(false, epoch, generation, 8, revisions, Instant::now()));
         assert_eq!(review.fingerprint.as_deref(), Some("replacement"));
         assert_eq!(review.members_offset, 0);
         load_members(&mut review, revisions);
 
         let generation = review.members_projection.generation();
-        assert!(review.change_page(false, epoch, generation, 8, revisions));
+        assert!(review.change_page(false, epoch, generation, 8, revisions, Instant::now()));
         assert_eq!(review.members_offset, 8);
-        assert!(!review.change_page(false, epoch, generation, 16, revisions));
+        assert!(!review.change_page(false, epoch, generation, 16, revisions, Instant::now()));
         assert_eq!(review.members_offset, 8);
 
         let generation = review.members_projection.generation();
         review.close();
-        review.open(revisions);
+        review.open(revisions, Instant::now());
         load_groups(&mut review, revisions);
-        assert!(review.select_group("replacement", revisions));
-        assert!(!review.change_page(false, epoch, generation, 8, revisions));
+        assert!(review.select_group("replacement", revisions, Instant::now()));
+        assert!(!review.change_page(false, epoch, generation, 8, revisions, Instant::now()));
         assert_eq!(review.members_offset, 0);
         load_members(&mut review, revisions);
         let current_epoch = review.epoch;
         let generation = review.members_projection.generation();
-        assert!(review.change_page(false, current_epoch, generation, 8, revisions));
+        assert!(review.change_page(
+            false,
+            current_epoch,
+            generation,
+            8,
+            revisions,
+            Instant::now()
+        ));
         assert_eq!(review.members_offset, 8);
     }
 
@@ -2181,14 +2195,14 @@ mod tests {
             duplicate_groups: 1,
             ..revisions
         };
-        review.sync_queries(changed);
-        assert!(!review.change_page(true, epoch, generation, 12, changed));
+        review.sync_queries(changed, Instant::now());
+        assert!(!review.change_page(true, epoch, generation, 12, changed, Instant::now()));
         assert_eq!(review.groups_offset, 0);
         let current_generation = review.groups_projection.generation();
-        assert!(!review.change_page(true, epoch, current_generation, 12, changed));
+        assert!(!review.change_page(true, epoch, current_generation, 12, changed, Instant::now()));
         load_groups(&mut review, changed);
         let generation = review.groups_projection.generation();
-        assert!(review.change_page(true, epoch, generation, 12, changed));
+        assert!(review.change_page(true, epoch, generation, 12, changed, Instant::now()));
         assert_eq!(review.groups_offset, 12);
     }
 
@@ -2201,7 +2215,7 @@ mod tests {
                     let mut review = review();
                     let revisions = QueryRevisions::default();
                     let old = if members {
-                        review.request_members("fingerprint".into(), 0, revisions);
+                        review.request_members("fingerprint".into(), 0, revisions, Instant::now());
                         let (read, _) = review.begin_members().unwrap();
                         assert!(!review.members_worker_finished());
                         assert!(review.accept_members(
@@ -2225,11 +2239,12 @@ mod tests {
                                     Vec::new()
                                 )),
                             ),
-                            revisions
+                            revisions,
+                            Instant::now(),
                         ));
                         read
                     } else {
-                        review.request_groups(0, revisions);
+                        review.request_groups(0, revisions, Instant::now());
                         let read = review.begin_groups().unwrap();
                         assert!(!review.groups_worker_finished());
                         assert!(review.accept_groups(
@@ -2240,22 +2255,28 @@ mod tests {
                                 revisions,
                                 result: Err(error.clone())
                             },
-                            revisions
+                            revisions,
+                            Instant::now(),
                         ));
                         read
                     };
                     assert!(review.feedback.is_none());
                     assert!(!old.ticket.is_current());
                     for _ in 0..3 {
-                        assert!(!review.sync_queries(revisions));
+                        assert!(!review.sync_queries(revisions, Instant::now()));
                         assert!(review.begin_groups().is_none());
                         assert!(review.begin_members().is_none());
                     }
                     let current = if explicit {
                         if members {
-                            review.request_members("fingerprint".into(), 0, revisions);
+                            review.request_members(
+                                "fingerprint".into(),
+                                0,
+                                revisions,
+                                Instant::now(),
+                            );
                         } else {
-                            review.request_groups(0, revisions);
+                            review.request_groups(0, revisions, Instant::now());
                         }
                         revisions
                     } else {
@@ -2264,7 +2285,7 @@ mod tests {
                             duplicate_members: 1,
                             ..revisions
                         };
-                        review.sync_queries(current);
+                        review.sync_queries(current, Instant::now());
                         current
                     };
                     if members {
@@ -2281,7 +2302,8 @@ mod tests {
                                 Vec::new(),
                                 None
                             ),
-                            current
+                            current,
+                            Instant::now(),
                         ));
                         assert!(!review.members_worker_finished());
                         assert!(review.accept_members(
@@ -2299,7 +2321,8 @@ mod tests {
                                 Vec::new(),
                                 None,
                             ),
-                            current
+                            current,
+                            Instant::now(),
                         ));
                         assert!(review.members_current);
                     } else {
@@ -2312,7 +2335,8 @@ mod tests {
                                 revisions,
                                 result: Err(error.clone())
                             },
-                            current
+                            current,
+                            Instant::now(),
                         ));
                         assert!(!review.groups_worker_finished());
                         assert!(review.accept_groups(
@@ -2326,7 +2350,8 @@ mod tests {
                                     rows: Vec::new()
                                 }))
                             },
-                            current
+                            current,
+                            Instant::now(),
                         ));
                         assert_eq!(review.groups.as_ref().unwrap().total, 0);
                     }
@@ -2339,8 +2364,13 @@ mod tests {
     #[test]
     fn bitrate_change_reloads_only_members_preserving_choices_counts_and_worker_gates() {
         let mut review = ready_review();
-        review.request_groups(12, QueryRevisions::default());
-        review.request_members("fingerprint".into(), 8, QueryRevisions::default());
+        review.request_groups(12, QueryRevisions::default(), Instant::now());
+        review.request_members(
+            "fingerprint".into(),
+            8,
+            QueryRevisions::default(),
+            Instant::now(),
+        );
         review.groups = Some(Page {
             total: 24,
             rows: Vec::new(),
@@ -2352,8 +2382,8 @@ mod tests {
             bitrate: 1,
             ..Default::default()
         };
-        review.sync_queries(revisions);
-        review.sync_queries(revisions);
+        review.sync_queries(revisions, Instant::now());
+        review.sync_queries(revisions, Instant::now());
         assert!(review.members.is_empty());
         assert!(review.source.is_none());
         assert!(review.target.is_none());
@@ -2380,7 +2410,8 @@ mod tests {
             &members.query,
             members.generation,
             (response, vec![Some(false)], None),
-            revisions
+            revisions,
+            Instant::now(),
         ));
         assert!(review.members.is_empty());
         assert_eq!(review.selection_ids(), (Some(1), Some(2)));
@@ -2393,14 +2424,22 @@ mod tests {
     #[test]
     fn combined_payload_and_reference_refresh_retires_choices_until_reloaded() {
         let mut review = ready_review();
-        review.request_members("fingerprint".into(), 0, QueryRevisions::default());
+        review.request_members(
+            "fingerprint".into(),
+            0,
+            QueryRevisions::default(),
+            Instant::now(),
+        );
         let (read, _) = review.begin_members().unwrap();
-        assert!(review.sync_queries(QueryRevisions {
-            bitrate: 1,
-            queue: 1,
-            duplicate_members: 1,
-            ..Default::default()
-        }));
+        assert!(review.sync_queries(
+            QueryRevisions {
+                bitrate: 1,
+                queue: 1,
+                duplicate_members: 1,
+                ..Default::default()
+            },
+            Instant::now()
+        ));
         assert!(review.source.is_none() && review.target.is_none());
         assert_eq!(review.selection_ids(), (Some(1), Some(2)));
         assert!(!review.can_relocate());
@@ -2416,7 +2455,7 @@ mod tests {
     fn duplicate_selection_timeout_disables_actions_and_cannot_restore_old_selection() {
         let revisions = QueryRevisions::default();
         let mut review = ready_review();
-        review.request_members("fingerprint".into(), 8, revisions);
+        review.request_members("fingerprint".into(), 8, revisions, Instant::now());
         let (read, selected_ids) = review.begin_members().unwrap();
         assert_eq!(selected_ids, vec![1, 2]);
         // The page and off-page selection lookup share one owner and physical
@@ -2432,7 +2471,7 @@ mod tests {
         assert!(!review.members_current);
         assert!(!review.can_relocate());
         assert!(review.submit(true).is_none());
-        review.request_members("new group".into(), 0, revisions);
+        review.request_members("new group".into(), 0, revisions, Instant::now());
         review.feedback = Some(ReviewFeedback::ReadFailed("new selection error".into()));
         assert!(review.begin_members().is_none());
         assert!(review.members_worker_finished());
@@ -2465,8 +2504,8 @@ mod tests {
             ..Default::default()
         };
         let mut review = review();
-        review.request_groups(0, revisions);
-        review.request_members("fingerprint".into(), 0, revisions);
+        review.request_groups(0, revisions, Instant::now());
+        review.request_members("fingerprint".into(), 0, revisions, Instant::now());
         let groups = review.begin_groups().unwrap();
         let (members, _) = review.begin_members().unwrap();
         // Timeout responses do not carry the query's revision stamp. Ownership
@@ -2490,8 +2529,8 @@ mod tests {
         assert!(review.groups_failed);
         assert!(review.members_failed);
         assert!(!review.members_current);
-        review.request_groups(12, revisions);
-        review.request_members("latest".into(), 8, revisions);
+        review.request_groups(12, revisions, Instant::now());
+        review.request_members("latest".into(), 8, revisions, Instant::now());
         review.feedback = Some(ReviewFeedback::ReadFailed("newer error".into()));
         assert!(review.begin_groups().is_none());
         assert!(review.begin_members().is_none());
@@ -2515,13 +2554,13 @@ mod tests {
     fn obsolete_duplicate_timeout_preserves_new_demand_and_feedback() {
         let revisions = QueryRevisions::default();
         let mut review = review();
-        review.request_groups(0, revisions);
-        review.request_members("fingerprint".into(), 0, revisions);
+        review.request_groups(0, revisions, Instant::now());
+        review.request_members("fingerprint".into(), 0, revisions, Instant::now());
         let groups = review.begin_groups().unwrap();
         let (members, _) = review.begin_members().unwrap();
         review.close();
-        review.open(revisions);
-        review.request_members("latest".into(), 0, revisions);
+        review.open(revisions, Instant::now());
+        review.request_members("latest".into(), 0, revisions, Instant::now());
         review.feedback = Some(ReviewFeedback::ReadFailed("newer error".into()));
         assert!(!review.timeout_groups(
             groups.epoch,
@@ -2580,7 +2619,7 @@ mod tests {
         ));
         assert_eq!(review.begin_task_read(8), Some(epoch));
         review.close();
-        review.open(QueryRevisions::default());
+        review.open(QueryRevisions::default(), Instant::now());
         review.busy = Some(Busy::Relocating(9));
         review.feedback = Some(ReviewFeedback::ReadFailed("latest error".into()));
         assert!(!review.timeout_task_read(epoch, 8, timeout_response()));
@@ -2618,7 +2657,8 @@ mod tests {
                 let epoch = this.duplicate_review.begin_task_read(7).unwrap();
                 if reopen {
                     this.duplicate_review.close();
-                    this.duplicate_review.open(QueryRevisions::default());
+                    this.duplicate_review
+                        .open(QueryRevisions::default(), cx.background_executor().now());
                     this.duplicate_review.busy = Some(Busy::Relocating(8));
                     // Demand arrives while the old physical query owns the gate.
                     this.request_retained_relocation(8, cx);
@@ -2656,7 +2696,7 @@ mod tests {
             fingerprint: Some("fingerprint".into()),
             ..Default::default()
         };
-        review.sync_queries(QueryRevisions::default());
+        review.sync_queries(QueryRevisions::default(), Instant::now());
         review.groups_dirty = false;
         review.members_dirty = false;
         review.members_current = true;
@@ -2677,7 +2717,8 @@ mod tests {
                     rows: Vec::new()
                 })),
             },
-            revisions
+            revisions,
+            Instant::now(),
         ));
     }
 
@@ -2699,7 +2740,8 @@ mod tests {
                 Vec::new(),
                 None
             ),
-            revisions
+            revisions,
+            Instant::now(),
         ));
     }
 
@@ -2745,8 +2787,8 @@ mod tests {
     fn refresh_and_close_reopen_reject_old_results_without_releasing_workers() {
         let mut review = review();
         let revisions = QueryRevisions::default();
-        review.request_groups(0, revisions);
-        review.request_members("fingerprint".into(), 0, revisions);
+        review.request_groups(0, revisions, Instant::now());
+        review.request_members("fingerprint".into(), 0, revisions, Instant::now());
         let groups = review.begin_groups().unwrap();
         let (members, _) = review.begin_members().unwrap();
         assert!(review.accepts_groups(groups.epoch, &groups.query, groups.generation, revisions));
@@ -2756,7 +2798,7 @@ mod tests {
             members.generation,
             revisions
         ));
-        assert!(review.reset(revisions));
+        assert!(review.reset(revisions, Instant::now()));
         assert!(review.groups_loading);
         assert!(review.members_loading);
         assert!(!review.accepts_groups(groups.epoch, &groups.query, groups.generation, revisions));
@@ -2767,8 +2809,8 @@ mod tests {
             revisions
         ));
         assert_eq!(review.close(), None);
-        assert_eq!(review.open(revisions), None);
-        review.request_members("fingerprint".into(), 0, revisions);
+        assert_eq!(review.open(revisions, Instant::now()), None);
+        review.request_members("fingerprint".into(), 0, revisions, Instant::now());
         assert!(!review.accepts_groups(
             groups.epoch,
             &groups.query,
@@ -2812,7 +2854,7 @@ mod tests {
             });
             let groups_generation = review.groups_projection.generation();
             let groups_query = review.groups_query();
-            assert!(review.sync_queries(revisions));
+            assert!(review.sync_queries(revisions, Instant::now()));
             assert!(review.groups.is_some());
             assert!(!review.groups_dirty);
             assert!(review.members_dirty);
@@ -2830,11 +2872,14 @@ mod tests {
         review.confirming = true;
         review.members_current = true;
         assert!(review.can_relocate());
-        assert!(review.sync_queries(QueryRevisions {
-            duplicate_members: 1,
-            queue: 1,
-            ..Default::default()
-        }));
+        assert!(review.sync_queries(
+            QueryRevisions {
+                duplicate_members: 1,
+                queue: 1,
+                ..Default::default()
+            },
+            Instant::now()
+        ));
         assert_eq!(review.source.as_ref().unwrap().track.id, 1);
         assert_eq!(review.target.as_ref().unwrap().track.id, 2);
         assert!(!review.can_relocate());
@@ -2898,7 +2943,7 @@ mod tests {
         let mut review = review();
         review.groups_failed = true;
         review.members_failed = true;
-        assert!(!review.sync_queries(QueryRevisions::default()));
+        assert!(!review.sync_queries(QueryRevisions::default(), Instant::now()));
         assert!(review.groups_failed);
         assert!(review.members_failed);
         assert!(!review.groups_dirty);
@@ -2959,10 +3004,13 @@ mod tests {
         let mut review = ready_review();
         assert!(review.submit(false).is_none());
         assert!(review.confirm(true));
-        review.sync_queries(QueryRevisions {
-            duplicate_members: 1,
-            ..Default::default()
-        });
+        review.sync_queries(
+            QueryRevisions {
+                duplicate_members: 1,
+                ..Default::default()
+            },
+            Instant::now(),
+        );
         assert!(review.submit(false).is_none());
         assert!(review.submit(true).is_none());
         review.members = vec![member(1, true), member(2, false)];
@@ -2981,7 +3029,7 @@ mod tests {
         assert!(!review.confirming);
         assert!(review.submit(true).is_none());
         assert!(!review.select_member(2, false));
-        assert!(!review.reset(QueryRevisions::default()));
+        assert!(!review.reset(QueryRevisions::default(), Instant::now()));
     }
 
     #[test]
@@ -2992,7 +3040,7 @@ mod tests {
         // Starting has no Core task ID yet: the async host must cancel the ID
         // from an acknowledgement rejected below, even if the entity was dropped.
         assert_eq!(review.close(), None);
-        review.open(QueryRevisions::default());
+        review.open(QueryRevisions::default(), Instant::now());
         let late_ack = ack(true, Some(7));
         assert!(!review.accept_ack(epoch, false, &late_ack));
         assert!(review.busy.is_none());
@@ -3050,7 +3098,7 @@ mod tests {
                     review.accept_cancel(7, Ok(()));
                 }
                 let cancel = if replacing {
-                    review.open(QueryRevisions::default())
+                    review.open(QueryRevisions::default(), Instant::now())
                 } else {
                     review.close()
                 };
@@ -3079,7 +3127,7 @@ mod tests {
         ));
         assert!(review.accept_ack(epoch, true, &ack(true, None)));
         assert!(review.busy == Some(Busy::Keeping));
-        review.request_groups(0, QueryRevisions::default());
+        review.request_groups(0, QueryRevisions::default(), Instant::now());
         assert!(review.begin_groups().is_none());
         review.finish_ack_refresh();
         assert!(review.busy.is_none());
@@ -3162,7 +3210,7 @@ mod tests {
         assert_eq!(review.begin_task_read(7), Some(epoch));
         assert!(review.begin_task_read(7).is_none());
         review.close();
-        review.open(QueryRevisions::default());
+        review.open(QueryRevisions::default(), Instant::now());
         review.members = vec![member(1, true), member(2, false)];
         review.members_current = true;
         review.select_member(1, true);
@@ -3211,7 +3259,7 @@ mod tests {
     fn member_selection_read_must_share_page_revision_before_acceptance() {
         let mut review = ready_review();
         let revisions = QueryRevisions::default();
-        review.request_members("fingerprint".into(), 0, revisions);
+        review.request_members("fingerprint".into(), 0, revisions, Instant::now());
         let (read, selected_ids) = review.begin_members().unwrap();
         assert_eq!(selected_ids, vec![1, 2]);
         review.members_worker_finished();
@@ -3242,16 +3290,20 @@ mod tests {
                 Some((selected, vec![Some(true)]))
             ),
             revisions,
+            Instant::now(),
         ));
         assert!(!review.members_current);
         assert_eq!(review.members.len(), 2);
         assert!(!review.members_dirty);
         assert!(review.feedback.is_none());
         assert!(review.begin_members().is_none());
-        review.sync_queries(QueryRevisions {
-            duplicate_members: 1,
-            ..revisions
-        });
+        review.sync_queries(
+            QueryRevisions {
+                duplicate_members: 1,
+                ..revisions
+            },
+            Instant::now(),
+        );
         assert!(review.begin_members().is_some());
     }
 
@@ -3259,7 +3311,7 @@ mod tests {
     fn accepted_pages_rewind_empty_offsets_and_reconcile_member_choices() {
         let mut review = ready_review();
         let revisions = QueryRevisions::default();
-        review.request_groups(12, revisions);
+        review.request_groups(12, revisions, Instant::now());
         let read = review.begin_groups().unwrap();
         review.groups_worker_finished();
         let response = QueryResponse {
@@ -3274,11 +3326,12 @@ mod tests {
             &read.query,
             read.generation,
             response,
-            revisions
+            revisions,
+            Instant::now(),
         ));
         assert_eq!(review.groups_offset, 0);
         assert!(review.begin_groups().is_some());
-        review.request_members("fingerprint".into(), 0, revisions);
+        review.request_members("fingerprint".into(), 0, revisions, Instant::now());
         let (read, _) = review.begin_members().unwrap();
         review.members_worker_finished();
         let response = QueryResponse {
@@ -3294,6 +3347,7 @@ mod tests {
             read.generation,
             (response, vec![Some(false), Some(true)], None),
             revisions,
+            Instant::now(),
         ));
         assert_eq!(review.members_total, 2);
         assert!(review.can_relocate());
@@ -3304,7 +3358,7 @@ mod tests {
     fn failed_task_reads_keep_close_cancellation_and_reject_late_completion() {
         for timeout in [false, true] {
             let mut review = ready_review();
-            review.request_groups(0, QueryRevisions::default());
+            review.request_groups(0, QueryRevisions::default(), Instant::now());
             assert!(review.begin_groups().is_some());
             review.confirm(true);
             let (epoch, _) = review.submit(false).unwrap();
@@ -3354,16 +3408,16 @@ mod tests {
             duplicate_members: 1,
             ..Default::default()
         };
-        review.sync_queries_at(revisions, start);
+        review.sync_queries(revisions, start);
         assert!(!old_groups.is_current());
         assert!(!old_members.is_current());
-        assert!(!review.select_group("fingerprint", revisions));
+        assert!(!review.select_group("fingerprint", revisions, start));
         assert!(!review.select_member(1, true));
         assert!(review.submit(false).is_none());
         let groups = review.begin_groups().unwrap();
         let (members, _) = review.begin_members().unwrap();
         let deadline = review.deadline();
-        review.sync_queries_at(
+        review.sync_queries(
             QueryRevisions {
                 duplicate_groups: 2,
                 duplicate_members: 2,
@@ -3391,7 +3445,8 @@ mod tests {
             review.epoch,
             review.groups_projection.generation(),
             12,
-            revisions
+            revisions,
+            Instant::now(),
         ));
     }
 
@@ -3401,12 +3456,12 @@ mod tests {
         review.members_total = 2;
         let allocation = review.members.as_ptr();
         let revisions = QueryRevisions::default();
-        review.request_members("fingerprint".into(), 0, revisions);
+        review.request_members("fingerprint".into(), 0, revisions, Instant::now());
         let before =
             review.members_retention.deadline().unwrap() - std::time::Duration::from_nanos(1);
         let (read, _) = review.begin_members().unwrap();
         review.members_worker_finished();
-        assert!(review.accept_members_at(
+        assert!(review.accept_members(
             read.epoch,
             &read.query,
             read.generation,
@@ -3422,7 +3477,7 @@ mod tests {
                 None
             ),
             revisions,
-            || before,
+            before,
         ));
         assert_eq!(review.members.as_ptr(), allocation);
         assert!(review.members_current);
@@ -3438,10 +3493,15 @@ mod tests {
             total: 24,
             rows: Vec::new(),
         });
-        review.request_groups(12, QueryRevisions::default());
+        review.request_groups(12, QueryRevisions::default(), Instant::now());
         assert!(review.groups.is_none());
         assert!(review.groups_retention.deadline().is_none());
-        review.request_members("other group".into(), 0, QueryRevisions::default());
+        review.request_members(
+            "other group".into(),
+            0,
+            QueryRevisions::default(),
+            Instant::now(),
+        );
         assert!(review.members.is_empty());
         assert!(review.source.is_none() && review.target.is_none());
         assert!(review.members_retention.deadline().is_none());
@@ -3471,5 +3531,58 @@ mod tests {
         assert!(review.expire(next));
         assert!(review.members.is_empty());
         assert!(review.deadline().is_none());
+    }
+
+    #[gpui::test]
+    fn duplicate_retention_wake_prunes_both_pages_on_executor_time(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        use rivu_presentation::refresh::REFRESH_RETENTION;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = crate::test_support::CoreRuntime::start_quiet(directory.path());
+        let context = super::FeatureContext::for_test(runtime.handle.clone());
+        let owner = cx.new(|cx| super::Duplicates::new(context, cx));
+        let gap = Duration::from_millis(50);
+        owner.update(cx, |this, cx| {
+            this.duplicate_review = ready_review();
+            let review = &mut this.duplicate_review;
+            review.groups = Some(Page {
+                total: 1,
+                rows: Vec::new(),
+            });
+            let now = cx.background_executor().now();
+            review.request_groups(0, QueryRevisions::default(), now);
+            this.schedule_duplicate_expiry(cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(gap);
+        owner.update(cx, |this, cx| {
+            this.duplicate_review.request_members(
+                "fingerprint".into(),
+                0,
+                QueryRevisions::default(),
+                cx.background_executor().now(),
+            );
+            this.schedule_duplicate_expiry(cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(REFRESH_RETENTION - gap);
+        cx.run_until_parked();
+        owner.update(cx, |this, cx| {
+            assert!(this.duplicate_review.groups.is_none());
+            assert_eq!(
+                this.duplicate_review
+                    .visible_members(cx.background_executor().now())
+                    .len(),
+                2
+            );
+        });
+        cx.executor().advance_clock(gap);
+        cx.run_until_parked();
+        owner.update(cx, |this, _| {
+            assert!(this.duplicate_review.members.is_empty());
+            assert!(this.duplicate_review.deadline().is_none());
+        });
     }
 }

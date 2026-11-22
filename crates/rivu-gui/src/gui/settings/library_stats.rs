@@ -41,11 +41,7 @@ fn revisions(library: u64) -> QueryRevisions {
 }
 
 impl RootStats {
-    fn sync(&mut self, roots: &[PathBuf], revision: u64) -> bool {
-        self.sync_at(roots, revision, Instant::now())
-    }
-
-    fn sync_at(&mut self, roots: &[PathBuf], revision: u64, now: Instant) -> bool {
+    fn sync(&mut self, roots: &[PathBuf], revision: u64, now: Instant) -> bool {
         if self.owner.stamp().is_some() && self.roots == roots && self.revision == revision {
             return false;
         }
@@ -90,9 +86,9 @@ impl RootStats {
         };
     }
 
-    pub(super) fn retry(&mut self) {
+    pub(super) fn retry(&mut self, now: Instant) {
         self.owner.cancel();
-        self.restart_at(Instant::now());
+        self.restart_at(now);
     }
 
     fn visible_value(&self, path: &Path, now: Instant) -> Option<&LibraryRootStats> {
@@ -201,15 +197,16 @@ fn size_label(bytes: u64) -> String {
 
 impl Settings {
     pub(super) fn schedule_library_stats_expiry(&mut self, cx: &mut Context<Self>) {
-        if self.root_stats.expire(Instant::now()) {
+        if self.root_stats.expire(cx.background_executor().now()) {
             cx.notify();
         }
-        self.root_stats_wake
-            .schedule(self.root_stats.retention.deadline(), cx, |this, now, cx| {
-                let changed = this.root_stats.expire(now);
-                this.schedule_library_stats_expiry(cx);
-                changed
-            });
+        rivu_ui::refresh::RefreshWake::sync(
+            self,
+            cx,
+            |this| &mut this.root_stats_wake,
+            |this| this.root_stats.retention.deadline(),
+            |this, now, _| this.root_stats.expire(now),
+        );
     }
 
     pub(in crate::gui) fn sync_library_stats(&mut self, cx: &mut Context<Self>) {
@@ -219,6 +216,7 @@ impl Settings {
         if self.root_stats.sync(
             &self.model.draft.library_roots,
             self.handle.library_revision(),
+            cx.background_executor().now(),
         ) {
             cx.notify();
         }
@@ -252,6 +250,7 @@ impl Settings {
                     this.root_stats.sync(
                         &this.model.draft.library_roots,
                         this.handle.library_revision(),
+                        cx.background_executor().now(),
                     );
                 }
                 this.root_stats.complete(read, response);
@@ -262,8 +261,8 @@ impl Settings {
         .detach();
     }
 
-    pub(super) fn root_stats_label(&self, path: &Path) -> SharedString {
-        if let Some(stats) = self.root_stats.visible_value(path, Instant::now()) {
+    pub(super) fn root_stats_label(&self, path: &Path, now: Instant) -> SharedString {
+        if let Some(stats) = self.root_stats.visible_value(path, now) {
             return self
                 .i18n
                 .format(
@@ -374,16 +373,16 @@ mod tests {
     #[test]
     fn root_stats_fences_removed_roots_revisions_and_closed_sessions() {
         let mut stats = RootStats::default();
-        stats.sync(&["/music".into()], 1);
+        stats.sync(&["/music".into()], 1, Instant::now());
         let read = stats.prepare().unwrap();
-        stats.sync(&["/replacement".into()], 2);
+        stats.sync(&["/replacement".into()], 2, Instant::now());
         assert!(stats.prepare().is_none());
         complete_ok(&mut stats, read, 1, 99);
         assert!(stats.values.is_empty());
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 2, 3);
         assert_eq!(stats.values[Path::new("/replacement")].total, 3);
-        stats.sync(&["/replacement".into()], 3);
+        stats.sync(&["/replacement".into()], 3, Instant::now());
         let read = stats.prepare().unwrap();
         stats.cancel();
         complete_ok(&mut stats, read, 3, 99);
@@ -397,7 +396,7 @@ mod tests {
         let roots = (0..MAX_QUERY_ROWS + 1)
             .map(|id| PathBuf::from(format!("/root/{id}")))
             .collect::<Vec<_>>();
-        stats.sync(&roots, 1);
+        stats.sync(&roots, 1, Instant::now());
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 1, 1);
         assert_eq!(stats.values.len(), MAX_QUERY_ROWS);
@@ -405,7 +404,7 @@ mod tests {
         stats.fail(&read, "Timed out".into());
         assert!(stats.in_flight.pending());
         assert!(stats.prepare().is_none());
-        stats.sync(&roots, 2);
+        stats.sync(&roots, 2, Instant::now());
         assert!(stats.prepare().is_none());
         complete_ok(&mut stats, read, 1, 99);
         assert!(stats.values.is_empty());
@@ -415,13 +414,13 @@ mod tests {
     #[test]
     fn root_stats_distinguishes_zero_failure_and_reopen() {
         let mut stats = RootStats::default();
-        stats.sync(&["/empty".into()], 1);
+        stats.sync(&["/empty".into()], 1, Instant::now());
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 1, 0);
         assert_eq!(stats.values[Path::new("/empty")].total, 0);
         assert!(stats.error.is_none());
         assert!(stats.prepare().is_none());
-        stats.retry();
+        stats.retry(Instant::now());
         let read = stats.prepare().unwrap();
         let invalid = QueryResponse {
             revisions: revisions(1),
@@ -431,7 +430,7 @@ mod tests {
         assert!(stats.values.is_empty());
         assert!(stats.error.is_some());
         assert!(stats.prepare().is_none());
-        stats.retry();
+        stats.retry(Instant::now());
         assert!(stats.error.is_none());
         assert!(stats.prepare().is_some());
     }
@@ -442,7 +441,7 @@ mod tests {
             for explicit in [false, true] {
                 let mut stats = RootStats::default();
                 let roots = vec!["/music".into()];
-                stats.sync(&roots, 7);
+                stats.sync(&roots, 7, Instant::now());
                 let old = stats.prepare().unwrap();
                 stats.complete(
                     old,
@@ -455,14 +454,14 @@ mod tests {
                 assert!(!stats.in_flight.pending());
                 assert!(stats.error.is_none());
                 for _ in 0..3 {
-                    assert!(!stats.sync(&roots, 7));
+                    assert!(!stats.sync(&roots, 7, Instant::now()));
                     assert!(stats.prepare().is_none());
                 }
                 let revision = if explicit {
-                    stats.retry();
+                    stats.retry(Instant::now());
                     7
                 } else {
-                    stats.sync(&roots, 8);
+                    stats.sync(&roots, 8, Instant::now());
                     8
                 };
                 let next = stats.prepare().unwrap();
@@ -478,7 +477,7 @@ mod tests {
     #[test]
     fn root_stats_reject_worker_revisions_and_busy_failures() {
         let mut stats = RootStats::default();
-        stats.sync(&["/music".into()], 1);
+        stats.sync(&["/music".into()], 1, Instant::now());
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 2, 99);
         assert!(stats.values.is_empty());
@@ -487,7 +486,7 @@ mod tests {
         assert!(!stats.in_flight.pending());
         assert!(stats.prepare().is_none());
 
-        stats.retry();
+        stats.retry(Instant::now());
         let read = stats.prepare().unwrap();
         stats.complete(
             read,
@@ -507,7 +506,7 @@ mod tests {
     #[test]
     fn root_stats_reject_wrong_root_identity_with_current_revision() {
         let mut stats = RootStats::default();
-        stats.sync(&["/music".into()], 1);
+        stats.sync(&["/music".into()], 1, Instant::now());
         let read = stats.prepare().unwrap();
         let mut invalid = response(&read, 1, 10);
         let Ok(ViewResponse::LibraryRootStats(values)) = &mut invalid.result else {
@@ -522,10 +521,10 @@ mod tests {
     #[test]
     fn root_stats_retry_waits_for_physical_worker_and_rejects_its_late_result() {
         let mut stats = RootStats::default();
-        stats.sync(&["/music".into()], 1);
+        stats.sync(&["/music".into()], 1, Instant::now());
         let read = stats.prepare().unwrap();
         stats.fail(&read, "Timed out".into());
-        stats.retry();
+        stats.retry(Instant::now());
         assert!(stats.error.is_none());
         assert!(stats.in_flight.pending());
         assert!(stats.prepare().is_none());
@@ -542,13 +541,13 @@ mod tests {
         let mut stats = RootStats::default();
         let roots = vec![PathBuf::from("/music")];
         let start = Instant::now();
-        stats.sync_at(&roots, 1, start);
+        stats.sync(&roots, 1, start);
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 1, 3);
-        stats.sync_at(&roots, 2, start);
+        stats.sync(&roots, 2, start);
         let read = stats.prepare().unwrap();
         let deadline = stats.retention.deadline();
-        stats.sync_at(&roots, 3, start + Duration::from_millis(150));
+        stats.sync(&roots, 3, start + Duration::from_millis(150));
         stats.restart_at(start + Duration::from_millis(180));
         assert_eq!(stats.retention.deadline(), deadline);
         assert!(stats.in_flight.pending());
@@ -591,25 +590,25 @@ mod tests {
             .collect::<Vec<_>>();
         let start = Instant::now();
         let deadline = start + rivu_presentation::refresh::REFRESH_RETENTION;
-        stats.sync_at(&roots, 1, start);
+        stats.sync(&roots, 1, start);
         while let Some(read) = stats.prepare() {
             complete_ok(&mut stats, read, 1, 3);
         }
-        stats.sync_at(&roots, 2, start);
+        stats.sync(&roots, 2, start);
         assert!(stats.expire(deadline));
         assert!(stats.values.is_empty());
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 2, 4);
         assert_eq!(stats.visible_value(&roots[0], deadline).unwrap().total, 4);
         assert_eq!(stats.next, MAX_QUERY_ROWS);
-        stats.sync_at(&roots, 3, deadline);
+        stats.sync(&roots, 3, deadline);
         assert_eq!(stats.retention.deadline(), None);
         assert!(stats.values.is_empty());
         assert!(stats.visible_value(&roots[0], deadline).is_none());
         while let Some(read) = stats.prepare() {
             complete_ok(&mut stats, read, 3, 5);
         }
-        stats.sync_at(&roots, 4, deadline);
+        stats.sync(&roots, 4, deadline);
         assert_eq!(
             stats.retention.deadline(),
             Some(deadline + rivu_presentation::refresh::REFRESH_RETENTION)
@@ -622,40 +621,39 @@ mod tests {
         let mut stats = RootStats::default();
         let roots = vec![PathBuf::from("/music")];
         let now = Instant::now();
-        stats.sync_at(&roots, 1, now);
+        stats.sync(&roots, 1, now);
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 1, 3);
-        stats.sync_at(&roots, 2, now);
+        stats.sync(&roots, 2, now);
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 2, 3);
         assert_eq!(stats.values[Path::new("/music")].total, 3);
         assert!(stats.retention.deadline().is_none());
-        stats.sync_at(&roots, 3, now);
+        stats.sync(&roots, 3, now);
         let read = stats.prepare().unwrap();
         complete_ok(&mut stats, read, 3, 4);
         assert_eq!(stats.values[Path::new("/music")].total, 4);
-        stats.sync_at(&[PathBuf::from("/other")], 3, now);
+        stats.sync(&[PathBuf::from("/other")], 3, now);
         assert!(stats.values.is_empty());
         assert!(stats.retention.deadline().is_none());
     }
 
     #[gpui::test]
     fn statistics_retention_wake_expires_without_reader_completion(cx: &mut gpui::TestAppContext) {
-        use std::time::Duration;
-
         let (_directory, _runtime, settings) = super::super::tests::fixture(cx);
         settings.update(cx, |this, cx| {
             let roots = vec![PathBuf::from("/music")];
-            let now = Instant::now() + Duration::from_secs(60);
-            this.root_stats.sync_at(&roots, 1, now);
+            let now = cx.background_executor().now();
+            this.root_stats.sync(&roots, 1, now);
             let read = this.root_stats.prepare().unwrap();
             complete_ok(&mut this.root_stats, read, 1, 3);
-            this.root_stats.sync_at(&roots, 2, now);
+            this.root_stats.sync(&roots, 2, now);
             let _hung_reader = this.root_stats.prepare().unwrap();
             this.schedule_library_stats_expiry(cx);
         });
         cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(61));
+        cx.executor()
+            .advance_clock(rivu_presentation::refresh::REFRESH_RETENTION);
         cx.run_until_parked();
         settings.update(cx, |this, _| {
             assert!(this.root_stats.values.is_empty());

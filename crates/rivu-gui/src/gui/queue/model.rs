@@ -4,7 +4,7 @@ use rivu_protocol::{
     model::{Query, QueryStamp, QueueRow},
     response::{QueryError, QueryRevisions, ViewResponse},
 };
-use std::{collections::HashMap, ops::Range};
+use std::{collections::HashMap, ops::Range, time::Instant};
 
 pub(in crate::gui) struct QueueCommit {
     pub(super) stamp: QueryStamp,
@@ -411,7 +411,7 @@ impl QueueBrowser {
         self.projection
             .accepts(&self.query(), generation, stamp.revisions())
     }
-    pub(super) fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
+    pub(super) fn sync(&mut self, revisions: QueryRevisions, total: usize, now: Instant) -> bool {
         let query = self.query();
         let impact = self.page_projection.impact(&query, revisions);
         let changed = self.page_projection.sync(&query, revisions);
@@ -422,9 +422,9 @@ impl QueueBrowser {
             if impact.identity_changed {
                 self.rows.clear();
             } else if impact.coordinates_changed {
-                self.rows.invalidate();
+                self.rows.refresh_at(now);
             } else {
-                self.rows.invalidate_payload();
+                self.rows.invalidate_payload(now);
             }
             if impact.coordinates_changed {
                 self.cancel();
@@ -444,8 +444,13 @@ impl QueueBrowser {
         }
         changed
     }
-    pub(super) fn retry_selection(&mut self, revisions: QueryRevisions, total: usize) -> bool {
-        if self.sync(revisions, total) {
+    pub(super) fn retry_selection(
+        &mut self,
+        revisions: QueryRevisions,
+        total: usize,
+        now: Instant,
+    ) -> bool {
+        if self.sync(revisions, total, now) {
             return true;
         }
         if self.selection_error.is_none() && !self.selection_retired {
@@ -456,10 +461,15 @@ impl QueueBrowser {
         true
     }
 
-    pub(super) fn retry_page(&mut self, revisions: QueryRevisions, total: usize) -> Range<usize> {
+    pub(super) fn retry_page(
+        &mut self,
+        revisions: QueryRevisions,
+        total: usize,
+        now: Instant,
+    ) -> Range<usize> {
         self.rows.retry();
         if !self.ready() {
-            self.retry_selection(revisions, total);
+            self.retry_selection(revisions, total, now);
         }
         self.rows.visible()
     }
@@ -695,6 +705,7 @@ mod tests {
         model::{Page, Query, QueueRow},
         response::QueryRevisions,
     };
+    use std::time::Instant;
 
     #[test]
     fn obsolete_pages_wait_for_retry_or_freshness_and_physical_completion() {
@@ -715,14 +726,14 @@ mod tests {
                 assert!(queue.rows.retired());
                 assert!(queue.rows.error(0).is_none());
                 for _ in 0..3 {
-                    assert!(!queue.sync(revisions(7), 200_000));
+                    assert!(!queue.sync(revisions(7), 200_000, Instant::now()));
                     assert!(queue.demand_page(0..2, 20).is_none());
                 }
                 let current = if explicit {
-                    queue.retry_page(revisions(7), 200_000);
+                    queue.retry_page(revisions(7), 200_000, Instant::now());
                     revisions(7)
                 } else {
-                    queue.sync(revisions(8), 200_000);
+                    queue.sync(revisions(8), 200_000, Instant::now());
                     revisions(8)
                 };
                 assert!(queue.demand_page(0..2, 20).is_none());
@@ -762,7 +773,7 @@ mod tests {
         for explicit in [false, true] {
             let mut queue = queue(7);
             queue.select(identity(1, 3), false);
-            queue.sync(revisions(8), 20);
+            queue.sync(revisions(8), 20, Instant::now());
             let old = queue.take_reconcile_job().unwrap();
             queue.retire_reconcile(&old, revisions(8));
             assert!(!queue.busy);
@@ -770,14 +781,14 @@ mod tests {
             assert!(queue.selection_error.is_none());
             assert!(queue.selected.contains_key(&1));
             for _ in 0..3 {
-                queue.sync(revisions(8), 20);
+                queue.sync(revisions(8), 20, Instant::now());
                 assert!(queue.take_reconcile_job().is_none());
             }
             let current = if explicit {
-                assert!(queue.retry_selection(revisions(8), 20));
+                assert!(queue.retry_selection(revisions(8), 20, Instant::now()));
                 revisions(8)
             } else {
-                queue.sync(revisions(9), 20);
+                queue.sync(revisions(9), 20, Instant::now());
                 revisions(9)
             };
             assert!(queue.take_reconcile_job().is_none());
@@ -832,7 +843,7 @@ mod tests {
     }
     fn queue(revision: u64) -> QueueBrowser {
         let mut queue = QueueBrowser::default();
-        queue.sync(revisions(revision), 200_000);
+        queue.sync(revisions(revision), 200_000, Instant::now());
         queue
     }
     fn row(id: u64, position: usize) -> QueueRow {
@@ -887,18 +898,18 @@ mod tests {
             rows: vec![row(10, 0), row(11, 1), row(12, 2)],
         });
         let generation = queue.page_projection.generation();
-        assert!(queue.sync(revisions(8), 3));
+        assert!(queue.sync(revisions(8), 3, Instant::now()));
         assert!(queue.rows.get(1).is_none());
         assert!(queue.rows.position(|row| row.id == 11).is_none());
         assert!(queue.operation_rows(identity(11, 1), generation).is_empty());
         // Retained payload survives until the retention deadline, then disappears.
         let deadline = queue.rows.refresh_deadline().unwrap();
         let before = deadline - std::time::Duration::from_nanos(1);
-        assert_eq!(queue.rows.display_at(1, before).unwrap().id, 11);
+        assert_eq!(queue.rows.display(1, before).unwrap().id, 11);
         assert!(!queue.rows.expire(before));
         assert!(queue.operation_rows(identity(11, 1), generation).is_empty());
         assert!(queue.rows.expire(deadline));
-        assert!(queue.rows.display(1).is_none());
+        assert!(queue.rows.display(1, deadline).is_none());
     }
 
     #[test]
@@ -909,7 +920,7 @@ mod tests {
             total: 1,
             rows: vec![row(10, 0)],
         });
-        assert!(queue.sync(revisions(8), 1));
+        assert!(queue.sync(revisions(8), 1, Instant::now()));
         let (query, generation) = queue.demand_page(0..1, 20).unwrap();
         queue.accept_page(
             &query,
@@ -941,7 +952,7 @@ mod tests {
         let (old_query, old_generation) = queue.demand_page(40..50, 20).unwrap();
         let mut latest = revisions(7);
         latest.bitrate = 1;
-        assert!(queue.sync(latest, 200_000));
+        assert!(queue.sync(latest, 200_000, Instant::now()));
         assert_eq!(queue.rows.total(), Some(200_000));
         assert_eq!(queue.rows.visible(), 40..50);
         assert_eq!(queue.ordered_ids(), vec![11]);
@@ -973,7 +984,7 @@ mod tests {
             let mut queue = queue(7);
             let mut latest = revisions(7);
             latest.bitrate = 1;
-            queue.sync(latest, 200_000);
+            queue.sync(latest, 200_000, Instant::now());
             let (query, generation) = queue.demand_page(0..2, 20).unwrap();
             let response = |revisions, row| rivu_protocol::response::QueryResponse {
                 revisions,
@@ -992,14 +1003,14 @@ mod tests {
             assert!(queue.rows.error(0).is_none());
             queue.retire_page_worker();
             for _ in 0..3 {
-                assert!(!queue.sync(latest, 200_000));
+                assert!(!queue.sync(latest, 200_000, Instant::now()));
                 assert!(queue.demand_page(0..2, 20).is_none());
             }
             if explicit {
-                queue.retry_page(latest, 200_000);
+                queue.retry_page(latest, 200_000, Instant::now());
             } else {
                 latest.bitrate += 1;
-                assert!(queue.sync(latest, 200_000));
+                assert!(queue.sync(latest, 200_000, Instant::now()));
             }
             let (next_query, next_generation) = queue.demand_page(0..2, 20).unwrap();
             queue.accept_page(
@@ -1042,7 +1053,7 @@ mod tests {
             library: 7,
             ..revisions(7)
         };
-        queue.sync(baseline, 200_000);
+        queue.sync(baseline, 200_000, Instant::now());
         queue.rows.demand(40..50, 20);
         queue.rows.begin(40, 20);
         queue.rows.accept(Page {
@@ -1052,7 +1063,7 @@ mod tests {
         queue.select(identity(10, 40), false);
         let mut latest = baseline;
         latest.bitrate = 1;
-        queue.sync(latest, 200_000);
+        queue.sync(latest, 200_000, Instant::now());
         assert_eq!(queue.rows.total(), Some(100));
         assert_eq!(queue.rows.visible(), 40..50);
         assert!(queue.rows.get(40).is_none());
@@ -1079,10 +1090,10 @@ mod tests {
         assert!(queue.page_worker);
         assert!(queue.rows.error(0).is_some());
         queue.change_search(Some("one".into()));
-        queue.sync(revisions(7), 200_000);
+        queue.sync(revisions(7), 200_000, Instant::now());
         assert!(queue.demand_page(0..10, 20).is_none());
         queue.change_search(Some("latest".into()));
-        queue.sync(revisions(7), 200_000);
+        queue.sync(revisions(7), 200_000, Instant::now());
         assert!(queue.demand_page(0..10, 20).is_none());
         queue.retire_page_worker();
         let (latest, _) = queue.demand_page(0..10, 20).unwrap();
@@ -1110,7 +1121,7 @@ mod tests {
         let identity = QueueIdentity::from(&source);
         assert_eq!((identity.position, identity.offset), (400, 1));
         queue.query = Some("needle".into());
-        assert!(queue.sync(revisions(7), 200_000));
+        assert!(queue.sync(revisions(7), 200_000, Instant::now()));
         assert_eq!(queue.rows.total(), None);
         let (query, _) = queue.demand_page(0..3, 20).unwrap();
         assert!(
@@ -1237,7 +1248,7 @@ mod tests {
         let mut queue = queue(0);
         queue.select(identity(10, 199_999), false);
         queue.select(identity(11, 3), true);
-        queue.rows.invalidate();
+        queue.rows.refresh_at(Instant::now());
         assert_eq!(
             queue.ordered().iter().map(|row| row.id).collect::<Vec<_>>(),
             vec![11, 10]
@@ -1385,7 +1396,7 @@ mod tests {
         unrelated.playlist = 13;
         unrelated.duplicate_groups = 14;
         unrelated.duplicate_members = 15;
-        assert!(!queue.sync(unrelated, 200_000));
+        assert!(!queue.sync(unrelated, 200_000, Instant::now()));
         assert_eq!(queue.rows.get(10).unwrap().id, 10);
         assert!(queue.rows.error(20).is_some());
         assert_eq!(queue.ordered_ids(), vec![10]);
@@ -1402,18 +1413,18 @@ mod tests {
     #[test]
     fn unfiltered_snapshot_total_survives_invalidation_and_boundary_changes() {
         let mut queue = queue(7);
-        assert!(queue.sync(revisions(8), 0));
+        assert!(queue.sync(revisions(8), 0, Instant::now()));
         assert_eq!(queue.rows.total(), Some(0));
         assert_eq!(queue.rows.len(), 0);
         assert!(queue.demand_page(0..1, 20).is_none());
         assert!(!queue.page_worker);
-        assert!(!queue.sync(revisions(8), 0));
+        assert!(!queue.sync(revisions(8), 0, Instant::now()));
         queue.cancel_page_demand();
         assert!(queue.demand_page(0..1, 40).is_none());
         assert_eq!(queue.rows.total(), Some(0));
         assert!(!queue.page_worker);
 
-        assert!(queue.sync(revisions(9), 1));
+        assert!(queue.sync(revisions(9), 1, Instant::now()));
         assert_eq!(queue.rows.total(), Some(1));
         let (query, _) = queue.demand_page(0..1, 40).unwrap();
         assert!(matches!(
@@ -1430,7 +1441,7 @@ mod tests {
     fn filtered_empty_survives_hide_and_resize_without_using_snapshot_total() {
         let mut queue = queue(7);
         queue.query = Some("needle".into());
-        queue.sync(revisions(7), 200_000);
+        queue.sync(revisions(7), 200_000, Instant::now());
         queue.demand_page(0..1, 20).unwrap();
         queue.page_worker = false;
         queue.rows.accept(Page {
@@ -1438,7 +1449,7 @@ mod tests {
             rows: vec![],
         });
         queue.cancel_page_demand();
-        assert!(!queue.sync(revisions(7), 200_000));
+        assert!(!queue.sync(revisions(7), 200_000, Instant::now()));
         assert!(queue.demand_page(0..1, 40).is_none());
         assert_eq!(queue.rows.total(), Some(0));
         assert!(!queue.page_worker);
@@ -1450,7 +1461,7 @@ mod tests {
         for total in [0, 100] {
             let mut queue = queue(7);
             queue.query = Some("Track".into());
-            queue.sync(revisions(7), 200_000);
+            queue.sync(revisions(7), 200_000, Instant::now());
             queue.rows.begin(80, 20);
             queue.rows.accept(Page {
                 total,
@@ -1465,7 +1476,7 @@ mod tests {
             if total > 0 {
                 queue.rows.demand(80..90, 20);
             }
-            assert!(queue.sync(refreshed, 200_000));
+            assert!(queue.sync(refreshed, 200_000, Instant::now()));
             assert_eq!(queue.rows.total(), None);
             if total == 0 {
                 let (query, generation) = queue.demand_page(queue.rows.visible(), 20).unwrap();
@@ -1509,11 +1520,14 @@ mod tests {
             || unreachable!(),
         );
         for _ in 0..3 {
-            assert!(!queue.sync(revisions(7), 20));
+            assert!(!queue.sync(revisions(7), 20, Instant::now()));
             assert!(queue.demand_page(0..10, 20).is_none());
         }
         assert!(queue.rows.error(0).is_some());
-        assert_eq!(queue.retry_page(revisions(7), 20), queue.rows.visible());
+        assert_eq!(
+            queue.retry_page(revisions(7), 20, Instant::now()),
+            queue.rows.visible()
+        );
         assert!(queue.demand_page(0..10, 20).is_some());
     }
 
@@ -1522,11 +1536,11 @@ mod tests {
         let mut queue = queue(7);
         queue.select(identity(10, 199_999), false);
         queue.select(identity(11, 3), true);
-        assert!(queue.sync(revisions(8), 10));
+        assert!(queue.sync(revisions(8), 10, Instant::now()));
         assert!(!queue.page_worker);
         assert!(queue.busy);
         let old = queue.take_reconcile_job().unwrap();
-        assert!(queue.sync(revisions(9), 10));
+        assert!(queue.sync(revisions(9), 10, Instant::now()));
         assert!(!queue.reconcile_current(&old, revisions(8)));
         assert!(queue.take_reconcile_job().is_none());
         assert!(queue.take_job().is_none());
@@ -1537,10 +1551,10 @@ mod tests {
         assert_eq!(latest.ids.len(), 2);
         queue.release_reconcile_worker(latest.generation);
         assert!(queue.finish_reconcile(&latest, revisions(9), Err("offline".into())));
-        assert!(!queue.sync(revisions(9), 10));
+        assert!(!queue.sync(revisions(9), 10, Instant::now()));
         assert!(queue.take_reconcile_job().is_none());
         assert_eq!(queue.selected.len(), 2);
-        assert!(queue.retry_selection(revisions(9), 10));
+        assert!(queue.retry_selection(revisions(9), 10, Instant::now()));
         let retry = queue.take_reconcile_job().unwrap();
         assert!(queue.finish_reconcile(
             &retry,
@@ -1562,7 +1576,7 @@ mod tests {
             if cancel {
                 queue.cancel();
                 assert!(queue.page_worker);
-                assert!(queue.sync(revisions(8), 200_000));
+                assert!(queue.sync(revisions(8), 200_000, Instant::now()));
             }
             assert!(queue.demand_page(0..10, 40).is_none());
             assert!(
@@ -1592,7 +1606,7 @@ mod tests {
     fn reconcile_failure_parks_positions_and_retry_rejects_late_completion() {
         let mut queue = queue(7);
         queue.select(identity(10, 100), false);
-        queue.sync(revisions(8), 200);
+        queue.sync(revisions(8), 200, Instant::now());
         let old = queue.take_reconcile_job().unwrap();
         assert!(queue.finish_reconcile(&old, revisions(8), Err("offline".into())));
         assert!(queue.selection_error.is_some());
@@ -1610,9 +1624,9 @@ mod tests {
                 .is_none()
         );
         assert!(queue.pending.is_none());
-        assert!(!queue.sync(revisions(8), 200));
+        assert!(!queue.sync(revisions(8), 200, Instant::now()));
         assert!(queue.take_reconcile_job().is_none());
-        assert!(queue.retry_selection(revisions(8), 200));
+        assert!(queue.retry_selection(revisions(8), 200, Instant::now()));
         assert!(queue.take_reconcile_job().is_none());
         assert!(!queue.finish_reconcile(&old, revisions(8), Ok(vec![identity(10, 100)])));
         assert!(!queue.ready());
@@ -1654,7 +1668,7 @@ mod tests {
     fn cancelling_replacement_does_not_validate_retained_positions() {
         let mut queue = queue(7);
         queue.select(identity(10, 100), false);
-        queue.sync(revisions(8), 200);
+        queue.sync(revisions(8), 200, Instant::now());
         let old = queue.take_reconcile_job().unwrap();
         assert!(queue.finish_reconcile(&old, revisions(8), Err("offline".into())));
         let intent = crate::gui::coordination::manual_actions::ManualIntents::default().begin();
@@ -1673,7 +1687,7 @@ mod tests {
                 .is_none()
         );
         queue.release_reconcile_worker(old.generation);
-        assert!(queue.retry_selection(revisions(8), 200));
+        assert!(queue.retry_selection(revisions(8), 200, Instant::now()));
         let retry = queue.take_reconcile_job().unwrap();
         assert!(queue.finish_reconcile(&retry, revisions(8), Ok(vec![identity(10, 2)])));
         queue.release_reconcile_worker(retry.generation);

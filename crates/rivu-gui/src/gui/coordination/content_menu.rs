@@ -851,12 +851,13 @@ impl WindowView {
                                 &state.playlist_targets.scroll,
                                 cx.processor(
                                     move |this, range: std::ops::Range<usize>, _window, cx| {
+                                        let now = cx.background_executor().now();
                                         range
                                             .map(|index| {
                                                 let Some((id, name)) = this
                                                     .playlists
                                                     .read(cx)
-                                                    .catalog_display_row(index)
+                                                    .catalog_display_row(index, now)
                                                     .map(|playlist| {
                                                         (
                                                             playlist.id,

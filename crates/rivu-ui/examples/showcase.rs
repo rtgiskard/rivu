@@ -13,10 +13,7 @@ use rivu_ui::{
     search::{SearchEvent, SearchField, SearchLabels},
     theme, two_line_text,
 };
-use std::{
-    cell::Cell,
-    time::{Duration, Instant},
-};
+use std::{cell::Cell, time::Duration};
 
 static DARK: Palette = Palette {
     bg: 0x161820,
@@ -259,7 +256,8 @@ impl Showcase {
         self.rows = rows;
         if rows == Rows::Loading {
             self.generation = self.generation.wrapping_add(1);
-            self.loading.begin((), self.generation, Instant::now());
+            self.loading
+                .begin((), self.generation, cx.background_executor().now());
             self.loading.schedule(cx, |this| &mut this.loading);
         }
         cx.notify();

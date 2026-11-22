@@ -256,7 +256,8 @@ impl Playlists {
             self.state
                 .query_revisions(self.browser.playlists().selected()),
         );
-        self.browser.refresh_playlists(changes);
+        self.browser
+            .refresh_playlists(cx.background_executor().now(), changes);
         if changes.entries {
             let range = self.browser.playlists().entries().rows.visible();
             self.ensure_entry_range(range, cx);
@@ -283,14 +284,12 @@ impl Playlists {
         self.reconcile(self.context.snapshot(), cx);
     }
     fn schedule_refresh_wake(&mut self, cx: &mut Context<Self>) {
-        self.refresh_wake.schedule(
-            self.browser.playlists().refresh_deadline(),
+        RefreshWake::sync(
+            self,
             cx,
-            |this, now, cx| {
-                let changed = this.browser.playlists.expire(now);
-                this.schedule_refresh_wake(cx);
-                changed
-            },
+            |this| &mut this.refresh_wake,
+            |this| this.browser.playlists().refresh_deadline(),
+            |this, now, _| this.browser.playlists.expire(now),
         );
     }
     fn tr(&self, id: &str) -> SharedString {
@@ -550,8 +549,13 @@ impl Playlists {
     pub(in crate::gui) fn catalog_display_row(
         &self,
         index: usize,
+        now: std::time::Instant,
     ) -> Option<&rivu_protocol::model::PlaylistSummary> {
-        self.browser.playlists().summaries().rows.display(index)
+        self.browser
+            .playlists()
+            .summaries()
+            .rows
+            .display(index, now)
     }
     pub(in crate::gui) fn catalog_loading_row(
         &self,
@@ -1175,7 +1179,8 @@ impl Playlists {
         window.defer(cx, move |_, cx| {
             let _ = owner.update(cx, |this, cx| this.request_playlist_selection(cx));
         });
-        let matched = self.browser.playlists().summaries().rows.display_total();
+        let now = cx.background_executor().now();
+        let matched = self.browser.playlists().summaries().rows.display_total(now);
         let total = self.state.library.playlist_total;
         self.playlist_search.update(cx, |search, cx| {
             if let Some(matched) = matched {
@@ -1185,7 +1190,7 @@ impl Playlists {
             }
         });
         let entries = self.browser.playlists().entries();
-        let matched = entries.rows.display_total();
+        let matched = entries.rows.display_total(now);
         // Unfiltered entries of the selected playlist carry the same count while
         // the catalog summary refreshes.
         let selected = self.browser.playlists().selected();
@@ -1306,9 +1311,10 @@ impl Playlists {
             catalog_len,
             &self.browser.playlists().summaries().scroll,
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                let now = cx.background_executor().now();
                 range
                     .map(|index| {
-                        let Some(p) = this.browser.playlists().summaries().rows.display(index) else {
+                        let Some(p) = this.browser.playlists().summaries().rows.display(index, now) else {
                             return this
                                 .paged_loading_row(ViewRequestKind::Summaries, index, row_height, cx)
                                 .into_any_element();
@@ -1591,9 +1597,11 @@ impl Playlists {
                 entries_len,
                 &self.browser.playlists().entries().scroll,
                 cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                    let now = cx.background_executor().now();
                     range
                         .map(|index| {
-                            let Some(e) = this.browser.playlists().entries().rows.display(index)
+                            let Some(e) =
+                                this.browser.playlists().entries().rows.display(index, now)
                             else {
                                 return this
                                     .paged_loading_row(
@@ -2135,7 +2143,13 @@ impl Playlists {
                 list_panel_header(
                     theme,
                     self.tr("shell-panel-playlists"),
-                    if let Some(total) = self.browser.playlists().summaries().rows.display_total() {
+                    if let Some(total) = self
+                        .browser
+                        .playlists()
+                        .summaries()
+                        .rows
+                        .display_total(cx.background_executor().now())
+                    {
                         self.i18n
                             .format(
                                 "gl-playlist-count",
@@ -2897,9 +2911,12 @@ mod content_menu_keyboard_tests {
     fn playlist_old_delete_confirmation_cannot_delete_reopened_target(cx: &mut TestAppContext) {
         let (_directory, runtime, _save, app, handle) = fixture(cx);
         app.update(cx, |app, cx| {
-            app.playlists.update(cx, |playlists, _| {
+            app.playlists.update(cx, |playlists, cx| {
                 playlists.browser.playlists.select(1, "Target 1".into(), 0);
-                playlists.browser.playlists.prepare_entries(1);
+                playlists
+                    .browser
+                    .playlists
+                    .prepare_entries(1, cx.background_executor().now());
             });
         });
         open_row_menu(&app, 1, cx);
@@ -3007,7 +3024,10 @@ mod content_menu_keyboard_tests {
             app.playlists.update(cx, |playlists, cx| {
                 playlists.refresh(cx);
                 playlists.browser.playlists.select(1, "Target 1".into(), 0);
-                playlists.browser.playlists.prepare_entries(1);
+                playlists
+                    .browser
+                    .playlists
+                    .prepare_entries(1, cx.background_executor().now());
                 playlists.browser.playlists.prepare_page(true, 0, 20);
                 playlists.browser.playlists.accept_entries(page);
                 playlists.browser.playlists.select_entry(entry, 0);
@@ -3030,8 +3050,9 @@ mod content_menu_keyboard_tests {
         page(&app, 0, 2, 72, cx);
         app.update(cx, |app, cx| {
             app.playlists.update(cx, |playlists, cx| {
-                playlists.browser.playlists.invalidate_summaries();
-                playlists.browser.playlists.prepare_entries(1);
+                let now = cx.background_executor().now();
+                playlists.browser.playlists.invalidate_summaries(now);
+                playlists.browser.playlists.prepare_entries(1, now);
                 playlists.schedule_refresh_wake(cx);
                 assert!(
                     playlists
@@ -3039,7 +3060,7 @@ mod content_menu_keyboard_tests {
                         .playlists()
                         .summaries()
                         .rows
-                        .display(0)
+                        .display(0, now)
                         .is_some()
                 );
                 assert!(
@@ -3048,7 +3069,7 @@ mod content_menu_keyboard_tests {
                         .playlists()
                         .entries()
                         .rows
-                        .display(0)
+                        .display(0, now)
                         .is_some()
                 );
                 playlists.select_playlist_container(2, "Target 2".into(), 1, cx);
@@ -3060,9 +3081,10 @@ mod content_menu_keyboard_tests {
             .advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
         app.read_with(cx, |app, cx| {
+            let now = cx.background_executor().now();
             let playlists = app.playlists.read(cx).browser.playlists();
-            assert!(playlists.summaries().rows.display(0).is_none());
-            assert!(playlists.entries().rows.display(0).is_none());
+            assert!(playlists.summaries().rows.display(0, now).is_none());
+            assert!(playlists.entries().rows.display(0, now).is_none());
             assert_eq!(playlists.refresh_deadline(), None);
             assert_eq!(playlists.selected(), Some(1));
             assert_eq!(playlists.selected_entry(), Some(entry));

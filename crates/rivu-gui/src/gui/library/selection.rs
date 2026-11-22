@@ -942,6 +942,7 @@ mod tests {
                         path: "/music".into(),
                     }],
                 },
+                std::time::Instant::now(),
             );
             let crate::gui::library::tree::TreeItem::Entry(root) = library.tree.item(0).unwrap()
             else {
@@ -968,6 +969,7 @@ mod tests {
                     total: 2,
                     rows: vec![DirectoryRow::Track(row(7)), DirectoryRow::Track(row(8))],
                 },
+                std::time::Instant::now(),
             );
             assert_ne!(library.tree.projection_revision(), projection);
             assert_eq!(library.selected_nodes(), &HashSet::from([original]));
@@ -1001,6 +1003,7 @@ mod tests {
                     path: roots[0].clone(),
                 }],
             },
+            std::time::Instant::now(),
         );
         let crate::gui::library::tree::TreeItem::Entry(entry) = library.tree.item(0).unwrap()
         else {
@@ -1029,6 +1032,7 @@ mod tests {
                     .map(|id| DirectoryRow::Track(row(id as i64)))
                     .collect(),
             },
+            std::time::Instant::now(),
         );
     }
     #[test]
@@ -1125,7 +1129,7 @@ mod tests {
             if flat {
                 library.toggle_view();
             }
-            assert!(library.sync_projection(baseline));
+            assert!(library.sync_projection(baseline, std::time::Instant::now()));
             let roots = vec![std::path::PathBuf::from("/music")];
             let forest = TreeBranch::default();
             library.prepare_directory(forest.clone(), 0, 4, 1);
@@ -1138,6 +1142,7 @@ mod tests {
                         path: roots[0].clone(),
                     }],
                 },
+                std::time::Instant::now(),
             );
             let crate::gui::library::tree::TreeItem::Entry(entry) = library.tree.item(0).unwrap()
             else {
@@ -1157,7 +1162,7 @@ mod tests {
                 ..baseline
             };
 
-            assert!(library.sync_projection(latest));
+            assert!(library.sync_projection(latest, std::time::Instant::now()));
             assert_eq!(library.selected(), &HashSet::from([0]));
             assert_eq!(library.tree.row_count(), geometry);
             assert_eq!(library.tree.projection_revision(), projection);
@@ -1257,6 +1262,7 @@ mod tests {
                     path: roots[0].clone(),
                 }],
             },
+            std::time::Instant::now(),
         );
         load_group(&mut library, &branch, 0, 100, 20, 4);
         library
@@ -1362,6 +1368,7 @@ mod tests {
                 &forest,
                 1,
                 super::super::tree::forest_page(&roots, false, 0, 2),
+                std::time::Instant::now(),
             );
             let super::super::tree::TreeItem::Entry(root) = library.tree.item(0).unwrap() else {
                 panic!("root header");
@@ -1383,6 +1390,7 @@ mod tests {
                             .map(|index| DirectoryRow::Track(row(track_id(index))))
                             .collect(),
                     },
+                    std::time::Instant::now(),
                 );
             };
             load(&mut library, 0, 2);
@@ -1471,6 +1479,7 @@ mod tests {
                     .map(|path| DirectoryRow::Directory { path: path.clone() })
                     .collect(),
             },
+            std::time::Instant::now(),
         );
         let crate::gui::library::tree::TreeItem::Entry(entry) = library.tree.item(4).unwrap()
         else {
@@ -1485,6 +1494,7 @@ mod tests {
                 total: 3,
                 rows: vec![DirectoryRow::Track(row(1)), DirectoryRow::Track(row(2))],
             },
+            std::time::Instant::now(),
         );
         assert_eq!(library.tree.row_count(), 8);
         let header = LibraryNode::Directory(Arc::from(roots[0].as_path()));
@@ -1558,6 +1568,7 @@ mod tests {
                     &forest,
                     generation,
                     super::super::tree::forest_page(&roots, other_tracks, offset, 2),
+                    std::time::Instant::now(),
                 );
             }
             assert!(library.tree.cached_row(&forest, 0).is_none());
@@ -1654,6 +1665,7 @@ mod tests {
                     path: "/music".into(),
                 }],
             },
+            std::time::Instant::now(),
         );
         let Some(crate::gui::library::tree::TreeItem::Entry(entry)) = tree.item(0) else {
             panic!("expected library root")
@@ -1730,7 +1742,7 @@ mod tests {
             let mut library = LibraryBrowser::default();
             library.toggle_favorites();
             library.toggle_missing();
-            library.refresh_filter();
+            library.refresh_filter(std::time::Instant::now());
             library.refresh_search("needle".into());
             let forest = TreeBranch::default();
             library.prepare_directory(forest.clone(), 0, 2, 1);
@@ -1743,6 +1755,7 @@ mod tests {
                         path: "/music".into(),
                     }],
                 },
+                std::time::Instant::now(),
             );
             let Some(TreeItem::Entry(entry)) = library.tree().item(0) else {
                 panic!("expected configured root")
@@ -1757,6 +1770,7 @@ mod tests {
                     total: 4,
                     rows: vec![DirectoryRow::Track(row(0)), DirectoryRow::Track(row(1))],
                 },
+                std::time::Instant::now(),
             );
             publish_row(&mut library, LibraryNode::Track(0), 1);
             library
@@ -1794,10 +1808,10 @@ mod tests {
                 library.refresh_search("replacement".into());
             } else {
                 library.toggle_missing();
-                library.refresh_filter();
+                library.refresh_filter(std::time::Instant::now());
                 assert_eq!(library.buffer().missing, None);
                 library.toggle_missing();
-                library.refresh_filter();
+                library.refresh_filter(std::time::Instant::now());
                 assert_eq!(library.buffer().missing, Some(true));
             }
             assert!(library.tree_active());
@@ -1918,7 +1932,8 @@ mod tests {
                         path: "/music/sub".into()
                     },
                 ]
-            }
+            },
+            std::time::Instant::now(),
         ));
         let occurrence = |tree: &DirectoryTree, index| match tree.item(index).unwrap() {
             TreeItem::Entry(row) => row.branch.unwrap(),
@@ -1939,7 +1954,8 @@ mod tests {
                     },
                     DirectoryRow::Track(row(101)),
                 ]
-            }
+            },
+            std::time::Instant::now(),
         ));
         let nested = occurrence(&tree, 1);
         tree.expand(&nested);
@@ -1950,7 +1966,8 @@ mod tests {
             Page {
                 total: 40,
                 rows: vec![DirectoryRow::Track(row(200)), DirectoryRow::Track(row(201)),]
-            }
+            },
+            std::time::Instant::now(),
         ));
         tree.expand(&overlapping);
         tree.begin(overlapping.clone(), 0, 4);
@@ -1960,7 +1977,8 @@ mod tests {
             Page {
                 total: 40,
                 rows: vec![DirectoryRow::Track(row(200)), DirectoryRow::Track(row(201)),]
-            }
+            },
+            std::time::Instant::now(),
         ));
         for offset in (2..40).step_by(2) {
             tree.begin(root.clone(), offset, offset as u64 + 10);
@@ -1973,7 +1991,8 @@ mod tests {
                         DirectoryRow::Track(row(100 + offset as i64)),
                         DirectoryRow::Track(row(101 + offset as i64)),
                     ]
-                }
+                },
+                std::time::Instant::now(),
             ));
         }
         assert!(tree.cached_row(&nested, 0).is_none());
@@ -2064,7 +2083,8 @@ mod tests {
             Page {
                 total: 1,
                 rows: vec![DirectoryRow::Directory { path: "/a".into() },]
-            }
+            },
+            std::time::Instant::now(),
         ));
         let TreeItem::Entry(visible) = tree.item(0).unwrap() else {
             panic!("root occurrence")

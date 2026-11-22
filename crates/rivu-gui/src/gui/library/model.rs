@@ -202,7 +202,7 @@ impl LibraryBrowser {
         revisions: QueryRevisions,
         now: Instant,
     ) -> bool {
-        self.sync_root_counts_at(roots, revisions.structure, now);
+        self.sync_root_counts(roots, revisions.structure, now);
         let counts = &mut self.search_counts;
         let roots_changed = counts
             .scope
@@ -243,7 +243,7 @@ impl LibraryBrowser {
             counts.blocked = None;
         }
         if changed || other_changed {
-            self.reconcile_forest(roots);
+            self.reconcile_forest(roots, now);
         }
         changed
     }
@@ -254,10 +254,11 @@ impl LibraryBrowser {
         &mut self,
         roots: &[std::path::PathBuf],
         revisions: QueryRevisions,
+        now: Instant,
     ) -> (bool, Option<SearchCountRequest>) {
-        let changed = self.sync_search_counts(roots, revisions, Instant::now());
+        let changed = self.sync_search_counts(roots, revisions, now);
         if !changed {
-            self.reconcile_forest(roots);
+            self.reconcile_forest(roots, now);
         }
         let settled = !self.filtered() || self.total_count() == Some(0);
         let other_empty = self.other_tracks_empty();
@@ -347,8 +348,8 @@ impl LibraryBrowser {
     }
 
     #[cfg(test)]
-    pub(super) fn search_counts(&self) -> Option<(usize, usize)> {
-        let (matched, total) = self.search_count_parts();
+    pub(super) fn search_counts(&self, now: Instant) -> Option<(usize, usize)> {
+        let (matched, total) = self.search_count_parts(now);
         Some((matched?, total?))
     }
 
@@ -363,11 +364,7 @@ impl LibraryBrowser {
             .map(|(roots, other)| roots + other)
     }
 
-    pub(super) fn search_count_parts(&self) -> (Option<usize>, Option<usize>) {
-        self.search_count_parts_at(Instant::now())
-    }
-
-    fn search_count_parts_at(&self, now: Instant) -> (Option<usize>, Option<usize>) {
+    pub(super) fn search_count_parts(&self, now: Instant) -> (Option<usize>, Option<usize>) {
         let total = self.total_count();
         let matched = if !self.filtered() || total == Some(0) {
             total
@@ -416,6 +413,7 @@ impl LibraryBrowser {
         roots: &[std::path::PathBuf],
         revisions: QueryRevisions,
         response: &QueryResponse,
+        now: Instant,
     ) -> bool {
         let other = &mut self.other_count;
         let query = Query::OtherTracksCount;
@@ -434,7 +432,7 @@ impl LibraryBrowser {
                 if query.stamp(response.revisions) == query.stamp(revisions) =>
             {
                 other.total = Some(*total);
-                self.reconcile_forest(roots);
+                self.reconcile_forest(roots, now);
             }
             Ok(ViewResponse::OtherTracksCount(_))
             | Err(QueryError::RevisionChanged | QueryError::Cancelled) => {
@@ -461,9 +459,9 @@ impl LibraryBrowser {
         super::tree::forest_page(roots, !self.other_tracks_empty(), offset, limit)
     }
 
-    fn reconcile_forest(&mut self, roots: &[std::path::PathBuf]) {
+    fn reconcile_forest(&mut self, roots: &[std::path::PathBuf], now: Instant) {
         let show_other = !self.other_tracks_empty();
-        if self.tree.sync_forest(roots, show_other) {
+        if self.tree.sync_forest(roots, show_other, now) {
             self.invalidate_selection();
             if !show_other {
                 self.selected_nodes.remove(&LibraryNode::OtherTracks);
@@ -483,11 +481,7 @@ impl LibraryBrowser {
         self.other_count.blocked == Some(CountBlock::Retired)
     }
 
-    pub(super) fn other_count_label(&self) -> String {
-        self.other_count_label_at(Instant::now())
-    }
-
-    fn other_count_label_at(&self, now: Instant) -> String {
+    pub(super) fn other_count_label(&self, now: Instant) -> String {
         let total = self.other_count.total;
         if self.filtered() {
             let matched = if total == Some(0) {
@@ -525,11 +519,7 @@ impl LibraryBrowser {
         }
     }
 
-    pub(super) fn sync_projection(&mut self, revisions: QueryRevisions) -> bool {
-        self.sync_projection_at(revisions, Instant::now())
-    }
-
-    pub(super) fn sync_projection_at(&mut self, revisions: QueryRevisions, now: Instant) -> bool {
+    pub(super) fn sync_projection(&mut self, revisions: QueryRevisions, now: Instant) -> bool {
         let query = self.projection_query();
         let impact = self.projection.impact(&query, revisions);
         if !self.projection.sync(&query, revisions) {
@@ -572,14 +562,6 @@ impl LibraryBrowser {
     }
 
     pub(super) fn sync_root_counts(
-        &mut self,
-        roots: &[std::path::PathBuf],
-        structure_revision: u64,
-    ) {
-        self.sync_root_counts_at(roots, structure_revision, Instant::now());
-    }
-
-    fn sync_root_counts_at(
         &mut self,
         roots: &[std::path::PathBuf],
         structure_revision: u64,
@@ -663,8 +645,9 @@ impl LibraryBrowser {
         &mut self,
         roots: &[std::path::PathBuf],
         structure_revision: u64,
+        now: Instant,
     ) -> (u64, Option<usize>) {
-        self.sync_root_counts(roots, structure_revision);
+        self.sync_root_counts(roots, structure_revision, now);
         let generation = self.counts.owner.generation();
         if self.counts.retired || self.counts.pending.is_some() {
             return (generation, None);
@@ -759,11 +742,7 @@ impl LibraryBrowser {
         })
     }
 
-    pub(super) fn root_count_label(&self, path: &std::path::Path) -> String {
-        self.root_count_label_at(path, Instant::now())
-    }
-
-    fn root_count_label_at(&self, path: &std::path::Path, now: Instant) -> String {
+    pub(super) fn root_count_label(&self, path: &std::path::Path, now: Instant) -> String {
         if self.filtered() {
             let total = self.root_count(path);
             super::super::components::search::filtered_count_label(
@@ -860,9 +839,10 @@ impl LibraryBrowser {
         branch: &TreeBranch,
         generation: u64,
         page: Page<DirectoryRow>,
+        now: Instant,
     ) {
         let projection = self.tree.projection_revision();
-        self.tree.accept(branch, generation, page);
+        self.tree.accept(branch, generation, page, now);
         if self.tree.projection_revision() != projection {
             self.invalidate_selection();
         }
@@ -1104,7 +1084,7 @@ impl LibraryBrowser {
         self.force_scan = !self.force_scan;
     }
 
-    pub(super) fn refresh_filter(&mut self) {
+    pub(super) fn refresh_filter(&mut self, now: Instant) {
         let changed = self.buffer.missing != self.missing_only.then_some(true);
         self.projection.cancel();
         self.invalidate_projection();
@@ -1113,7 +1093,7 @@ impl LibraryBrowser {
             self.reset_search_counts();
             self.tree.invalidate();
         } else {
-            self.tree.refresh(Instant::now());
+            self.tree.refresh(now);
         }
         self.scroll_filter_to_top();
     }
@@ -1157,7 +1137,10 @@ mod tests {
         let mut revisions = QueryRevisions::default();
         library.refresh_search("needle".into());
         load_root_totals(&mut library, &roots, revisions);
-        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let request = library
+            .prepare_search_counts(&roots, revisions, start)
+            .1
+            .unwrap();
         let old = request.clone();
         assert!(library.accept_search_counts(
             request,
@@ -1172,8 +1155,13 @@ mod tests {
             library.root_count_display_at(&roots[0], start + Duration::from_millis(199)),
             Some(3)
         );
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_some());
-        let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, start)
+                .1
+                .is_some()
+        );
+        let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure, start);
         assert_eq!(offsets, Some(0));
         let ticket = library.root_count_ticket();
         revisions.counts += 1;
@@ -1190,7 +1178,10 @@ mod tests {
             library.root_count_display_at(&roots[0], start + Duration::from_millis(200)),
             None
         );
-        assert_eq!(library.search_count_parts(), (None, None));
+        assert_eq!(
+            library.search_count_parts(start + Duration::from_millis(200)),
+            (None, None)
+        );
         assert!(library.counts_current(generation, &roots, revisions.structure));
         assert!(ticket.is_current());
         assert_eq!(library.counts.pending, Some(0));
@@ -1206,7 +1197,8 @@ mod tests {
         let deadline = start + rivu_presentation::refresh::REFRESH_RETENTION;
         for revision in [0, 2] {
             loop {
-                let (generation, offsets) = library.begin_root_counts(&roots, revision);
+                let (generation, offsets) =
+                    library.begin_root_counts(&roots, revision, Instant::now());
                 let Some(offset) = offsets else { break };
                 library.accept_root_counts(
                     generation,
@@ -1221,9 +1213,9 @@ mod tests {
                 );
             }
             if revision == 0 {
-                library.sync_root_counts_at(&roots, 1, start);
+                library.sync_root_counts(&roots, 1, start);
                 assert!(library.expire_refresh(deadline));
-                let (generation, offsets) = library.begin_root_counts(&roots, 1);
+                let (generation, offsets) = library.begin_root_counts(&roots, 1, Instant::now());
                 assert_eq!(offsets, Some(0));
                 library.accept_root_counts(
                     generation,
@@ -1237,13 +1229,13 @@ mod tests {
                         .collect(),
                 );
                 assert_eq!(library.root_count_display_at(&roots[0], deadline), Some(4));
-                library.sync_root_counts_at(&roots, 2, deadline);
+                library.sync_root_counts(&roots, 2, deadline);
                 assert_eq!(library.counts.retention.deadline(), None);
                 assert!(library.counts.retained.is_empty());
                 assert_eq!(library.root_count_display_at(&roots[0], deadline), None);
             }
         }
-        library.sync_root_counts_at(&roots, 3, deadline);
+        library.sync_root_counts(&roots, 3, deadline);
         assert_eq!(
             library.counts.retention.deadline(),
             Some(deadline + rivu_presentation::refresh::REFRESH_RETENTION)
@@ -1258,7 +1250,11 @@ mod tests {
         let mut revisions = QueryRevisions::default();
         library.refresh_search("needle".into());
         load_root_totals(&mut library, &roots, revisions);
-        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let now = Instant::now();
+        let request = library
+            .prepare_search_counts(&roots, revisions, now)
+            .1
+            .unwrap();
         assert!(library.accept_search_counts(
             request,
             &roots,
@@ -1266,19 +1262,26 @@ mod tests {
             Ok(search_count_result(&roots[0], 2))
         ));
         revisions.counts += 1;
-        let now = Instant::now();
         library.sync_search_counts(&roots, revisions, now);
-        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        assert_eq!(library.search_count_parts_at(now), (Some(2), Some(3)));
+        let request = library
+            .prepare_search_counts(&roots, revisions, now)
+            .1
+            .unwrap();
+        assert_eq!(library.search_count_parts(now), (Some(2), Some(3)));
         assert!(library.accept_search_counts(
             request,
             &roots,
             revisions,
             Ok(search_count_result(&roots[0], 2))
         ));
-        assert_eq!(library.root_count_label(&roots[0]), "2 / 3");
+        assert_eq!(library.root_count_label(&roots[0], now), "2 / 3");
         assert!(library.refresh_deadline().is_none());
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, now)
+                .1
+                .is_none()
+        );
     }
 
     fn load_root_totals(
@@ -1286,7 +1289,8 @@ mod tests {
         roots: &[std::path::PathBuf],
         revisions: QueryRevisions,
     ) {
-        let (generation, offsets) = library.begin_root_counts(roots, revisions.structure);
+        let (generation, offsets) =
+            library.begin_root_counts(roots, revisions.structure, Instant::now());
         if let Some(offset) = offsets {
             library.accept_root_counts(
                 generation,
@@ -1316,8 +1320,11 @@ mod tests {
                 1 => library.buffer.favorite = Some(true),
                 _ => library.buffer.missing = Some(true),
             }
-            let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-            assert_eq!(library.root_count_label(&roots[0]), "- / -");
+            let request = library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .unwrap();
+            assert_eq!(library.root_count_label(&roots[0], Instant::now()), "- / -");
             load_other_total(&mut library, &roots, revisions, Some(0));
             assert!(library.accept_search_counts(
                 request,
@@ -1325,25 +1332,31 @@ mod tests {
                 revisions,
                 Ok(search_count_result(&roots[0], 1))
             ));
-            assert_eq!(library.root_count_label(&roots[0]), "1 / -");
-            let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+            assert_eq!(library.root_count_label(&roots[0], Instant::now()), "1 / -");
+            let (generation, offsets) =
+                library.begin_root_counts(&roots, revisions.structure, Instant::now());
             library.fail_root_counts(generation, offsets.unwrap());
-            assert_eq!(library.search_count_parts(), (Some(1), None));
-            assert_eq!(library.root_count_label(&roots[0]), "1 / -");
+            assert_eq!(library.search_count_parts(Instant::now()), (Some(1), None));
+            assert_eq!(library.root_count_label(&roots[0], Instant::now()), "1 / -");
             assert!(library.root_count_failed(&roots[0]));
             assert!(!library.root_count_failed(std::path::Path::new("/unrelated")));
             assert!(
                 library
-                    .begin_root_counts(&roots, revisions.structure)
+                    .begin_root_counts(&roots, revisions.structure, Instant::now())
                     .1
                     .is_none()
             );
             library.retry_root_counts();
             load_root_totals(&mut library, &roots, revisions);
-            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
-            assert_eq!(library.root_count_label(&roots[0]), "1 / 3");
+            assert!(
+                library
+                    .prepare_search_counts(&roots, revisions, Instant::now())
+                    .1
+                    .is_none()
+            );
+            assert_eq!(library.root_count_label(&roots[0], Instant::now()), "1 / 3");
             assert!(!library.root_count_failed(&roots[0]));
-            assert_eq!(library.search_counts(), Some((1, 3)));
+            assert_eq!(library.search_counts(Instant::now()), Some((1, 3)));
         }
     }
 
@@ -1352,21 +1365,36 @@ mod tests {
         let mut library = LibraryBrowser::default();
         let roots = vec![std::path::PathBuf::from("/music")];
         let mut revisions = QueryRevisions::default();
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_none()
+        );
         assert!(!library.search_counts_pending());
-        let (old_generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+        let (old_generation, offsets) =
+            library.begin_root_counts(&roots, revisions.structure, Instant::now());
         let old_other = library.prepare_other_count().unwrap();
         library.refresh_search("needle".into());
-        let old = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let old = library
+            .prepare_search_counts(&roots, revisions, Instant::now())
+            .1
+            .unwrap();
         library.refresh_search("changed".into());
         revisions.structure += 1;
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_none()
+        );
         assert!(library.prepare_other_count().is_none());
         assert!(!library.publish_other_count(
             &old_other,
             &roots,
             revisions,
             &other_response(revisions, Some(99)),
+            Instant::now(),
         ));
         library.retire_other_count(&old_other);
         library.accept_root_counts(
@@ -1383,11 +1411,14 @@ mod tests {
             revisions,
             Ok(search_count_result(&roots[0], 99))
         ));
-        assert_eq!(library.search_count_parts(), (None, None));
+        assert_eq!(library.search_count_parts(Instant::now()), (None, None));
         load_root_totals(&mut library, &roots, revisions);
-        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        assert_eq!(library.search_count_parts(), (None, Some(3)));
-        assert_eq!(library.root_count_label(&roots[0]), "- / 3");
+        let request = library
+            .prepare_search_counts(&roots, revisions, Instant::now())
+            .1
+            .unwrap();
+        assert_eq!(library.search_count_parts(Instant::now()), (None, Some(3)));
+        assert_eq!(library.root_count_label(&roots[0], Instant::now()), "- / 3");
         assert_eq!(request.scope.query.as_deref(), Some("changed"));
     }
     fn load_other_total(
@@ -1403,6 +1434,7 @@ mod tests {
                 roots,
                 revisions,
                 &other_response(revisions, total),
+                Instant::now(),
             ));
             library.retire_other_count(&request);
         }
@@ -1430,7 +1462,8 @@ mod tests {
         let mut library = LibraryBrowser::default();
         let roots = vec![std::path::PathBuf::from("/music")];
         let mut revisions = QueryRevisions::default();
-        let (generation, offsets) = library.begin_root_counts(&roots, revisions.structure);
+        let (generation, offsets) =
+            library.begin_root_counts(&roots, revisions.structure, Instant::now());
         library.accept_root_counts(
             generation,
             offsets.unwrap(),
@@ -1439,17 +1472,29 @@ mod tests {
                 total: 4,
             }],
         );
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_none()
+        );
         load_other_total(&mut library, &roots, revisions, Some(0));
-        assert_eq!(library.search_counts(), Some((4, 4)));
+        assert_eq!(library.search_counts(Instant::now()), Some((4, 4)));
         library.refresh_search("needle".into());
-        let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let request = library
+            .prepare_search_counts(&roots, revisions, Instant::now())
+            .1
+            .unwrap();
         library.buffer.sort = LibrarySort::MostPlayed;
         revisions.library += 1;
         revisions.bitrate += 1;
-        assert!(!library.prepare_search_counts(&roots, revisions).0);
+        assert!(
+            !library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .0
+        );
         assert!(request.ticket.is_current());
-        assert_eq!(library.search_count_parts(), (None, Some(4)));
+        assert_eq!(library.search_count_parts(Instant::now()), (None, Some(4)));
         assert!(library.accept_search_counts(
             request,
             &roots,
@@ -1457,14 +1502,23 @@ mod tests {
             Ok(search_count_result(&roots[0], 1))
         ));
         library.buffer.sort = LibrarySort::Album;
-        assert!(!library.prepare_search_counts(&roots, revisions).0);
-        assert_eq!(library.search_counts(), Some((1, 4)));
+        assert!(
+            !library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .0
+        );
+        assert_eq!(library.search_counts(Instant::now()), Some((1, 4)));
         revisions.structure += 1;
         let now = Instant::now();
         library.sync_search_counts(&roots, revisions, now);
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_some());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_some()
+        );
         assert!(library.counts.totals.is_empty());
-        assert_eq!(library.search_count_parts_at(now), (Some(1), None));
+        assert_eq!(library.search_count_parts(now), (Some(1), None));
     }
 
     #[test]
@@ -1474,7 +1528,8 @@ mod tests {
         let mut revisions = QueryRevisions::default();
         library.refresh_search("needle".into());
         let load_root = |library: &mut LibraryBrowser, revisions: QueryRevisions, total| {
-            let (generation, offset) = library.begin_root_counts(&roots, revisions.structure);
+            let (generation, offset) =
+                library.begin_root_counts(&roots, revisions.structure, Instant::now());
             library.accept_root_counts(
                 generation,
                 offset.unwrap(),
@@ -1486,7 +1541,10 @@ mod tests {
         };
         load_root(&mut library, revisions, 10);
         load_other_total(&mut library, &roots, revisions, Some(4));
-        let read = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let read = library
+            .prepare_search_counts(&roots, revisions, Instant::now())
+            .1
+            .unwrap();
         assert!(library.accept_search_counts(
             read,
             &roots,
@@ -1497,19 +1555,25 @@ mod tests {
                 other_matched: 3,
             }),
         ));
-        assert_eq!(library.search_count_parts(), (Some(11), Some(14)));
+        assert_eq!(
+            library.search_count_parts(Instant::now()),
+            (Some(11), Some(14))
+        );
 
         revisions.structure += 1;
         let now = Instant::now();
         library.sync_search_counts(&roots, revisions, now);
-        let read = library.prepare_search_counts(&roots, revisions).1.unwrap();
-        assert_eq!(library.search_count_parts_at(now), (Some(11), None));
+        let read = library
+            .prepare_search_counts(&roots, revisions, Instant::now())
+            .1
+            .unwrap();
+        assert_eq!(library.search_count_parts(now), (Some(11), None));
         load_root(&mut library, revisions, 2);
-        assert_eq!(library.root_count_label_at(&roots[0], now), "- / 2");
-        assert_eq!(library.other_count_label_at(now), "3 / -");
+        assert_eq!(library.root_count_label(&roots[0], now), "- / 2");
+        assert_eq!(library.other_count_label(now), "3 / -");
         load_other_total(&mut library, &roots, revisions, Some(1));
-        assert_eq!(library.other_count_label_at(now), "- / 1");
-        assert_eq!(library.search_count_parts_at(now), (None, Some(3)));
+        assert_eq!(library.other_count_label(now), "- / 1");
+        assert_eq!(library.search_count_parts(now), (None, Some(3)));
 
         assert!(library.accept_search_counts(
             read,
@@ -1517,9 +1581,12 @@ mod tests {
             revisions,
             Ok(search_count_result(&roots[0], 1)),
         ));
-        assert_eq!(library.search_count_parts(), (Some(1), Some(3)));
-        assert_eq!(library.root_count_label(&roots[0]), "1 / 2");
-        assert_eq!(library.other_count_label(), "0 / 1");
+        assert_eq!(
+            library.search_count_parts(Instant::now()),
+            (Some(1), Some(3))
+        );
+        assert_eq!(library.root_count_label(&roots[0], Instant::now()), "1 / 2");
+        assert_eq!(library.other_count_label(Instant::now()), "0 / 1");
     }
 
     #[test]
@@ -1529,13 +1596,26 @@ mod tests {
         let revisions = QueryRevisions::default();
         library.refresh_search("needle".into());
         load_root_totals(&mut library, &roots, revisions);
-        let old = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let old = library
+            .prepare_search_counts(&roots, revisions, Instant::now())
+            .1
+            .unwrap();
         assert!(library.publish_search_counts(&old, &roots, revisions, Err(CountBlock::Failed)));
         assert!(library.search_counts_pending());
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_none()
+        );
         for query in ["one", "latest"] {
             library.refresh_search(query.into());
-            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            assert!(
+                library
+                    .prepare_search_counts(&roots, revisions, Instant::now())
+                    .1
+                    .is_none()
+            );
         }
         assert!(!library.publish_search_counts(&old, &roots, revisions, Err(CountBlock::Failed)));
         assert!(!library.accept_search_counts(
@@ -1544,14 +1624,17 @@ mod tests {
             revisions,
             Ok(search_count_result(&roots[0], 99))
         ));
-        let latest = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let latest = library
+            .prepare_search_counts(&roots, revisions, Instant::now())
+            .1
+            .unwrap();
         assert!(library.accept_search_counts(
             latest,
             &roots,
             revisions,
             Ok(search_count_result(&roots[0], 2))
         ));
-        assert_eq!(library.search_counts(), Some((2, 3)));
+        assert_eq!(library.search_counts(Instant::now()), Some((2, 3)));
         assert!(!library.search_counts_pending());
     }
 
@@ -1564,7 +1647,8 @@ mod tests {
                 let mut roots = vec![std::path::PathBuf::from("/music")];
                 let mut revisions = QueryRevisions::default();
                 library.refresh_search("initial".into());
-                let (changed, request) = library.prepare_search_counts(&roots, revisions);
+                let (changed, request) =
+                    library.prepare_search_counts(&roots, revisions, Instant::now());
                 assert!(changed);
                 let request = request.unwrap();
                 assert!(library.search_counts_pending());
@@ -1574,14 +1658,15 @@ mod tests {
                     2 => library.toggle_favorites(),
                     3 => {
                         library.toggle_missing();
-                        library.refresh_filter();
+                        library.refresh_filter(Instant::now());
                     }
                     4 => revisions.counts += 1,
                     5 => revisions.structure += 1,
                     _ => unreachable!(),
                 }
                 if reconcile {
-                    let (changed, replacement) = library.prepare_search_counts(&roots, revisions);
+                    let (changed, replacement) =
+                        library.prepare_search_counts(&roots, revisions, Instant::now());
                     assert!(changed);
                     assert!(replacement.is_none());
                     assert!(!request.ticket.is_current());
@@ -1591,18 +1676,23 @@ mod tests {
                 assert!(!library.accept_search_counts(request, &roots, revisions, Ok(stale)));
                 assert!(!library.search_counts_pending());
                 load_root_totals(&mut library, &roots, revisions);
-                assert_eq!(library.search_counts(), None);
+                assert_eq!(library.search_counts(Instant::now()), None);
                 assert!(!library.root_count_failed(&roots[0]));
-                let (_, current) = library.prepare_search_counts(&roots, revisions);
+                let (_, current) = library.prepare_search_counts(&roots, revisions, Instant::now());
                 assert!(library.accept_search_counts(
                     current.unwrap(),
                     &roots,
                     revisions,
                     Ok(search_count_result(&roots[0], 2)),
                 ));
-                assert_eq!(library.search_counts(), Some((2, 3)));
+                assert_eq!(library.search_counts(Instant::now()), Some((2, 3)));
                 assert!(!library.search_counts_pending());
-                assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+                assert!(
+                    library
+                        .prepare_search_counts(&roots, revisions, Instant::now())
+                        .1
+                        .is_none()
+                );
             }
         }
     }
@@ -1615,21 +1705,26 @@ mod tests {
             let revisions = QueryRevisions::default();
             library.refresh_search("needle".into());
             load_root_totals(&mut library, &roots, revisions);
-            let (_, request) = library.prepare_search_counts(&roots, revisions);
+            let (_, request) = library.prepare_search_counts(&roots, revisions, Instant::now());
             let request = request.unwrap();
             library.cancel_pending_reads();
             assert!(!request.ticket.is_current());
             assert!(library.search_counts_pending());
             // Revealing before physical completion cannot submit another worker.
-            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            assert!(
+                library
+                    .prepare_search_counts(&roots, revisions, Instant::now())
+                    .1
+                    .is_none()
+            );
             let result = (!failed_completion)
                 .then(|| search_count_result(&roots[0], 99))
                 .ok_or(CountBlock::Failed);
             assert!(!library.accept_search_counts(request, &roots, revisions, result));
             assert!(!library.search_counts_pending());
-            assert_eq!(library.search_counts(), None);
+            assert_eq!(library.search_counts(Instant::now()), None);
             assert!(!library.root_count_failed(&roots[0]));
-            let (_, request) = library.prepare_search_counts(&roots, revisions);
+            let (_, request) = library.prepare_search_counts(&roots, revisions, Instant::now());
             assert!(library.accept_search_counts(
                 request.unwrap(),
                 &roots,
@@ -1637,8 +1732,13 @@ mod tests {
                 Ok(search_count_result(&roots[0], 1)),
             ));
             library.cancel_pending_reads();
-            assert_eq!(library.search_counts(), Some((1, 3)));
-            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            assert_eq!(library.search_counts(Instant::now()), Some((1, 3)));
+            assert!(
+                library
+                    .prepare_search_counts(&roots, revisions, Instant::now())
+                    .1
+                    .is_none()
+            );
         }
     }
 
@@ -1649,7 +1749,7 @@ mod tests {
         let revisions = QueryRevisions::default();
         library.refresh_search("needle".into());
         load_root_totals(&mut library, &roots, revisions);
-        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let (_, request) = library.prepare_search_counts(&roots, revisions, Instant::now());
         assert!(library.accept_search_counts(
             request.unwrap(),
             &roots,
@@ -1657,19 +1757,29 @@ mod tests {
             Err(CountBlock::Failed),
         ));
         assert!(!library.search_counts_pending());
-        assert_eq!(library.search_counts(), None);
-        assert_eq!(library.search_count_parts(), (None, Some(3)));
-        assert_eq!(library.root_count_label(&roots[0]), "- / 3");
+        assert_eq!(library.search_counts(Instant::now()), None);
+        assert_eq!(library.search_count_parts(Instant::now()), (None, Some(3)));
+        assert_eq!(library.root_count_label(&roots[0], Instant::now()), "- / 3");
         assert!(library.root_count_failed(&roots[0]));
         library.cancel_pending_reads();
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_none()
+        );
         assert!(library.root_count_failed(&roots[0]));
         library.retry_root_counts();
         assert!(!library.root_count_failed(&roots[0]));
-        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let (_, request) = library.prepare_search_counts(&roots, revisions, Instant::now());
         // Retrying again while pending cannot release the worker slot.
         library.retry_root_counts();
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_none()
+        );
         assert!(library.accept_search_counts(
             request.unwrap(),
             &roots,
@@ -1677,7 +1787,7 @@ mod tests {
             Err(CountBlock::Failed),
         ));
         library.refresh_search("other".into());
-        let (changed, request) = library.prepare_search_counts(&roots, revisions);
+        let (changed, request) = library.prepare_search_counts(&roots, revisions, Instant::now());
         assert!(changed);
         assert!(!library.root_count_failed(&roots[0]));
         assert!(library.accept_search_counts(
@@ -1686,13 +1796,13 @@ mod tests {
             revisions,
             Ok(search_count_result(&roots[0], 0)),
         ));
-        assert_eq!(library.search_counts(), Some((0, 3)));
+        assert_eq!(library.search_counts(Instant::now()), Some((0, 3)));
         // An accepted payload is invalidated together with its per-root counts.
         library.refresh_search("third".into());
-        let (changed, request) = library.prepare_search_counts(&roots, revisions);
+        let (changed, request) = library.prepare_search_counts(&roots, revisions, Instant::now());
         assert!(changed);
         assert!(request.is_some());
-        assert_eq!(library.search_count_parts(), (None, Some(3)));
+        assert_eq!(library.search_count_parts(Instant::now()), (None, Some(3)));
     }
 
     #[test]
@@ -1707,9 +1817,12 @@ mod tests {
                 library.sync_search_counts(&roots, revisions, Instant::now());
                 load_other_total(&mut library, &roots, revisions, None);
                 assert!(library.other_count_failed());
-                assert_eq!(library.search_count_parts(), (None, None));
+                assert_eq!(library.search_count_parts(Instant::now()), (None, None));
                 if filtered {
-                    let request = library.prepare_search_counts(&roots, revisions).1.unwrap();
+                    let request = library
+                        .prepare_search_counts(&roots, revisions, Instant::now())
+                        .1
+                        .unwrap();
                     assert!(library.accept_search_counts(
                         request,
                         &roots,
@@ -1720,7 +1833,7 @@ mod tests {
                             other_matched: 2,
                         })
                     ));
-                    assert_eq!(library.other_count_label(), "2 / -");
+                    assert_eq!(library.other_count_label(Instant::now()), "2 / -");
                 }
                 assert!(library.prepare_other_count().is_none());
                 library.retry_root_counts();
@@ -1733,15 +1846,21 @@ mod tests {
                     &roots,
                     revisions,
                     &other_response(revisions, Some(3)),
+                    Instant::now(),
                 ));
                 library.retire_other_count(&read);
                 assert_eq!(
-                    library.other_count_label(),
+                    library.other_count_label(Instant::now()),
                     if filtered { "2 / 3" } else { "3" }
                 );
                 assert!(!library.other_count_failed());
                 assert!(!library.search_counts_pending());
-                assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+                assert!(
+                    library
+                        .prepare_search_counts(&roots, revisions, Instant::now())
+                        .1
+                        .is_none()
+                );
             }
         }
     }
@@ -1756,7 +1875,7 @@ mod tests {
                 }
                 library.refresh_search("needle".into());
                 let mut revisions = QueryRevisions::default();
-                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                let (_, request) = library.prepare_search_counts(&roots, revisions, Instant::now());
                 assert!(!library.other_tracks_empty());
                 assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
                 assert!(library.accept_search_counts(
@@ -1769,9 +1888,9 @@ mod tests {
                         other_matched: 0,
                     }),
                 ));
-                assert_eq!(library.other_count_label(), "0 / -");
+                assert_eq!(library.other_count_label(Instant::now()), "0 / -");
                 load_other_total(&mut library, &roots, revisions, Some(3));
-                assert_eq!(library.other_count_label(), "0 / 3");
+                assert_eq!(library.other_count_label(Instant::now()), "0 / 3");
                 assert!(!library.other_tracks_empty());
                 assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
                 library.select_node(&LibraryNode::Track(41), false);
@@ -1792,7 +1911,7 @@ mod tests {
 
                 // Filter-only changes cannot turn an authoritative zero into unknown.
                 library.refresh_search("another".into());
-                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                let (_, request) = library.prepare_search_counts(&roots, revisions, Instant::now());
                 assert!(library.other_tracks_empty());
                 assert_eq!(library.tree.root_total(), Some(roots.len()));
                 if let Some(request) = request {
@@ -1805,7 +1924,10 @@ mod tests {
                     ));
                 } else {
                     assert!(roots.is_empty());
-                    assert_eq!(library.search_count_parts(), (Some(0), Some(0)));
+                    assert_eq!(
+                        library.search_count_parts(Instant::now()),
+                        (Some(0), Some(0))
+                    );
                 }
                 assert!(library.other_tracks_empty());
 
@@ -1834,11 +1956,11 @@ mod tests {
                 },
                 Some(0),
             );
-            assert!(!library.publish_other_count(&read, &roots, revisions, &ahead));
+            assert!(!library.publish_other_count(&read, &roots, revisions, &ahead, Instant::now()));
             assert!(library.other_count_retired());
             assert!(!library.other_count_failed());
             assert_eq!(library.tree().root_total(), Some(1));
-            assert_eq!(library.search_count_parts(), (None, None));
+            assert_eq!(library.search_count_parts(Instant::now()), (None, None));
             assert!(library.count_reads_pending());
             assert!(library.prepare_other_count().is_none());
             if !retry {
@@ -1861,15 +1983,19 @@ mod tests {
             }
             assert!(!library.other_count_retired());
             let current = library.prepare_other_count().unwrap();
-            assert!(!library.publish_other_count(&read, &roots, revisions, &ahead));
+            assert!(!library.publish_other_count(&read, &roots, revisions, &ahead, Instant::now()));
             assert!(library.publish_other_count(
                 &current,
                 &roots,
                 revisions,
                 &other_response(revisions, Some(2)),
+                Instant::now(),
             ));
             library.retire_other_count(&current);
-            assert_eq!(library.search_count_parts(), (Some(2), Some(2)));
+            assert_eq!(
+                library.search_count_parts(Instant::now()),
+                (Some(2), Some(2))
+            );
             assert!(library.prepare_other_count().is_none());
         }
     }
@@ -1880,20 +2006,39 @@ mod tests {
         let roots = [];
         let mut revisions = QueryRevisions::default();
         library.refresh_search("needle".into());
-        let read = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        let read = library
+            .prepare_search_counts(&roots, revisions, Instant::now())
+            .1
+            .unwrap();
         assert!(library.accept_search_counts(read, &roots, revisions, Err(CountBlock::Failed)));
         assert!(library.other_count_failed());
-        assert_eq!(library.search_count_parts(), (None, None));
+        assert_eq!(library.search_count_parts(Instant::now()), (None, None));
         load_other_total(&mut library, &roots, revisions, Some(0));
-        assert_eq!(library.search_count_parts(), (Some(0), Some(0)));
+        assert_eq!(
+            library.search_count_parts(Instant::now()),
+            (Some(0), Some(0))
+        );
         assert_eq!(library.tree().row_count(), 0);
         library.refresh_search("another filter".into());
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
-        assert_eq!(library.search_count_parts(), (Some(0), Some(0)));
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_none()
+        );
+        assert_eq!(
+            library.search_count_parts(Instant::now()),
+            (Some(0), Some(0))
+        );
 
         revisions.structure += 1;
-        assert!(library.prepare_search_counts(&roots, revisions).1.is_some());
-        assert_eq!(library.search_count_parts(), (None, None));
+        assert!(
+            library
+                .prepare_search_counts(&roots, revisions, Instant::now())
+                .1
+                .is_some()
+        );
+        assert_eq!(library.search_count_parts(Instant::now()), (None, None));
     }
 
     #[test]
@@ -1904,13 +2049,23 @@ mod tests {
                 library.toggle_view();
             }
             let revisions = QueryRevisions::default();
-            assert!(library.prepare_search_counts(&[], revisions).1.is_none());
+            assert!(
+                library
+                    .prepare_search_counts(&[], revisions, Instant::now())
+                    .1
+                    .is_none()
+            );
             assert_eq!(library.tree.root_total(), Some(1));
             load_other_total(&mut library, &[], revisions, Some(0));
             assert_eq!(library.tree.root_total(), Some(0));
             assert_eq!(library.tree.row_count(), 0);
             assert!(library.demand_directories(0..1).is_empty());
-            assert!(library.prepare_search_counts(&[], revisions).1.is_none());
+            assert!(
+                library
+                    .prepare_search_counts(&[], revisions, Instant::now())
+                    .1
+                    .is_none()
+            );
             assert_eq!(library.tree.row_count(), 0);
         }
     }
@@ -1984,6 +2139,7 @@ mod tests {
                     play_count: 0,
                 })],
             },
+            Instant::now(),
         );
         assert_eq!(library.tree().selected_index(), Some(0));
         library.refresh_tree(10);
@@ -2029,7 +2185,7 @@ mod tests {
         library.select_node(&LibraryNode::Track(41), false);
         library.tree.defer_selection(0);
         library.toggle_missing();
-        library.refresh_filter();
+        library.refresh_filter(Instant::now());
         assert_eq!(library.tree.ready_selection(), None);
         assert!(library.tree_active());
         assert_eq!(library.buffer().missing, Some(true));
@@ -2105,7 +2261,7 @@ mod tests {
                 assert_eq!(library.buffer().favorite, Some(true));
             }
             library.toggle_missing();
-            library.refresh_filter();
+            library.refresh_filter(Instant::now());
             library.prepare_query(String::new());
             assert_eq!(library.tree_active(), tree_active);
             assert_eq!(library.buffer().missing, Some(true));
@@ -2123,7 +2279,7 @@ mod tests {
             library.refresh_search("needle".into());
             library.select_node(&LibraryNode::Track(41), false);
             let roots = vec![std::path::PathBuf::from("/music")];
-            let (count_generation, _) = library.begin_root_counts(&roots, 7);
+            let (count_generation, _) = library.begin_root_counts(&roots, 7, Instant::now());
             library.accept_root_counts(
                 count_generation,
                 0,
@@ -2137,7 +2293,7 @@ mod tests {
                 library.prepare_directory(forest.clone(), 0, 20, generation);
                 let previous_missing = library.buffer().missing;
                 library.toggle_missing();
-                library.refresh_filter();
+                library.refresh_filter(Instant::now());
                 assert_eq!(library.tree_active(), tree_active);
                 assert_eq!(library.buffer().query.as_deref(), Some("needle"));
                 assert_eq!(library.buffer().favorite, Some(true));
@@ -2159,6 +2315,7 @@ mod tests {
                         total: 0,
                         rows: vec![],
                     },
+                    Instant::now(),
                 );
                 let current = generation + 10;
                 library.prepare_directory(forest.clone(), 0, 20, current);
@@ -2186,6 +2343,7 @@ mod tests {
                         total: 0,
                         rows: vec![],
                     },
+                    Instant::now(),
                 );
                 assert!(library.directory_request_pending(
                     &forest,
@@ -2204,6 +2362,7 @@ mod tests {
                             path: roots[0].clone(),
                         }],
                     },
+                    Instant::now(),
                 );
                 let Some(crate::gui::library::tree::TreeItem::Entry(entry)) =
                     library.tree().item(0)
@@ -2224,6 +2383,7 @@ mod tests {
                         total: 0,
                         rows: vec![],
                     },
+                    Instant::now(),
                 );
                 assert_eq!(library.tree().row_count(), 1);
                 assert_eq!(
@@ -2242,7 +2402,7 @@ mod tests {
         let roots: Vec<_> = (0..rivu_protocol::model::MAX_QUERY_ROWS + 1)
             .map(|index| std::path::PathBuf::from(format!("/root/{index}")))
             .collect();
-        let (generation, batches) = library.begin_root_counts(&roots, 7);
+        let (generation, batches) = library.begin_root_counts(&roots, 7, Instant::now());
         assert_eq!(batches, Some(0));
         assert_eq!(library.root_count(&roots[0]), None);
         library.accept_root_counts(
@@ -2258,7 +2418,7 @@ mod tests {
         );
         assert_eq!(library.root_count(&roots[0]), Some(0));
         assert_eq!(
-            library.begin_root_counts(&roots, 7).1,
+            library.begin_root_counts(&roots, 7, Instant::now()).1,
             Some(rivu_protocol::model::MAX_QUERY_ROWS)
         );
         library.fail_root_counts(generation, rivu_protocol::model::MAX_QUERY_ROWS);
@@ -2266,17 +2426,27 @@ mod tests {
         assert!(library.root_count_failed(roots.last().unwrap()));
         assert!(!library.root_count_failed(std::path::Path::new("/other")));
         assert_eq!(library.root_count(roots.last().unwrap()), None);
-        assert!(library.begin_root_counts(&roots, 7).1.is_none());
+        assert!(
+            library
+                .begin_root_counts(&roots, 7, Instant::now())
+                .1
+                .is_none()
+        );
         assert!(library.root_counts_settled());
         assert!(library.root_count_failed(roots.last().unwrap()));
         library.retry_root_counts();
         assert!(!library.root_counts_settled());
         assert_eq!(
-            library.begin_root_counts(&roots, 7).1,
+            library.begin_root_counts(&roots, 7, Instant::now()).1,
             Some(rivu_protocol::model::MAX_QUERY_ROWS)
         );
         assert!(!library.root_count_failed(roots.last().unwrap()));
-        assert!(library.begin_root_counts(&roots, 7).1.is_none());
+        assert!(
+            library
+                .begin_root_counts(&roots, 7, Instant::now())
+                .1
+                .is_none()
+        );
         library.accept_root_counts(
             generation,
             rivu_protocol::model::MAX_QUERY_ROWS,
@@ -2286,11 +2456,16 @@ mod tests {
             }],
         );
         assert_eq!(library.root_count(roots.last().unwrap()), Some(2));
-        assert!(library.begin_root_counts(&roots, 7).1.is_none());
+        assert!(
+            library
+                .begin_root_counts(&roots, 7, Instant::now())
+                .1
+                .is_none()
+        );
         assert!(library.root_counts_settled());
         library.refresh_search("needle".into());
         assert_eq!(library.root_count(&roots[0]), Some(0));
-        let (scanned, _) = library.begin_root_counts(&roots, 8);
+        let (scanned, _) = library.begin_root_counts(&roots, 8, Instant::now());
         assert_ne!(generation, scanned);
         assert!(!library.counts_current(generation, &roots, 8));
         library.accept_root_counts(
@@ -2315,7 +2490,7 @@ mod tests {
         assert!(!library.root_counts_settled());
         assert!(!library.counts_current(scanned, &roots, 8));
         assert_eq!(library.root_count(&roots[0]), None);
-        let empty = library.begin_root_counts(&[], 8);
+        let empty = library.begin_root_counts(&[], 8, Instant::now());
         assert!(empty.1.is_none());
         assert!(library.root_counts_settled());
     }
@@ -2324,7 +2499,7 @@ mod tests {
     fn replacing_roots_rejects_in_flight_counts_at_the_same_structure_revision() {
         let mut library = LibraryBrowser::default();
         let roots = vec![std::path::PathBuf::from("/music")];
-        let (generation, batches) = library.begin_root_counts(&roots, 7);
+        let (generation, batches) = library.begin_root_counts(&roots, 7, Instant::now());
         assert_eq!(batches, Some(0));
         library.accept_root_counts(
             generation,
@@ -2338,7 +2513,7 @@ mod tests {
 
         let replacement = vec![std::path::PathBuf::from("/other")];
         assert!(!library.counts_current(generation, &replacement, 7));
-        let (next, batches) = library.begin_root_counts(&replacement, 7);
+        let (next, batches) = library.begin_root_counts(&replacement, 7, Instant::now());
         assert_ne!(next, generation);
         assert_eq!(batches, Some(0));
         library.fail_root_counts(generation, 0);
@@ -2352,7 +2527,12 @@ mod tests {
         );
         assert!(!library.root_count_failed(&replacement[0]));
         assert_eq!(library.root_count(&roots[0]), None);
-        assert!(library.begin_root_counts(&replacement, 7).1.is_none());
+        assert!(
+            library
+                .begin_root_counts(&replacement, 7, Instant::now())
+                .1
+                .is_none()
+        );
         library.accept_root_counts(
             next,
             0,
@@ -2380,6 +2560,7 @@ mod tests {
                     path: "/old".into(),
                 }],
             },
+            Instant::now(),
         );
         let TreeItem::Entry(entry) = library.tree.item(0).unwrap() else {
             panic!("root header")
@@ -2395,6 +2576,7 @@ mod tests {
                 total: 0,
                 rows: vec![],
             },
+            Instant::now(),
         );
         assert!(library.directory_request_pending(&forest, 3, None, None, false, None));
         library.accept_directory(
@@ -2406,6 +2588,7 @@ mod tests {
                     path: "/new".into(),
                 }],
             },
+            Instant::now(),
         );
         library.accept_directory(
             &old_root,
@@ -2414,6 +2597,7 @@ mod tests {
                 total: 0,
                 rows: vec![],
             },
+            Instant::now(),
         );
         let TreeItem::Entry(entry) = library.tree.item(0).unwrap() else {
             panic!("current root header")

@@ -236,8 +236,9 @@ impl Settings {
             .overflow_y_scroll()
             .gap_1();
         let session = self.model.session();
+        let now = cx.background_executor().now();
         for (index, path) in self.model.draft.library_roots.iter().enumerate() {
-            let stats = self.root_stats_label(path);
+            let stats = self.root_stats_label(path, now);
             let stats_hint: SharedString = self
                 .root_stats_error()
                 .map(|error| SharedString::from(error.to_owned()))
@@ -333,7 +334,7 @@ impl Settings {
                             self.tr("settings-retry-statistics"),
                             cx,
                             |this, _, cx| {
-                                this.root_stats.retry();
+                                this.root_stats.retry(cx.background_executor().now());
                                 this.sync_library_stats(cx);
                                 cx.notify();
                             },

@@ -2017,7 +2017,7 @@ impl Settings {
         self.fill(cx);
         self.active = true;
         if self.model.target() == Target::Global {
-            self.root_stats.retry();
+            self.root_stats.retry(cx.background_executor().now());
             self.sync_library_stats(cx);
         } else {
             self.root_stats.cancel();

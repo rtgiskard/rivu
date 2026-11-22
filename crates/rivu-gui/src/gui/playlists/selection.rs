@@ -1070,7 +1070,10 @@ impl Playlists {
         }
         self.cancel_selection(cx);
         cx.emit(PlaylistEvent::InvalidateManualIntent);
-        if self.browser.select_playlist(id, name, index) {
+        if self
+            .browser
+            .select_playlist(id, name, index, cx.background_executor().now())
+        {
             self.playlist_entries_search
                 .update(cx, |search, cx| search.reset(cx));
             self.request_playlist_entries(id, 0, cx);
@@ -1920,7 +1923,7 @@ mod tests {
     fn filtered_navigation_advances_by_matching_offset_not_occurrence_position() {
         let scope = navigation_scope();
         let mut owner = super::super::model::PlaylistBrowser::default();
-        owner.prepare_entries(scope.playlist_id);
+        owner.prepare_entries(scope.playlist_id, std::time::Instant::now());
         owner.search_entries(Some("needle".into()));
         let query = owner.entries().query.is_some();
         let selection = &mut owner.track_selection;
@@ -2339,7 +2342,7 @@ mod tests {
         let scope = navigation_scope();
         for failed in [false, true] {
             let mut owner = super::super::model::PlaylistBrowser::default();
-            owner.prepare_entries(scope.playlist_id);
+            owner.prepare_entries(scope.playlist_id, std::time::Instant::now());
             owner.track_selection.select(identity(0, 0), false);
             assert!(navigate(
                 &mut owner.track_selection,

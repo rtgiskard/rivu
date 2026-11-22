@@ -75,8 +75,9 @@ impl Library {
         page_size: usize,
         roots: &[std::path::PathBuf],
         revisions: QueryRevisions,
+        now: std::time::Instant,
     ) -> DirectoryRequest {
-        if self.library.sync_projection(revisions) {
+        if self.library.sync_projection(revisions, now) {
             self.requests.cancel_directory_demand();
         }
         if self.library.tree().status(&branch) == library::BranchStatus::Retired {
@@ -119,7 +120,8 @@ impl Library {
             .prepare_directory(branch.clone(), offset, page_size, generation);
         if branch.is_forest() {
             let page = self.library.forest_page(roots, offset, page_size);
-            self.library.accept_directory(&branch, generation, page);
+            self.library
+                .accept_directory(&branch, generation, page, now);
             return DirectoryRequest {
                 published: true,
                 read: None,
@@ -196,9 +198,10 @@ impl Library {
         read: &DirectoryRead,
         revisions: QueryRevisions,
         response: QueryResponse,
+        now: std::time::Instant,
     ) -> Option<String> {
         self.requests.directory_workers.remove(&read.branch);
-        self.publish_directory_read(read, revisions, response)
+        self.publish_directory_read(read, revisions, response, now)
     }
 
     pub(super) fn publish_directory_read(
@@ -206,6 +209,7 @@ impl Library {
         read: &DirectoryRead,
         revisions: QueryRevisions,
         response: QueryResponse,
+        now: std::time::Instant,
     ) -> Option<String> {
         if !self.directory_read_current(read, revisions) {
             self.library.cancel_directory(&read.branch, read.generation);
@@ -256,7 +260,7 @@ impl Library {
             }
         };
         self.library
-            .accept_directory(&read.branch, read.generation, page);
+            .accept_directory(&read.branch, read.generation, page, now);
         None
     }
 
@@ -295,12 +299,13 @@ impl Library {
         &mut self,
         roots: &[std::path::PathBuf],
         structure: u64,
+        now: std::time::Instant,
     ) -> Option<RootCountRead> {
-        self.library.sync_root_counts(roots, structure);
+        self.library.sync_root_counts(roots, structure, now);
         if self.requests.root_count_worker.is_some() || self.library.root_counts_settled() {
             return None;
         }
-        let (generation, offset) = self.library.begin_root_counts(roots, structure);
+        let (generation, offset) = self.library.begin_root_counts(roots, structure, now);
         let offset = offset?;
         self.requests.root_count_worker = Some(offset);
         Some(RootCountRead {
@@ -382,6 +387,7 @@ mod tests {
         let mut owner = None;
         let mut pending = None;
         with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec![std::path::PathBuf::from("/music")];
             let mut state = (*browser.state).clone();
             let config = std::sync::Arc::make_mut(&mut state.system.config);
@@ -390,24 +396,23 @@ mod tests {
             browser.available = true;
             browser.visible = true;
             browser.reconcile(std::rc::Rc::new(state), cx);
-            let branch = root_branches(browser, &roots).remove(0);
+            let branch = root_branches(browser, &roots, now).remove(0);
             browser.library.expand_directory(&branch, true);
             let baseline = browser.state.query_revisions(None);
             let read = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline, now)
                 .read
                 .unwrap();
-            browser.complete_directory_read(&read, baseline, track_response(baseline, false));
+            browser.complete_directory_read(&read, baseline, track_response(baseline, false), now);
             std::rc::Rc::make_mut(&mut browser.state)
                 .library
                 .bitrate_revision += 1;
             let current = browser.state.query_revisions(None);
-            browser.library.sync_projection_at(
-                current,
-                std::time::Instant::now() - rivu_presentation::refresh::REFRESH_RETENTION,
-            );
+            browser
+                .library
+                .sync_projection(current, now - rivu_presentation::refresh::REFRESH_RETENTION);
             pending = browser
-                .prepare_directory_read(branch, 0, 20, &roots, current)
+                .prepare_directory_read(branch, 0, 20, &roots, current, now)
                 .read;
             assert!(pending.is_some());
             browser.sync_loading_text(cx);
@@ -424,6 +429,7 @@ mod tests {
             .detach();
         });
         owner.update(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             assert!(browser.library.refresh_deadline().is_some());
             browser.schedule_refresh_wake(cx);
             // Consume expiry before the queued timer callback can execute.
@@ -432,7 +438,7 @@ mod tests {
             browser.reconcile(std::rc::Rc::new(next), cx);
             assert!(browser.library.refresh_deadline().is_none());
             assert!(matches!(
-                browser.library.tree().display_item(1),
+                browser.library.tree().display_item(1, now),
                 Some(library::tree::TreeItem::Placeholder { .. })
             ));
             assert!(browser.directory_read_current(&pending, browser.state.query_revisions(None)));
@@ -458,37 +464,62 @@ mod tests {
         let mut owner = None;
         let mut pending = None;
         with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec!["/music".into()];
-            let branch = root_branches(browser, &roots).remove(0);
+            let branch = root_branches(browser, &roots, now).remove(0);
             browser.library.expand_directory(&branch, true);
             let baseline = browser.state.query_revisions(None);
             let read = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline, now)
                 .read
                 .unwrap();
-            browser.complete_directory_read(&read, baseline, track_response(baseline, false));
+            browser.complete_directory_read(&read, baseline, track_response(baseline, false), now);
             std::rc::Rc::make_mut(&mut browser.state).library.revision += 1;
             let current = browser.state.query_revisions(None);
-            browser.library.sync_projection_at(
+            browser.library.sync_projection(current, now);
+            browser.prepare_directory_read(
+                library::TreeBranch::default(),
+                0,
+                20,
+                &roots,
                 current,
-                std::time::Instant::now() - rivu_presentation::refresh::REFRESH_RETENTION,
+                now,
             );
-            browser.prepare_directory_read(library::TreeBranch::default(), 0, 20, &roots, current);
             let read = browser
-                .prepare_directory_read(branch, 0, 20, &roots, current)
+                .prepare_directory_read(branch, 0, 20, &roots, current, now)
                 .read
                 .unwrap();
-            assert!(browser.library.refresh_deadline().is_some());
+            assert_eq!(
+                browser.library.refresh_deadline(),
+                Some(now + rivu_presentation::refresh::REFRESH_RETENTION),
+            );
             browser.schedule_refresh_wake(cx);
             pending = Some(read);
             owner = Some(cx.entity());
         });
         cx.run_until_parked();
+        let owner = owner.unwrap();
         let pending = pending.unwrap();
-        owner.unwrap().read_with(cx, |browser, _| {
+        let last_millisecond = std::time::Duration::from_millis(1);
+        cx.executor()
+            .advance_clock(rivu_presentation::refresh::REFRESH_RETENTION - last_millisecond);
+        owner.read_with(cx, |browser, cx| {
+            assert!(matches!(
+                browser
+                    .library
+                    .tree()
+                    .display_item(1, cx.background_executor().now()),
+                Some(library::tree::TreeItem::Entry(_))
+            ));
+            assert!(browser.library.refresh_deadline().is_some());
+        });
+        cx.executor().advance_clock(last_millisecond);
+        cx.run_until_parked();
+        owner.read_with(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             assert!(browser.library.refresh_deadline().is_none());
             assert!(matches!(
-                browser.library.tree().display_item(1),
+                browser.library.tree().display_item(1, now),
                 Some(library::tree::TreeItem::Placeholder { .. })
             ));
             assert!(browser.directory_read_current(&pending, browser.state.query_revisions(None)));
@@ -500,42 +531,53 @@ mod tests {
     fn retained_rows_reject_actions_and_equal_results_restore_current_callbacks(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec!["/music".into()];
-            let branch = root_branches(browser, &roots).remove(0);
+            let branch = root_branches(browser, &roots, now).remove(0);
             browser.library.expand_directory(&branch, true);
             let baseline = browser.state.query_revisions(None);
             let initial = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline, now)
                 .read
                 .unwrap();
-            browser.complete_directory_read(&initial, baseline, track_response(baseline, false));
+            browser.complete_directory_read(
+                &initial,
+                baseline,
+                track_response(baseline, false),
+                now,
+            );
             let node = library::LibraryNode::Track(7);
             let old_scope = browser.library_row_scope();
             assert!(browser.library_row_current(&old_scope, 1, &node));
             std::rc::Rc::make_mut(&mut browser.state).library.revision += 1;
             let current = browser.state.query_revisions(None);
-            browser
-                .library
-                .sync_projection_at(current, std::time::Instant::now());
+            browser.library.sync_projection(current, now);
             assert!(!initial.ticket.is_current());
             let scope = browser.library_row_scope();
             assert!(matches!(
-                browser.library.tree().display_item(1),
+                browser.library.tree().display_item(1, now),
                 Some(library::tree::TreeItem::Entry(_))
             ));
             assert!(!browser.library_row_current(&scope, 1, &node));
             assert!(browser.library.navigate_tree_row(1).is_none());
-            browser.prepare_directory_read(library::TreeBranch::default(), 0, 20, &roots, current);
+            browser.prepare_directory_read(
+                library::TreeBranch::default(),
+                0,
+                20,
+                &roots,
+                current,
+                now,
+            );
             let fresh = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, current)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, current, now)
                 .read
                 .unwrap();
             let scope = browser.library_row_scope();
-            browser.publish_directory_read(&initial, current, track_response(baseline, false));
+            browser.publish_directory_read(&initial, current, track_response(baseline, false), now);
             assert!(browser.directory_read_current(&fresh, current));
             assert!(!browser.library_row_current(&scope, 1, &node));
-            browser.complete_directory_read(&fresh, current, track_response(current, false));
+            browser.complete_directory_read(&fresh, current, track_response(current, false), now);
             assert!(browser.library_row_current(&scope, 1, &node));
             assert!(!browser.library_row_current(&old_scope, 1, &node));
         });
@@ -545,17 +587,18 @@ mod tests {
     fn obsolete_directory_demand_parks_quietly_until_retry_or_fresh_authority(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             for explicit in [false, true] {
                 for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
                     browser.library = Default::default();
                     browser.requests = Default::default();
                     let roots = vec!["/music".into()];
-                    let branch = root_branches(browser, &roots).remove(0);
+                    let branch = root_branches(browser, &roots, now).remove(0);
                     browser.library.expand_directory(&branch, true);
                     let revisions = QueryRevisions::default();
                     let old = browser
-                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                         .read
                         .unwrap();
                     assert!(
@@ -566,7 +609,8 @@ mod tests {
                                 QueryResponse {
                                     revisions,
                                     result: Err(error.clone())
-                                }
+                                },
+                                now,
                             )
                             .is_none()
                     );
@@ -578,7 +622,14 @@ mod tests {
                     for _ in 0..3 {
                         assert!(
                             browser
-                                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                                .prepare_directory_read(
+                                    branch.clone(),
+                                    0,
+                                    20,
+                                    &roots,
+                                    revisions,
+                                    now
+                                )
                                 .read
                                 .is_none()
                         );
@@ -594,7 +645,7 @@ mod tests {
                     };
                     assert!(
                         browser
-                            .prepare_directory_read(branch.clone(), 0, 20, &roots, current)
+                            .prepare_directory_read(branch.clone(), 0, 20, &roots, current, now)
                             .read
                             .is_none()
                     );
@@ -603,10 +654,11 @@ mod tests {
                         &old,
                         current,
                         track_response(revisions, false),
+                        now,
                     );
                     let (next_branch, offset) = browser.next_directory_demand(true).unwrap();
                     let next = browser
-                        .prepare_directory_read(next_branch, offset, 20, &roots, current)
+                        .prepare_directory_read(next_branch, offset, 20, &roots, current, now)
                         .read
                         .unwrap();
                     browser.publish_directory_read(
@@ -616,6 +668,7 @@ mod tests {
                             revisions,
                             result: Err(error.clone()),
                         },
+                        now,
                     );
                     assert!(
                         browser
@@ -625,7 +678,12 @@ mod tests {
                     );
                     assert!(
                         browser
-                            .complete_directory_read(&next, current, track_response(current, false))
+                            .complete_directory_read(
+                                &next,
+                                current,
+                                track_response(current, false),
+                                now
+                            )
                             .is_none()
                     );
                     assert!(browser.library.tree().cached_row(&branch, 0).is_some());
@@ -639,14 +697,15 @@ mod tests {
     fn obsolete_root_counts_keep_worker_until_completion_and_resume_on_retry_or_revision(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             for explicit in [false, true] {
                 for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
                     browser.library = Default::default();
                     browser.requests = Default::default();
                     let roots = vec!["/music".into()];
                     let revisions = QueryRevisions::default();
-                    let old = browser.prepare_root_count_read(&roots, 0).unwrap();
+                    let old = browser.prepare_root_count_read(&roots, 0, now).unwrap();
                     assert!(
                         browser
                             .publish_root_count_read(
@@ -663,7 +722,7 @@ mod tests {
                     assert!(browser.library.root_counts_retired());
                     assert!(!browser.library.root_count_failed(&roots[0]));
                     for _ in 0..3 {
-                        assert!(browser.prepare_root_count_read(&roots, 0).is_none());
+                        assert!(browser.prepare_root_count_read(&roots, 0, now).is_none());
                     }
                     let current = if explicit {
                         browser.library.retry_root_counts();
@@ -676,12 +735,12 @@ mod tests {
                     };
                     assert!(
                         browser
-                            .prepare_root_count_read(&roots, current.structure)
+                            .prepare_root_count_read(&roots, current.structure, now)
                             .is_none()
                     );
                     browser.retire_root_count_read(&old);
                     let next = browser
-                        .prepare_root_count_read(&roots, current.structure)
+                        .prepare_root_count_read(&roots, current.structure, now)
                         .unwrap();
                     browser.publish_root_count_read(
                         &old,
@@ -717,7 +776,8 @@ mod tests {
     fn other_collection_is_present_while_total_unknown_and_uses_its_own_query(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let revisions = QueryRevisions::default();
             let forest = browser.prepare_directory_read(
                 library::TreeBranch::default(),
@@ -725,6 +785,7 @@ mod tests {
                 20,
                 &[],
                 revisions,
+                now,
             );
             assert!(forest.published);
             assert!(forest.read.is_none());
@@ -744,7 +805,7 @@ mod tests {
             browser.library.buffer.favorite = Some(true);
             browser.library.buffer.missing = Some(true);
             let read = browser
-                .prepare_directory_read(branch, 0, 20, &[], revisions)
+                .prepare_directory_read(branch, 0, 20, &[], revisions, now)
                 .read
                 .expect("collection read");
             assert!(
@@ -755,7 +816,8 @@ mod tests {
 
     #[gpui::test]
     fn forest_pages_keep_configured_root_order_and_append_other(cx: &mut gpui::TestAppContext) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec!["/b".into(), "/a".into(), "/b/child".into()];
             let forest = library::TreeBranch::default();
             for offset in [0, 2] {
@@ -765,6 +827,7 @@ mod tests {
                     2,
                     &roots,
                     QueryRevisions::default(),
+                    now,
                 );
                 assert!(request.published);
                 assert!(request.read.is_none());
@@ -786,6 +849,7 @@ mod tests {
     fn root_branches(
         browser: &mut Library,
         roots: &[std::path::PathBuf],
+        now: std::time::Instant,
     ) -> Vec<library::TreeBranch> {
         let request = browser.prepare_directory_read(
             library::TreeBranch::default(),
@@ -793,6 +857,7 @@ mod tests {
             20,
             roots,
             QueryRevisions::default(),
+            now,
         );
         assert!(request.published);
         assert!(request.read.is_none());
@@ -846,15 +911,16 @@ mod tests {
     #[gpui::test]
     fn directory_reads_reject_stale_bitrate_and_source_revisions(cx: &mut gpui::TestAppContext) {
         for (flat, stale_bitrate) in [(false, true), (true, true), (false, false)] {
-            with_library(cx, |browser, _| {
+            with_library(cx, |browser, cx| {
+                let now = cx.background_executor().now();
                 if flat {
                     browser.library.toggle_view();
                 }
                 let roots = vec!["/music".into()];
-                let branch = root_branches(browser, &roots).remove(0);
+                let branch = root_branches(browser, &roots, now).remove(0);
                 let baseline = browser.state.query_revisions(None);
                 let read = browser
-                    .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                    .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline, now)
                     .read
                     .unwrap();
                 let state = std::rc::Rc::make_mut(&mut browser.state);
@@ -864,10 +930,10 @@ mod tests {
                     state.library.revision += 1;
                 }
                 let latest = browser.state.query_revisions(None);
-                assert!(browser.library.sync_projection(latest));
+                assert!(browser.library.sync_projection(latest, now));
                 assert!(
                     browser
-                        .complete_directory_read(&read, latest, track_response(baseline, flat))
+                        .complete_directory_read(&read, latest, track_response(baseline, flat), now)
                         .is_none()
                 );
                 assert!(browser.library.tree().cached_row(&branch, 0).is_none());
@@ -879,13 +945,14 @@ mod tests {
 
     #[gpui::test]
     fn bitrate_change_retries_only_after_physical_worker_retires(cx: &mut gpui::TestAppContext) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec!["/music".into()];
-            let branch = root_branches(browser, &roots).remove(0);
+            let branch = root_branches(browser, &roots, now).remove(0);
             browser.library.expand_directory(&branch, true);
             let baseline = browser.state.query_revisions(None);
             let read = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline, now)
                 .read
                 .unwrap();
             let state = std::rc::Rc::make_mut(&mut browser.state);
@@ -894,26 +961,26 @@ mod tests {
             assert!(browser.requests.directory_workers.contains_key(&branch));
             assert!(
                 browser
-                    .prepare_directory_read(branch.clone(), 0, 20, &roots, latest)
+                    .prepare_directory_read(branch.clone(), 0, 20, &roots, latest, now)
                     .read
                     .is_none()
             );
             assert_eq!(browser.requests.directory_queued.len(), 1);
             assert!(
                 browser
-                    .complete_directory_read(&read, latest, track_response(baseline, false))
+                    .complete_directory_read(&read, latest, track_response(baseline, false), now)
                     .is_none()
             );
             assert!(browser.library.tree().cached_row(&branch, 0).is_none());
             let (retry_branch, offset) = browser.next_directory_demand(true).unwrap();
             assert_eq!(retry_branch, branch);
             let retry = browser
-                .prepare_directory_read(retry_branch, offset, 20, &roots, latest)
+                .prepare_directory_read(retry_branch, offset, 20, &roots, latest, now)
                 .read
                 .unwrap();
             assert!(
                 browser
-                    .complete_directory_read(&retry, latest, track_response(latest, false))
+                    .complete_directory_read(&retry, latest, track_response(latest, false), now)
                     .is_none()
             );
             assert!(browser.library.tree().cached_row(&branch, 0).is_some());
@@ -926,6 +993,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec![std::path::PathBuf::from("/music")];
             let mut state = (*browser.state).clone();
             let config = std::sync::Arc::make_mut(&mut state.system.config);
@@ -933,11 +1001,11 @@ mod tests {
             config.query_batch_size = 20;
             browser.visible = true;
             browser.reconcile(std::rc::Rc::new(state), cx);
-            let branch = root_branches(browser, &roots).remove(0);
+            let branch = root_branches(browser, &roots, now).remove(0);
             browser.library.expand_directory(&branch, true);
             let baseline = browser.state.query_revisions(None);
             let count = browser
-                .prepare_root_count_read(&roots, baseline.structure)
+                .prepare_root_count_read(&roots, baseline.structure, now)
                 .unwrap();
             browser.complete_root_count_read(
                 count,
@@ -954,10 +1022,10 @@ mod tests {
                 },
             );
             let read = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, baseline, now)
                 .read
                 .unwrap();
-            browser.complete_directory_read(&read, baseline, track_response(baseline, false));
+            browser.complete_directory_read(&read, baseline, track_response(baseline, false), now);
             browser.library.selected.insert(7);
             let geometry = browser.library.tree().row_count();
             let projection = browser.library.tree().projection_revision();
@@ -968,7 +1036,7 @@ mod tests {
             assert_eq!(browser.library.root_count(&roots[0]), Some(1));
             assert!(
                 browser
-                    .prepare_root_count_read(&roots, baseline.structure)
+                    .prepare_root_count_read(&roots, baseline.structure, now)
                     .is_none()
             );
             assert!(browser.library.selected.contains(&7));
@@ -985,17 +1053,18 @@ mod tests {
     fn identity_changes_retire_directory_receipts_before_another_page_is_demanded(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             for change in 0..6 {
                 browser.library = Default::default();
                 browser.requests = Default::default();
                 let roots = vec!["/music".into()];
-                let branch = root_branches(browser, &roots).remove(0);
+                let branch = root_branches(browser, &roots, now).remove(0);
                 browser.library.prepare_query("seed".into());
                 browser.library.expand_directory(&branch, true);
                 let revisions = QueryRevisions::default();
                 let old = browser
-                    .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                    .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                     .read
                     .unwrap();
                 match change {
@@ -1003,7 +1072,7 @@ mod tests {
                     1 => browser.library.toggle_favorites(),
                     2 => {
                         browser.library.toggle_missing();
-                        browser.library.refresh_filter();
+                        browser.library.refresh_filter(now);
                     }
                     3 => browser.library.toggle_view(),
                     4 => browser.library.clear_locate_filters(),
@@ -1022,12 +1091,12 @@ mod tests {
                     1 => browser.library.toggle_favorites(),
                     2 => {
                         browser.library.toggle_missing();
-                        browser.library.refresh_filter();
+                        browser.library.refresh_filter(now);
                     }
                     3 => browser.library.toggle_view(),
                     _ => browser.library.prepare_query("seed".into()),
                 }
-                browser.library.sync_projection(revisions);
+                browser.library.sync_projection(revisions, now);
                 assert!(
                     !browser
                         .library
@@ -1043,13 +1112,19 @@ mod tests {
                                 revisions,
                                 result: Err(QueryError::Message("late timeout".into())),
                             },
+                            now,
                         )
                         .is_none()
                 );
                 assert!(browser.requests.directory_workers.contains_key(&branch));
                 assert!(
                     browser
-                        .complete_directory_read(&old, revisions, track_response(revisions, false),)
+                        .complete_directory_read(
+                            &old,
+                            revisions,
+                            track_response(revisions, false),
+                            now
+                        )
                         .is_none()
                 );
                 assert!(browser.library.tree().cached_row(&branch, 0).is_none());
@@ -1062,20 +1137,21 @@ mod tests {
     fn directory_filters_reject_stale_rows_without_releasing_physical_workers(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec!["/music".into()];
-            let branch = root_branches(browser, &roots).remove(0);
+            let branch = root_branches(browser, &roots, now).remove(0);
             browser.library.expand_directory(&branch, true);
             let revisions = QueryRevisions::default();
             let old = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                 .read
                 .unwrap();
             for filter in ["one", "two", "latest"] {
                 browser.library.refresh_search(filter.into());
                 assert!(
                     browser
-                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                         .read
                         .is_none()
                 );
@@ -1094,10 +1170,11 @@ mod tests {
                         }],
                     })),
                 },
+                now,
             );
             let (branch, offset) = browser.next_directory_demand(true).unwrap();
             let latest = browser
-                .prepare_directory_read(branch, offset, 20, &roots, revisions)
+                .prepare_directory_read(branch, offset, 20, &roots, revisions, now)
                 .read
                 .unwrap();
             assert!(
@@ -1114,6 +1191,7 @@ mod tests {
                         rows: vec![],
                     })),
                 },
+                now,
             );
             assert!(browser.requests.directory_workers.is_empty());
             assert!(
@@ -1128,11 +1206,12 @@ mod tests {
     fn cancelled_directory_and_count_reads_hold_their_worker_gates_until_completion(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots: Vec<_> = (0..5)
                 .map(|index| std::path::PathBuf::from(format!("/music/{index}")))
                 .collect();
-            let branches = root_branches(browser, &roots);
+            let branches = root_branches(browser, &roots, now);
             for branch in &branches {
                 browser.library.expand_directory(branch, true);
             }
@@ -1142,16 +1221,22 @@ mod tests {
                 .take(DIRECTORY_WORKERS)
                 .map(|branch| {
                     browser
-                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                         .read
                         .unwrap()
                 })
                 .collect();
-            let count = browser.prepare_root_count_read(&roots, 0).unwrap();
+            let count = browser.prepare_root_count_read(&roots, 0, now).unwrap();
             for _ in 0..8 {
                 browser.cancel_reads();
-                let queued =
-                    browser.prepare_directory_read(branches[4].clone(), 0, 20, &roots, revisions);
+                let queued = browser.prepare_directory_read(
+                    branches[4].clone(),
+                    0,
+                    20,
+                    &roots,
+                    revisions,
+                    now,
+                );
                 assert!(!queued.published);
                 assert!(queued.read.is_none());
                 assert_eq!(
@@ -1159,12 +1244,13 @@ mod tests {
                     library::BranchStatus::Unloaded
                 );
                 assert_eq!(browser.requests.directory_queued.len(), 1);
-                assert!(browser.prepare_root_count_read(&roots, 0).is_none());
+                assert!(browser.prepare_root_count_read(&roots, 0, now).is_none());
                 assert_eq!(browser.requests.directory_workers.len(), DIRECTORY_WORKERS);
             }
             browser.abandon_directory_read(&reads[0]);
             let (branch, offset) = browser.next_directory_demand(true).unwrap();
-            let resumed = browser.prepare_directory_read(branch, offset, 20, &roots, revisions);
+            let resumed =
+                browser.prepare_directory_read(branch, offset, 20, &roots, revisions, now);
             assert!(!resumed.published);
             let resumed = resumed.read.expect("worker slot released");
             assert_eq!(
@@ -1181,36 +1267,42 @@ mod tests {
                     result: Ok(ViewResponse::LibraryRootCounts(vec![])),
                 },
             );
-            assert!(browser.prepare_root_count_read(&roots, 0).is_some());
+            assert!(browser.prepare_root_count_read(&roots, 0, now).is_some());
         });
     }
 
     #[gpui::test]
     fn current_directory_page_demand_does_not_queue_a_duplicate(cx: &mut gpui::TestAppContext) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec!["/music".into()];
-            let branch = root_branches(browser, &roots).remove(0);
+            let branch = root_branches(browser, &roots, now).remove(0);
             browser.library.expand_directory(&branch, true);
             let revisions = QueryRevisions::default();
             let read = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                 .read
                 .unwrap();
             assert!(
                 browser
-                    .prepare_directory_read(branch.clone(), 19, 20, &roots, revisions)
+                    .prepare_directory_read(branch.clone(), 19, 20, &roots, revisions, now)
                     .read
                     .is_none()
             );
             assert!(browser.requests.directory_queued.is_empty());
-            browser.prepare_directory_read(branch.clone(), 40, 20, &roots, revisions);
+            browser.prepare_directory_read(branch.clone(), 40, 20, &roots, revisions, now);
             assert_eq!(
                 browser.requests.directory_queued.front(),
                 Some(&(branch.clone(), 40))
             );
-            browser.prepare_directory_read(branch.clone(), 7, 20, &roots, revisions);
+            browser.prepare_directory_read(branch.clone(), 7, 20, &roots, revisions, now);
             assert!(browser.requests.directory_queued.is_empty());
-            browser.complete_directory_read(&read, revisions, track_response(revisions, false));
+            browser.complete_directory_read(
+                &read,
+                revisions,
+                track_response(revisions, false),
+                now,
+            );
             assert!(browser.requests.directory_workers.is_empty());
             assert!(browser.next_directory_demand(true).is_none());
             assert!(browser.library.tree().cached_row(&branch, 0).is_some());
@@ -1221,16 +1313,17 @@ mod tests {
     fn timeout_holds_worker_until_retirement_and_only_explicit_retry_requeues(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec!["/music".into()];
-            let branch = root_branches(browser, &roots).remove(0);
+            let branch = root_branches(browser, &roots, now).remove(0);
             browser.library.expand_directory(&branch, true);
             let revisions = QueryRevisions::default();
             let read = browser
-                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                 .read
                 .unwrap();
-            browser.prepare_directory_read(branch.clone(), 0, 20, &roots, revisions);
+            browser.prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now);
             assert!(
                 browser
                     .publish_directory_read(
@@ -1242,6 +1335,7 @@ mod tests {
                                 "timeout".into()
                             )),
                         },
+                        now,
                     )
                     .is_some()
             );
@@ -1254,7 +1348,7 @@ mod tests {
             browser.library.retry_directory(&branch);
             assert!(
                 browser
-                    .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                    .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                     .read
                     .is_none()
             );
@@ -1262,7 +1356,7 @@ mod tests {
             browser.abandon_directory_read(&read);
             let (retry_branch, offset) = browser.next_directory_demand(true).unwrap();
             let retry = browser
-                .prepare_directory_read(retry_branch, offset, 20, &roots, revisions)
+                .prepare_directory_read(retry_branch, offset, 20, &roots, revisions, now)
                 .read
                 .unwrap();
             assert!(
@@ -1271,7 +1365,12 @@ mod tests {
                     .tree()
                     .request_pending(&branch, retry.generation)
             );
-            browser.complete_directory_read(&retry, revisions, track_response(revisions, false));
+            browser.complete_directory_read(
+                &retry,
+                revisions,
+                track_response(revisions, false),
+                now,
+            );
             assert!(browser.requests.directory_workers.is_empty());
             assert_eq!(
                 browser.library.tree().status(&branch),
@@ -1285,6 +1384,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots = vec![
                 "/music".into(),
                 "/busy-1".into(),
@@ -1292,12 +1392,12 @@ mod tests {
                 "/busy-3".into(),
                 "/busy-4".into(),
             ];
-            let branches = root_branches(browser, &roots);
+            let branches = root_branches(browser, &roots, now);
             let root = &branches[0];
             browser.library.expand_directory(root, true);
             let revisions = QueryRevisions::default();
             let read = browser
-                .prepare_directory_read(root.clone(), 0, 20, &roots, revisions)
+                .prepare_directory_read(root.clone(), 0, 20, &roots, revisions, now)
                 .read
                 .unwrap();
             browser.complete_directory_read(
@@ -1312,6 +1412,7 @@ mod tests {
                         }],
                     })),
                 },
+                now,
             );
             let library::tree::TreeItem::Entry(entry) = browser.library.tree().item(1).unwrap()
             else {
@@ -1325,14 +1426,14 @@ mod tests {
                 .map(|branch| {
                     browser.library.expand_directory(branch, true);
                     browser
-                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions)
+                        .prepare_directory_read(branch.clone(), 0, 20, &roots, revisions, now)
                         .read
                         .unwrap()
                 })
                 .collect();
             assert!(
                 browser
-                    .prepare_directory_read(child.clone(), 7, 20, &roots, revisions)
+                    .prepare_directory_read(child.clone(), 7, 20, &roots, revisions, now)
                     .read
                     .is_none()
             );
@@ -1359,12 +1460,17 @@ mod tests {
                     .contains(&(child.clone(), 0))
             );
             let reopened = browser
-                .prepare_directory_read(child.clone(), 0, 20, &roots, revisions)
+                .prepare_directory_read(child.clone(), 0, 20, &roots, revisions, now)
                 .read
                 .expect("current visible demand can read after reopening");
             browser.library.expand_directory(root, false);
             browser.prune_directory_demand();
-            browser.complete_directory_read(&reopened, revisions, track_response(revisions, false));
+            browser.complete_directory_read(
+                &reopened,
+                revisions,
+                track_response(revisions, false),
+                now,
+            );
             assert!(browser.library.tree().cached_row(&child, 0).is_none());
             assert!(
                 !browser
@@ -1384,11 +1490,12 @@ mod tests {
     fn cancellation_releases_bounded_queue_even_without_physical_workers(
         cx: &mut gpui::TestAppContext,
     ) {
-        with_library(cx, |browser, _| {
+        with_library(cx, |browser, cx| {
+            let now = cx.background_executor().now();
             let roots: Vec<_> = (0..12)
                 .map(|index| format!("/music/{index}").into())
                 .collect();
-            let branches = root_branches(browser, &roots);
+            let branches = root_branches(browser, &roots, now);
             for branch in branches {
                 browser.requests.queue_directory(branch, 0);
                 assert!(browser.requests.directory_queued.len() <= DIRECTORY_WORKERS);

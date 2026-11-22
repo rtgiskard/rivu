@@ -40,7 +40,11 @@ fn source_peak_rejects_changed_selection_file_and_explicit_reload(cx: &mut TestA
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
         this.metadata.select(1);
-        let original = this.metadata.track().unwrap().clone();
+        let original = this
+            .metadata
+            .display_track_at(cx.background_executor().now())
+            .unwrap()
+            .clone();
         let peak = SourcePeak {
             track_id: original.id,
             path: original.path.clone(),
@@ -49,36 +53,36 @@ fn source_peak_rejects_changed_selection_file_and_explicit_reload(cx: &mut TestA
             eligible: true,
             value: Some(0.75),
         };
-        assert!(this.source_peak_current(&peak));
+        assert!(this.source_peak_current(&peak, cx.background_executor().now()));
 
         let mut relocated = original.clone();
         relocated.path = "relocated.flac".into();
         let read = this.metadata.begin_load(original.id);
         assert!(this.metadata.accept_load(read, Some(relocated)));
-        assert!(!this.source_peak_current(&peak));
+        assert!(!this.source_peak_current(&peak, cx.background_executor().now()));
 
         let read = this.metadata.begin_load(original.id);
         assert!(this.metadata.accept_load(read, Some(original.clone())));
-        assert!(this.source_peak_current(&peak));
+        assert!(this.source_peak_current(&peak, cx.background_executor().now()));
         this.request_track(original.id, cx);
-        assert!(!this.source_peak_current(&peak));
+        assert!(!this.source_peak_current(&peak, cx.background_executor().now()));
 
         let peak = SourcePeak {
             reload: this.source_peak_reload,
             source_serial: this.metadata.source.generation(),
             ..peak
         };
-        assert!(this.source_peak_current(&peak));
+        assert!(this.source_peak_current(&peak, cx.background_executor().now()));
         this.metadata.source.stage(file_tags());
-        assert!(!this.source_peak_current(&peak));
+        assert!(!this.source_peak_current(&peak, cx.background_executor().now()));
 
         let peak = SourcePeak {
             source_serial: this.metadata.source.generation(),
             ..peak
         };
-        assert!(this.source_peak_current(&peak));
+        assert!(this.source_peak_current(&peak, cx.background_executor().now()));
         this.metadata.select(original.id + 1);
-        assert!(!this.source_peak_current(&peak));
+        assert!(!this.source_peak_current(&peak, cx.background_executor().now()));
     });
 }
 
@@ -102,7 +106,10 @@ fn decoder_choice_does_not_close_or_submit_while_source_is_busy(cx: &mut TestApp
             assert_eq!(this.hint_panel, Some(1));
             assert!(!this.metadata.saving(Field::DecoderHint));
             assert_eq!(
-                this.metadata.track().unwrap().decoder_hint,
+                this.metadata
+                    .display_track_at(cx.background_executor().now())
+                    .unwrap()
+                    .decoder_hint,
                 DecoderHint::Auto
             );
         });
@@ -200,12 +207,22 @@ fn bitrate_revision_retains_inline_text_and_queues_hidden_reload(cx: &mut TestAp
             assert_eq!(this.edit.as_ref().unwrap().baseline, "original");
             assert!(
                 this.metadata_read
-                    .prepare(&mut this.metadata, false, Instant::now())
+                    .prepare(
+                        &mut this.metadata,
+                        false,
+                        Instant::now(),
+                        cx.background_executor().now()
+                    )
                     .is_none()
             );
             assert!(
                 this.metadata_read
-                    .prepare(&mut this.metadata, true, Instant::now())
+                    .prepare(
+                        &mut this.metadata,
+                        true,
+                        Instant::now(),
+                        cx.background_executor().now()
+                    )
                     .is_some()
             );
         });
@@ -230,7 +247,12 @@ fn hidden_playback_advances_without_a_track_query(cx: &mut TestAppContext) {
         this.demand_metadata(cx);
         assert!(
             this.metadata_read
-                .prepare(&mut this.metadata, true, Instant::now())
+                .prepare(
+                    &mut this.metadata,
+                    true,
+                    Instant::now(),
+                    cx.background_executor().now()
+                )
                 .is_none()
         );
         assert_eq!(this.metadata.read_state(), &MetadataReadState::Idle);
@@ -251,7 +273,12 @@ fn playback_and_explicit_selection_own_target_not_read_completion(cx: &mut TestA
         this.request_track(2, cx);
         let task = this
             .metadata_read
-            .prepare(&mut this.metadata, true, Instant::now())
+            .prepare(
+                &mut this.metadata,
+                true,
+                Instant::now(),
+                cx.background_executor().now(),
+            )
             .unwrap();
         assert_eq!(task.read.query(), Query::Track { track_id: 2 });
         let revisions = this.state.query_revisions_for(&task.read.query());
@@ -265,13 +292,31 @@ fn playback_and_explicit_selection_own_target_not_read_completion(cx: &mut TestA
         ));
         playback(this, track(3, "C"), cx);
         assert_eq!(this.metadata.selected(), Some(2));
-        assert_eq!(this.metadata.track().unwrap().title, "B");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "B"
+        );
 
         playback(this, track(2, "new projected B"), cx);
-        assert_eq!(this.metadata.track().unwrap().title, "B");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "B"
+        );
         this.clear_selection(cx);
         assert_eq!(this.metadata.identity(), Some(2));
-        assert_eq!(this.metadata.track().unwrap().title, "new projected B");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "new projected B"
+        );
         assert!(matches!(
             this.metadata_read.finish(
                 task.read,
@@ -288,10 +333,21 @@ fn playback_and_explicit_selection_own_target_not_read_completion(cx: &mut TestA
             ),
             ReadCompletion::Retired
         ));
-        assert_eq!(this.metadata.track().unwrap().title, "new projected B");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "new projected B"
+        );
         assert!(
             this.metadata_read
-                .prepare(&mut this.metadata, true, Instant::now())
+                .prepare(
+                    &mut this.metadata,
+                    true,
+                    Instant::now(),
+                    cx.background_executor().now()
+                )
                 .is_none()
         );
 
@@ -299,7 +355,11 @@ fn playback_and_explicit_selection_own_target_not_read_completion(cx: &mut TestA
         state.current_track = None;
         this.reconcile(Rc::new(state), cx);
         assert_eq!(this.metadata.identity(), None);
-        assert!(this.metadata.track().is_none());
+        assert!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .is_none()
+        );
     });
 }
 
@@ -386,7 +446,10 @@ fn bulk_source_commands_include_seven_staged_values_and_database_expectation() {
     let original = Arc::new(original);
     session.sync_playback(Some(&original));
     session.source.stage(file_tags());
-    assert_eq!(session.track(), Some(original.as_ref()));
+    assert_eq!(
+        session.display_track_at(Instant::now()),
+        Some(original.as_ref())
+    );
     for action in [SourceAction::Sync, SourceAction::Save] {
         let (token, command) = session.begin_source(action).unwrap();
         match command {
@@ -415,7 +478,10 @@ fn bulk_source_commands_include_seven_staged_values_and_database_expectation() {
         .unwrap();
     assert!(session.begin_source(SourceAction::Sync).is_none());
     assert!(session.complete_save(save));
-    assert_eq!(session.track(), Some(original.as_ref()));
+    assert_eq!(
+        session.display_track_at(Instant::now()),
+        Some(original.as_ref())
+    );
 }
 
 #[test]
@@ -495,7 +561,11 @@ fn file_load_stages_all_tags_even_when_observation_is_unavailable(cx: &mut TestA
     use rivu_format::tags::TagEncoding;
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
-        let original = this.metadata.track().unwrap().clone();
+        let original = this
+            .metadata
+            .display_track_at(cx.background_executor().now())
+            .unwrap()
+            .clone();
         let (token, command) = this
             .metadata
             .begin_source(source::SourceAction::Load(TagEncoding::Gb18030))
@@ -511,7 +581,11 @@ fn file_load_stages_all_tags_even_when_observation_is_unavailable(cx: &mut TestA
         delivery.observation =
             crate::frontend::CommandObservation::Unavailable("refresh unavailable".into());
         this.finish_source_action(token, delivery, cx);
-        assert_eq!(this.metadata.track(), Some(&original));
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now()),
+            Some(&original)
+        );
         assert_eq!(this.metadata.source.values(&original), file_tags());
         assert_eq!(
             this.metadata.source.status,
@@ -546,13 +620,21 @@ fn late_source_load_cannot_cross_selection_epoch_or_replace_newer_operation(
         assert_eq!(
             this.metadata
                 .source
-                .values(this.metadata.track().unwrap())
+                .values(
+                    this.metadata
+                        .display_track_at(cx.background_executor().now())
+                        .unwrap()
+                )
                 .title,
             "returned"
         );
         this.finish_source_action(new, source_ack(true, false), cx);
         assert_eq!(
-            this.metadata.source.values(this.metadata.track().unwrap()),
+            this.metadata.source.values(
+                this.metadata
+                    .display_track_at(cx.background_executor().now())
+                    .unwrap()
+            ),
             file_tags()
         );
         let (latest, _) = this
@@ -589,7 +671,11 @@ fn newer_inline_edit_rejects_pending_load_values(cx: &mut TestAppContext) {
             assert_eq!(
                 this.metadata
                     .source
-                    .values(this.metadata.track().unwrap())
+                    .values(
+                        this.metadata
+                            .display_track_at(cx.background_executor().now())
+                            .unwrap()
+                    )
                     .title,
                 "A"
             );
@@ -619,10 +705,10 @@ fn successful_inline_save_releases_only_its_staged_field_after_refresh(cx: &mut 
         playback(this, refreshed, cx);
         let mut expected = file_tags();
         expected.title = "edited title".into();
-        assert_eq!(this.metadata.source.values(this.metadata.track().unwrap()), expected);
+        assert_eq!(this.metadata.source.values(this.metadata.display_track_at(cx.background_executor().now()).unwrap()), expected);
         let (count, _) = this.metadata.begin_save(&SavedValue::PlayCount(4)).unwrap();
         this.finish_save(count, None, ack(true), cx);
-        assert_eq!(this.metadata.source.values(this.metadata.track().unwrap()), expected);
+        assert_eq!(this.metadata.source.values(this.metadata.display_track_at(cx.background_executor().now()).unwrap()), expected);
     });
 }
 
@@ -650,7 +736,7 @@ fn fresh_metadata_owner_routes_observed_save_to_database_only(cx: &mut TestAppCo
         let mut selected = track(1, "database title");
         selected.missing = true;
         artwork_selection(this, selected.clone(), cx);
-        assert_eq!(this.metadata.track(), Some(&selected));
+        assert_eq!(this.metadata.display_track_at(cx.background_executor().now()), Some(&selected));
         assert_eq!(this.metadata.source.values(&selected), file_tags());
         assert!(this.source_status().unwrap().contains("database write failed"));
         assert!(
@@ -698,7 +784,11 @@ fn projected_save_survives_selection_changes_before_or_after_ack(cx: &mut TestAp
                 this.finish_source_action(save, delivery, cx);
                 artwork_selection(this, other.clone(), cx);
             }
-            assert_eq!(this.metadata.track(), Some(&other));
+            assert_eq!(
+                this.metadata
+                    .display_track_at(cx.background_executor().now()),
+                Some(&other)
+            );
             assert_eq!(
                 this.metadata.source.values(&other),
                 source::database_tags(&other)
@@ -713,7 +803,11 @@ fn projected_save_survives_selection_changes_before_or_after_ack(cx: &mut TestAp
             assert_eq!(this.metadata.source.finish(sync), Some(true));
 
             artwork_selection(this, original.clone(), cx);
-            assert_eq!(this.metadata.track(), Some(&original));
+            assert_eq!(
+                this.metadata
+                    .display_track_at(cx.background_executor().now()),
+                Some(&original)
+            );
             assert_eq!(this.metadata.source.values(&original), file_tags());
             assert!(this.source_status().unwrap().contains("save failed"));
             assert!(this.metadata.begin_source(SourceAction::Save).is_none());
@@ -726,7 +820,11 @@ fn projected_save_survives_selection_changes_before_or_after_ack(cx: &mut TestAp
             artwork_selection(this, other.clone(), cx);
             project_recovery(this, Some("retry failed"), cx);
             this.finish_source_action(retry, ack(false), cx);
-            assert_eq!(this.metadata.track(), Some(&other));
+            assert_eq!(
+                this.metadata
+                    .display_track_at(cx.background_executor().now()),
+                Some(&other)
+            );
             assert!(this.source_status().is_none());
             artwork_selection(this, original.clone(), cx);
             assert!(this.source_status().unwrap().contains("retry failed"));
@@ -742,11 +840,19 @@ fn projected_save_survives_selection_changes_before_or_after_ack(cx: &mut TestAp
             this.finish_source_action(retry, source_ack(true, false), cx);
             assert!(this.metadata.source.recovery(1).is_none());
             if leave_before_ack {
-                assert_eq!(this.metadata.track(), Some(&other));
+                assert_eq!(
+                    this.metadata
+                        .display_track_at(cx.background_executor().now()),
+                    Some(&other)
+                );
                 assert!(this.source_status().is_none());
             } else {
                 assert_eq!(
-                    source::database_tags(this.metadata.track().unwrap()),
+                    source::database_tags(
+                        this.metadata
+                            .display_track_at(cx.background_executor().now())
+                            .unwrap()
+                    ),
                     file_tags()
                 );
                 assert_eq!(
@@ -765,7 +871,11 @@ fn source_writes_without_observation_preserve_database_view_and_staging(cx: &mut
 
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
-        let original = this.metadata.track().unwrap().clone();
+        let original = this
+            .metadata
+            .display_track_at(cx.background_executor().now())
+            .unwrap()
+            .clone();
         let mut staged = file_tags();
         staged.title = "staged title".into();
         for (action, file_saved, status) in [
@@ -788,7 +898,10 @@ fn source_writes_without_observation_preserve_database_view_and_staging(cx: &mut
                 delivery.observation = observation;
                 this.finish_source_action(token, delivery, cx);
 
-                let track = this.metadata.track().unwrap();
+                let track = this
+                    .metadata
+                    .display_track_at(cx.background_executor().now())
+                    .unwrap();
                 assert_eq!(track, &original);
                 assert_eq!(this.metadata.source.values(track), staged);
                 assert_eq!(this.metadata.source.status.as_ref(), Some(&status));
@@ -813,7 +926,10 @@ fn source_save_acknowledges_all_tags_without_touching_user_state(cx: &mut TestAp
         let (token, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
         let delivery = source_ack(true, true);
         this.finish_source_action(token, delivery, cx);
-        let saved = this.metadata.track().unwrap();
+        let saved = this
+            .metadata
+            .display_track_at(cx.background_executor().now())
+            .unwrap();
         assert_eq!(source::database_tags(saved), file_tags());
         assert!(saved.favorite);
         assert_eq!(saved.play_count, 37);
@@ -849,7 +965,13 @@ fn committed_save_with_projection_warning_waits_for_playback_tags(cx: &mut TestA
             this.metadata.source.status,
             Some(source::SourceStatus::Saved)
         );
-        assert_eq!(this.metadata.track().unwrap().title, "A");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "A"
+        );
         assert_eq!(this.error.as_deref(), Some(warning));
         assert!(this.metadata.source.recovery(1).is_none());
         assert!(!this.metadata.source.busy());
@@ -862,13 +984,22 @@ fn committed_save_with_projection_warning_waits_for_playback_tags(cx: &mut TestA
         );
 
         // An unrelated change to the same playback snapshot is not a tag refresh.
-        let mut stale = (*this.metadata.track().unwrap()).clone();
+        let mut stale = (*this
+            .metadata
+            .display_track_at(cx.background_executor().now())
+            .unwrap())
+        .clone();
         stale.favorite = true;
         playback(this, stale, cx);
         assert!(!this.metadata.editable());
         assert!(
             this.metadata_read
-                .prepare(&mut this.metadata, true, Instant::now())
+                .prepare(
+                    &mut this.metadata,
+                    true,
+                    Instant::now(),
+                    cx.background_executor().now()
+                )
                 .is_none()
         );
 
@@ -887,7 +1018,12 @@ fn committed_save_with_projection_warning_waits_for_playback_tags(cx: &mut TestA
         );
         assert!(
             this.metadata_read
-                .prepare(&mut this.metadata, true, Instant::now())
+                .prepare(
+                    &mut this.metadata,
+                    true,
+                    Instant::now(),
+                    cx.background_executor().now()
+                )
                 .is_none()
         );
     });
@@ -907,16 +1043,32 @@ fn explicit_reload_requests_core_even_without_a_playback_tag_block(cx: &mut Test
         })
     });
     metadata.update(cx, |this, cx| {
-        let playback_id = this.metadata.track().unwrap().id;
+        let playback_id = this
+            .metadata
+            .display_track_at(cx.background_executor().now())
+            .unwrap()
+            .id;
         artwork_selection(this, track(2, "selected"), cx);
         this.reload_playback(cx);
         assert_eq!(this.metadata.selected(), None);
-        assert_eq!(this.metadata.track().unwrap().id, playback_id);
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .id,
+            playback_id
+        );
     });
     cx.run_until_parked();
     assert_eq!(&*errors.borrow(), &["GUI query queue is busy or stopped"]);
-    metadata.read_with(cx, |this, _| {
-        assert_eq!(this.metadata.track().unwrap().title, "playback");
+    metadata.read_with(cx, |this, cx| {
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "playback"
+        );
         assert!(this.metadata.editable());
     });
 }
@@ -927,7 +1079,12 @@ async fn explicit_reload_observes_playback_tags_committed_by_another_client(
 ) {
     cx.executor().allow_parking();
     let (directory, _runtime, metadata) = stopped_playback_fixture(cx);
-    let track_id = metadata.read_with(cx, |this, _| this.metadata.track().unwrap().id);
+    let track_id = metadata.read_with(cx, |this, cx| {
+        this.metadata
+            .display_track_at(cx.background_executor().now())
+            .unwrap()
+            .id
+    });
     let ack = rivu_client::request_command(
         directory.path(),
         Command::EditTrack {
@@ -942,14 +1099,23 @@ async fn explicit_reload_observes_playback_tags_committed_by_another_client(
     .unwrap();
     assert!(ack.is_success(), "{ack:?}");
     metadata.update(cx, |this, cx| {
-        assert_eq!(this.metadata.track().unwrap().title, "playback");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "playback"
+        );
         this.reload_playback(cx);
     });
     cx.condition(&metadata, |this, _| this.playback_reload.is_none())
         .await;
-    metadata.read_with(cx, |this, _| {
+    metadata.read_with(cx, |this, cx| {
         assert_eq!(
-            this.metadata.track().unwrap().title,
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
             "edited by another client"
         );
         assert_eq!(this.error, None);
@@ -1010,7 +1176,13 @@ fn obsolete_playback_query_results_do_not_report_a_failure(cx: &mut TestAppConte
                 cx,
             );
             assert_eq!(this.error, None);
-            assert_eq!(this.metadata.track().unwrap().title, "A");
+            assert_eq!(
+                this.metadata
+                    .display_track_at(cx.background_executor().now())
+                    .unwrap()
+                    .title,
+                "A"
+            );
         }
     });
 }
@@ -1056,7 +1228,13 @@ fn playback_reload_reports_tag_disagreement_without_replacing_core_details(
             },
             cx,
         );
-        assert_eq!(this.metadata.track().unwrap().replaygain_track_gain, None);
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .replaygain_track_gain,
+            None
+        );
         assert!(this.metadata.editable());
         assert_eq!(
             this.error.as_deref(),
@@ -1082,8 +1260,21 @@ fn playback_reload_accepts_different_decoder_source_facts(cx: &mut TestAppContex
             },
             cx,
         );
-        assert!(this.metadata.track().unwrap().path.as_os_str().is_empty());
-        assert_eq!(this.metadata.track().unwrap().duration, None);
+        assert!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .path
+                .as_os_str()
+                .is_empty()
+        );
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .duration,
+            None
+        );
         assert_eq!(this.error, None);
     });
 }
@@ -1205,15 +1396,32 @@ fn selected_tag_write_warning_queues_an_authoritative_read(cx: &mut TestAppConte
             crate::frontend::CommandObservation::Unavailable("refresh unavailable".into());
         this.finish_source_action(sync, delivery, cx);
 
-        assert_eq!(this.metadata.track().unwrap().title, "selected");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "selected"
+        );
         assert!(!this.metadata.editable());
         let task = this
             .metadata_read
-            .prepare(&mut this.metadata, true, Instant::now())
+            .prepare(
+                &mut this.metadata,
+                true,
+                Instant::now(),
+                cx.background_executor().now(),
+            )
             .unwrap();
         assert_eq!(task.read.query(), Query::Track { track_id: 2 });
         this.clear_selection(cx);
-        assert_eq!(this.metadata.track().unwrap().title, "A");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "A"
+        );
         assert!(this.metadata.editable());
     });
 }
@@ -1242,9 +1450,19 @@ fn newer_database_read_and_inline_input_survive_old_bulk_completion(cx: &mut Tes
                 .input
                 .update(cx, |input, cx| input.set_text("newer album", cx));
             this.finish_source_action(token, source_ack(true, false), cx);
-            assert_eq!(this.metadata.track().unwrap().title, "newer database");
             assert_eq!(
-                this.metadata.source.values(this.metadata.track().unwrap()),
+                this.metadata
+                    .display_track_at(cx.background_executor().now())
+                    .unwrap()
+                    .title,
+                "newer database"
+            );
+            assert_eq!(
+                this.metadata.source.values(
+                    this.metadata
+                        .display_track_at(cx.background_executor().now())
+                        .unwrap()
+                ),
                 file_tags()
             );
             assert_eq!(
@@ -1466,7 +1684,13 @@ fn fresh_success_rebases_only_the_submitted_editor_and_keeps_later_text(cx: &mut
             let mut state = (*this.state).clone();
             state.library.bitrate_revision += 1;
             this.reconcile(Rc::new(state), cx);
-            assert_eq!(this.metadata.track().unwrap().title, "observed title");
+            assert_eq!(
+                this.metadata
+                    .display_track_at(cx.background_executor().now())
+                    .unwrap()
+                    .title,
+                "observed title"
+            );
             assert_eq!(this.edit.as_ref().unwrap().input.read(cx).text(), "later");
             this.finish_save(save, Some((serial, "submitted".into())), ack(true), cx);
             let edit = this.edit.as_ref().unwrap();
@@ -1474,7 +1698,12 @@ fn fresh_success_rebases_only_the_submitted_editor_and_keeps_later_text(cx: &mut
             assert_eq!(edit.baseline, "submitted");
             assert!(
                 this.metadata_read
-                    .prepare(&mut this.metadata, true, Instant::now())
+                    .prepare(
+                        &mut this.metadata,
+                        true,
+                        Instant::now(),
+                        cx.background_executor().now()
+                    )
                     .is_none()
             );
         })
@@ -1494,15 +1723,31 @@ fn save_ack_preserves_newer_details_and_refreshes_an_unchanged_projection(cx: &m
         let read = this.metadata.begin_load(7);
         assert!(this.metadata.accept_load(read, Some(track(7, "newer"))));
         this.finish_save(save, None, ack(true), cx);
-        assert_eq!(this.metadata.track().unwrap().title, "newer");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "newer"
+        );
         let task = this
             .metadata_read
-            .prepare(&mut this.metadata, true, Instant::now())
+            .prepare(
+                &mut this.metadata,
+                true,
+                Instant::now(),
+                cx.background_executor().now(),
+            )
             .unwrap();
         assert!(matches!(task.read.query(), Query::Track { track_id: 7 }));
         assert!(
             this.metadata_read
-                .prepare(&mut this.metadata, true, Instant::now())
+                .prepare(
+                    &mut this.metadata,
+                    true,
+                    Instant::now(),
+                    cx.background_executor().now()
+                )
                 .is_none()
         );
     });
@@ -1520,7 +1765,13 @@ fn selection_epoch_rejects_old_acknowledgement(cx: &mut TestAppContext) {
         this.request_track(8, cx);
         artwork_selection(this, track(7, "returned"), cx);
         this.finish_save(save, None, ack(false), cx);
-        assert_eq!(this.metadata.track().unwrap().title, "returned");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "returned"
+        );
         assert!(this.error.is_none());
     });
 }
@@ -1829,7 +2080,7 @@ fn stale_inline_submission_preserves_the_dirty_draft(cx: &mut TestAppContext) {
             this.begin_edit(Field::Title, window, cx);
             let input = this.edit.as_ref().unwrap().input.clone();
             input.update(cx, |input, cx| input.set_text("draft title", cx));
-            this.metadata.invalidate_at(Instant::now());
+            this.metadata.invalidate_at(cx.background_executor().now());
             this.submit_field(Field::Title, cx);
             assert_eq!(
                 this.edit.as_ref().unwrap().input.read(cx).text(),
@@ -1851,28 +2102,35 @@ fn stale_inline_submission_preserves_the_dirty_draft(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn metadata_retention_wake_expires_without_another_read_or_frame(cx: &mut TestAppContext) {
-    use std::time::Duration;
-
     let (_directory, _runtime, metadata) = fixture(cx);
     metadata.update(cx, |this, cx| {
         this.metadata.select(1);
-        let now = Instant::now() + Duration::from_secs(60);
+        let now = cx.background_executor().now();
         let query = Query::Track { track_id: 1 };
         this.metadata_read
-            .request(1, this.state.query_revisions_for(&query), now);
+            .request(1, this.state.query_revisions_for(&query), Instant::now());
         let _quiet_reader = this
             .metadata_read
-            .prepare(&mut this.metadata, true, now)
+            .prepare(&mut this.metadata, true, Instant::now(), now)
             .unwrap();
-        assert!(this.metadata.track().is_some());
+        assert!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .is_some()
+        );
         assert!(!this.metadata.editable());
         this.schedule_metadata_expiry(cx);
     });
     cx.run_until_parked();
-    cx.executor().advance_clock(Duration::from_secs(61));
+    cx.executor()
+        .advance_clock(rivu_presentation::refresh::REFRESH_RETENTION);
     cx.run_until_parked();
-    metadata.update(cx, |this, _| {
-        assert!(this.metadata.track().is_none());
+    metadata.update(cx, |this, cx| {
+        assert!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .is_none()
+        );
         assert!(
             this.track().is_some(),
             "details expiry must not retire the selected source"
@@ -1882,7 +2140,12 @@ fn metadata_retention_wake_expires_without_another_read_or_frame(cx: &mut TestAp
         assert!(this.metadata.deadline().is_none());
         assert!(
             this.metadata_read
-                .prepare(&mut this.metadata, true, Instant::now())
+                .prepare(
+                    &mut this.metadata,
+                    true,
+                    Instant::now(),
+                    cx.background_executor().now()
+                )
                 .is_none()
         );
     });
@@ -1898,15 +2161,18 @@ fn same_track_detail_expiry_preserves_the_source_until_identity_replacement(
     metadata.update(cx, |this, cx| {
         this.metadata.select(1);
         let original = this.track_snapshot().unwrap();
-        let start = Instant::now();
+        let start = cx.background_executor().now();
         let query = Query::Track {
             track_id: original.id,
         };
-        this.metadata_read
-            .request(original.id, this.state.query_revisions_for(&query), start);
+        this.metadata_read.request(
+            original.id,
+            this.state.query_revisions_for(&query),
+            Instant::now(),
+        );
         let _quiet_reader = this
             .metadata_read
-            .prepare(&mut this.metadata, true, start)
+            .prepare(&mut this.metadata, true, Instant::now(), start)
             .unwrap();
         assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
         assert!(
@@ -1918,7 +2184,11 @@ fn same_track_detail_expiry_preserves_the_source_until_identity_replacement(
             this.metadata
                 .expire(start + rivu_presentation::refresh::REFRESH_RETENTION)
         );
-        assert!(this.metadata.track().is_none());
+        assert!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .is_none()
+        );
         assert_eq!(this.track(), Some(original.as_ref()));
         assert!(Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));
         assert!(!this.metadata.editable());
@@ -1934,7 +2204,9 @@ fn same_track_detail_expiry_preserves_the_source_until_identity_replacement(
         );
         this.metadata.invalidate_at(start + Duration::from_secs(1));
         assert!(
-            this.metadata.track().is_none(),
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .is_none(),
             "a retry cannot restart expired detail retention"
         );
         assert!(this.metadata.deadline().is_none());
@@ -1943,7 +2215,13 @@ fn same_track_detail_expiry_preserves_the_source_until_identity_replacement(
             this.metadata
                 .accept_load(replacement, Some(track(original.id, "fresh details")))
         );
-        assert_eq!(this.metadata.track().unwrap().title, "fresh details");
+        assert_eq!(
+            this.metadata
+                .display_track_at(cx.background_executor().now())
+                .unwrap()
+                .title,
+            "fresh details"
+        );
         assert_eq!(this.track().unwrap().title, "fresh details");
         assert!(this.metadata.editable());
         assert!(!Arc::ptr_eq(&this.track_snapshot().unwrap(), &original));

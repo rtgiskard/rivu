@@ -208,7 +208,11 @@ impl Queue {
     pub(in crate::gui) fn sync_queue(&mut self, cx: &mut Context<Self>) -> bool {
         let revisions = self.state.query_revisions(None);
         let intent = self.model.manual;
-        if !self.model.sync(revisions, self.state.queue.total) {
+        if !self.model.sync(
+            revisions,
+            self.state.queue.total,
+            cx.background_executor().now(),
+        ) {
             return false;
         }
         self.schedule_refresh_wake(cx);
@@ -221,18 +225,21 @@ impl Queue {
 
     /// Explicit retry of failed identity relocation; unchanged pages and locate survive.
     pub(in crate::gui) fn refresh_queue(&mut self, cx: &mut Context<Self>) {
-        if self
-            .model
-            .retry_selection(self.state.query_revisions(None), self.state.queue.total)
-        {
+        if self.model.retry_selection(
+            self.state.query_revisions(None),
+            self.state.queue.total,
+            cx.background_executor().now(),
+        ) {
             self.dispatch_queue_selection(cx);
         }
     }
 
     pub(in crate::gui) fn retry_queue_page(&mut self, cx: &mut Context<Self>) {
-        let range = self
-            .model
-            .retry_page(self.state.query_revisions(None), self.state.queue.total);
+        let range = self.model.retry_page(
+            self.state.query_revisions(None),
+            self.state.queue.total,
+            cx.background_executor().now(),
+        );
         self.dispatch_queue_selection(cx);
         self.ensure_queue_range(range, cx);
     }
@@ -365,7 +372,7 @@ impl Queue {
             return;
         };
         self.loading
-            .begin((), generation, std::time::Instant::now());
+            .begin((), generation, cx.background_executor().now());
         self.loading.schedule(cx, |this| &mut this.loading);
         let request = query.clone();
         let handle = self.context.handle().clone();

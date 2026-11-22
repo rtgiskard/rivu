@@ -429,13 +429,19 @@ impl PlaylistModel {
         self.requests.slot(kind).request(kind)
     }
 
-    pub(in crate::gui) fn select_playlist(&mut self, id: i64, name: String, index: usize) -> bool {
+    pub(in crate::gui) fn select_playlist(
+        &mut self,
+        id: i64,
+        name: String,
+        index: usize,
+        now: Instant,
+    ) -> bool {
         if !self.playlists.select(id, name, index) {
             return false;
         }
         self.cancel_playlist_read(ViewRequestKind::Selection);
         self.cancel_playlist_read(ViewRequestKind::Entries);
-        self.playlists.prepare_entries(id);
+        self.playlists.prepare_entries(id, now);
         true
     }
 
@@ -454,26 +460,27 @@ impl PlaylistModel {
         offset: usize,
         page_size: usize,
         revisions: QueryRevisions,
+        now: Instant,
     ) -> ViewRequest {
         if self.playlists.entries().playlist_id != Some(id) {
             self.cancel_playlist_read(ViewRequestKind::Entries);
-            self.playlists.prepare_entries(id);
+            self.playlists.prepare_entries(id, now);
         }
         self.prepare_playlist_page(true, offset, page_size, true, revisions)
     }
 
-    pub(in crate::gui) fn refresh_playlists(&mut self, refresh: PlaylistRefresh) {
+    pub(in crate::gui) fn refresh_playlists(&mut self, now: Instant, refresh: PlaylistRefresh) {
         if refresh.summaries {
             self.cancel_playlist_read(ViewRequestKind::Summaries);
-            self.playlists.invalidate_summaries();
+            self.playlists.invalidate_summaries(now);
             self.requests.selection_failure = None;
         }
         if refresh.entries {
             self.cancel_playlist_read(ViewRequestKind::Entries);
             if refresh.entry_payload_only {
-                self.playlists.invalidate_entry_payload();
+                self.playlists.invalidate_entry_payload(now);
             } else if let Some(id) = self.playlists.entries().playlist_id {
-                self.playlists.prepare_entries(id);
+                self.playlists.prepare_entries(id, now);
             }
         }
     }
@@ -833,7 +840,7 @@ mod tests {
     #[test]
     fn playlist_refresh_deadlines_expire_independently_without_positional_authority() {
         let mut browser = PlaylistModel::default();
-        browser.select_playlist(1, "one".into(), 0);
+        browser.select_playlist(1, "one".into(), 0, Instant::now());
         browser.playlists.prepare_page(false, 0, 20);
         browser.playlists.accept_summaries(Page {
             total: 1,
@@ -875,7 +882,7 @@ mod tests {
                 .playlists
                 .summaries()
                 .rows
-                .display_at(0, before)
+                .display(0, before)
                 .is_some()
         );
         assert!(
@@ -883,7 +890,7 @@ mod tests {
                 .playlists
                 .entries()
                 .rows
-                .display_at(0, before)
+                .display(0, before)
                 .is_some()
         );
         assert!(browser.playlists.summaries().rows.get(0).is_none());
@@ -904,7 +911,7 @@ mod tests {
                 .playlists
                 .summaries()
                 .rows
-                .display_at(0, summaries_deadline)
+                .display(0, summaries_deadline)
                 .is_none()
         );
         assert!(
@@ -912,7 +919,7 @@ mod tests {
                 .playlists
                 .entries()
                 .rows
-                .display_at(0, summaries_deadline)
+                .display(0, summaries_deadline)
                 .is_some()
         );
         assert_eq!(browser.playlists.refresh_deadline(), Some(entries_deadline));
@@ -922,7 +929,7 @@ mod tests {
                 .playlists
                 .entries()
                 .rows
-                .display_at(0, entries_deadline)
+                .display(0, entries_deadline)
                 .is_none()
         );
         assert_eq!(browser.playlists.refresh_deadline(), None);
@@ -931,9 +938,10 @@ mod tests {
 
     #[test]
     fn equal_playlist_refresh_restores_current_rows() {
+        let now = Instant::now();
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(1, "playlist 1".into(), 0);
+        browser.select_playlist(1, "playlist 1".into(), 0, now);
         for kind in [ViewRequestKind::Summaries, ViewRequestKind::Entries] {
             let response = || QueryResponse {
                 revisions,
@@ -952,26 +960,29 @@ mod tests {
             let prepared = if kind == ViewRequestKind::Summaries {
                 browser.request_playlist_summaries(0, 20, revisions)
             } else {
-                browser.request_playlist_entries(1, 0, 20, revisions)
+                browser.request_playlist_entries(1, 0, 20, revisions, now)
             };
             let (read, _) = prepared.into_read().unwrap();
             browser.complete_playlist_read(&read, revisions, response());
-            browser.refresh_playlists(PlaylistRefresh {
-                summaries: kind == ViewRequestKind::Summaries,
-                entries: kind == ViewRequestKind::Entries,
-                entry_payload_only: true,
-            });
+            browser.refresh_playlists(
+                now,
+                PlaylistRefresh {
+                    summaries: kind == ViewRequestKind::Summaries,
+                    entries: kind == ViewRequestKind::Entries,
+                    entry_payload_only: true,
+                },
+            );
             if kind == ViewRequestKind::Summaries {
                 assert!(browser.playlists.summaries().rows.get(0).is_none());
-                assert!(browser.playlists.summaries().rows.display(0).is_some());
+                assert!(browser.playlists.summaries().rows.display(0, now).is_some());
             } else {
                 assert!(browser.playlists.entries().rows.get(0).is_none());
-                assert!(browser.playlists.entries().rows.display(0).is_some());
+                assert!(browser.playlists.entries().rows.display(0, now).is_some());
             }
             let prepared = if kind == ViewRequestKind::Summaries {
                 browser.request_playlist_summaries(0, 20, revisions)
             } else {
-                browser.request_playlist_entries(1, 0, 20, revisions)
+                browser.request_playlist_entries(1, 0, 20, revisions, now)
             };
             let (read, _) = prepared.into_read().unwrap();
             browser.complete_playlist_read(&read, revisions, response());
@@ -986,17 +997,18 @@ mod tests {
 
     #[test]
     fn playlist_identity_changes_clear_retained_display_and_deadlines() {
+        let now = Instant::now();
         let mut browser = PlaylistModel::default();
-        browser.select_playlist(1, "one".into(), 0);
+        browser.select_playlist(1, "one".into(), 0, now);
         browser.playlists.prepare_page(true, 0, 20);
         browser.playlists.accept_entries(Page {
             total: 1,
             rows: vec![entry(10, 1, 0)],
         });
-        browser.playlists.prepare_entries(1);
-        assert!(browser.playlists.entries().rows.display(0).is_some());
+        browser.playlists.prepare_entries(1, now);
+        assert!(browser.playlists.entries().rows.display(0, now).is_some());
         browser.search_playlist_entries(Some("new filter".into()));
-        assert!(browser.playlists.entries().rows.display(0).is_none());
+        assert!(browser.playlists.entries().rows.display(0, now).is_none());
         assert_eq!(browser.playlists.refresh_deadline(), None);
 
         browser.playlists.prepare_page(false, 0, 20);
@@ -1004,10 +1016,10 @@ mod tests {
             total: 1,
             rows: vec![summary(1, 1)],
         });
-        browser.playlists.invalidate_summaries();
-        assert!(browser.playlists.summaries().rows.display(0).is_some());
+        browser.playlists.invalidate_summaries(now);
+        assert!(browser.playlists.summaries().rows.display(0, now).is_some());
         browser.search_playlists(Some("another catalog".into()));
-        assert!(browser.playlists.summaries().rows.display(0).is_none());
+        assert!(browser.playlists.summaries().rows.display(0, now).is_none());
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.refresh_deadline(), None);
     }
@@ -1022,7 +1034,7 @@ mod tests {
         };
         let revisions = previous.query_revisions(0, Some(1));
         let current = latest.query_revisions(0, Some(1));
-        browser.select_playlist(1, "one".into(), 0);
+        browser.select_playlist(1, "one".into(), 0, Instant::now());
         browser.playlists.prepare_page(false, 0, 20);
         browser.playlists.accept_summaries(Page {
             total: 1,
@@ -1045,7 +1057,7 @@ mod tests {
         assert!(changes.entries);
         assert!(changes.entry_payload_only);
         assert!(!browser.sync_entry_projection(current));
-        browser.refresh_playlists(changes);
+        browser.refresh_playlists(Instant::now(), changes);
         assert_eq!(browser.playlists.selected_entry(), Some(10));
         assert_eq!(browser.playlists.selection_generation(), generation);
         assert!(browser.playlists.entry_ready());
@@ -1089,13 +1101,13 @@ mod tests {
     #[test]
     fn playlist_payload_rejects_stale_bitrate_and_accepts_current_reply() {
         let mut browser = PlaylistModel::default();
-        browser.select_playlist(1, "one".into(), 0);
+        browser.select_playlist(1, "one".into(), 0, Instant::now());
         let revisions = QueryRevisions {
             bitrate: 1,
             ..QueryRevisions::default()
         };
         let (read, _) = browser
-            .request_playlist_entries(1, 0, 20, revisions)
+            .request_playlist_entries(1, 0, 20, revisions, Instant::now())
             .into_read()
             .unwrap();
         browser.complete_playlist_read(
@@ -1123,7 +1135,7 @@ mod tests {
                 .is_none()
         );
         let (read, _) = browser
-            .request_playlist_entries(1, 0, 20, revisions)
+            .request_playlist_entries(1, 0, 20, revisions, Instant::now())
             .into_read()
             .unwrap();
         let mut row = entry(10, 1, 0);
@@ -1163,7 +1175,7 @@ mod tests {
     fn failed_summary_parks_until_explicit_retry_and_recovers_in_place() {
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(41, "one".into(), 0);
+        browser.select_playlist(41, "one".into(), 0, Instant::now());
         let (read, _) = browser
             .prepare_playlist_lookup(revisions)
             .into_read()
@@ -1219,7 +1231,7 @@ mod tests {
     fn timed_out_summary_retry_waits_for_original_worker_and_ignores_late_results() {
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(41, "one".into(), 0);
+        browser.select_playlist(41, "one".into(), 0, Instant::now());
         let (old, _) = browser
             .prepare_playlist_lookup(revisions)
             .into_read()
@@ -1262,7 +1274,7 @@ mod tests {
     fn summary_revision_rejects_old_retry_and_old_timeout_cannot_replace_new_failure() {
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(41, "one".into(), 0);
+        browser.select_playlist(41, "one".into(), 0, Instant::now());
         let (old, _) = browser
             .prepare_playlist_lookup(revisions)
             .into_read()
@@ -1273,11 +1285,14 @@ mod tests {
             playlist: 1,
             ..revisions
         };
-        browser.refresh_playlists(PlaylistRefresh {
-            summaries: true,
-            entries: false,
-            entry_payload_only: false,
-        });
+        browser.refresh_playlists(
+            Instant::now(),
+            PlaylistRefresh {
+                summaries: true,
+                entries: false,
+                entry_payload_only: false,
+            },
+        );
         assert_eq!(browser.playlist_lookup_failure(), None);
         let obsolete_retry = browser.retry_playlist_lookup(old_key, current);
         assert!(obsolete_retry.into_read().is_none());
@@ -1317,7 +1332,7 @@ mod tests {
     fn current_catalog_page_restores_summary_without_cancelling_retry() {
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(41, "one".into(), 0);
+        browser.select_playlist(41, "one".into(), 0, Instant::now());
         let (read, _) = browser
             .prepare_playlist_lookup(revisions)
             .into_read()
@@ -1369,14 +1384,17 @@ mod tests {
     fn catalog_revision_makes_count_unknown_until_selected_summary_is_current() {
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(41, "one".into(), 0);
+        browser.select_playlist(41, "one".into(), 0, Instant::now());
         browser.accept_playlist_lookup(41, Some(summary(41, 0)));
         assert_eq!(browser.playlists.selected_total(), Some(0));
-        browser.refresh_playlists(PlaylistRefresh {
-            summaries: true,
-            entries: false,
-            entry_payload_only: false,
-        });
+        browser.refresh_playlists(
+            Instant::now(),
+            PlaylistRefresh {
+                summaries: true,
+                entries: false,
+                entry_payload_only: false,
+            },
+        );
         assert_eq!(browser.playlists.selected_total(), None);
         browser.playlists.prepare_page(false, 0, 20);
         browser.accept_playlist_summaries(
@@ -1424,7 +1442,7 @@ mod tests {
         for action in 0..3 {
             let mut browser = PlaylistModel::default();
             let revisions = QueryRevisions::default();
-            browser.select_playlist(41, "one".into(), 0);
+            browser.select_playlist(41, "one".into(), 0, Instant::now());
             let (read, _) = browser
                 .prepare_playlist_lookup(revisions)
                 .into_read()
@@ -1434,7 +1452,7 @@ mod tests {
             match action {
                 0 => browser.cancel_playlist_read(ViewRequestKind::Selection),
                 1 => {
-                    browser.select_playlist(42, "two".into(), 1);
+                    browser.select_playlist(42, "two".into(), 1, Instant::now());
                 }
                 _ => browser.remove_playlist_selection(),
             }
@@ -1465,10 +1483,12 @@ mod tests {
         ] {
             let mut browser = PlaylistModel::default();
             let revisions = QueryRevisions::default();
-            browser.select_playlist(1, "one".into(), 0);
+            browser.select_playlist(1, "one".into(), 0, Instant::now());
             let prepared = match kind {
                 ViewRequestKind::Summaries => browser.request_playlist_summaries(0, 20, revisions),
-                ViewRequestKind::Entries => browser.request_playlist_entries(1, 0, 20, revisions),
+                ViewRequestKind::Entries => {
+                    browser.request_playlist_entries(1, 0, 20, revisions, Instant::now())
+                }
                 ViewRequestKind::Selection => browser.prepare_playlist_lookup(revisions),
             };
             let (read, _) = prepared.into_read().unwrap();
@@ -1528,9 +1548,9 @@ mod tests {
     fn obsolete_view_timeout_and_final_return_preserve_latest_queued_demand() {
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(1, "one".into(), 0);
+        browser.select_playlist(1, "one".into(), 0, Instant::now());
         let (read, _) = browser
-            .request_playlist_entries(1, 0, 20, revisions)
+            .request_playlist_entries(1, 0, 20, revisions, Instant::now())
             .into_read()
             .unwrap();
         let timeout = || QueryResponse {
@@ -1544,7 +1564,7 @@ mod tests {
             Some("timeout".into())
         );
         browser.search_playlist_entries(Some("latest".into()));
-        let queued = browser.request_playlist_entries(1, 0, 20, revisions);
+        let queued = browser.request_playlist_entries(1, 0, 20, revisions, Instant::now());
         let generation = queued.pending_generation().unwrap();
         assert!(queued.into_read().is_none());
         assert_eq!(
@@ -1571,9 +1591,9 @@ mod tests {
     fn search_replacement_keeps_worker_and_rejects_old_completion() {
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(1, "one".into(), 0);
+        browser.select_playlist(1, "one".into(), 0, Instant::now());
         let (old, _) = browser
-            .request_playlist_entries(1, 0, 20, revisions)
+            .request_playlist_entries(1, 0, 20, revisions, Instant::now())
             .into_read()
             .unwrap();
         browser.search_playlist_entries(Some("new".into()));
@@ -1583,7 +1603,7 @@ mod tests {
                 .slot(ViewRequestKind::Entries)
                 .worker_active
         );
-        let queued = browser.request_playlist_entries(1, 0, 20, revisions);
+        let queued = browser.request_playlist_entries(1, 0, 20, revisions, Instant::now());
         assert_eq!(queued.kind(), ViewRequestKind::Entries);
         let queued_generation = queued
             .pending_generation()
@@ -1637,13 +1657,13 @@ mod tests {
             }),
             ..Default::default()
         };
-        browser.select_playlist(1, "one".into(), 0);
+        browser.select_playlist(1, "one".into(), 0, Instant::now());
         let (lookup, _) = browser
             .prepare_playlist_lookup(revisions)
             .into_read()
             .unwrap();
         let (page, _) = browser
-            .request_playlist_entries(1, 0, 20, revisions)
+            .request_playlist_entries(1, 0, 20, revisions, Instant::now())
             .into_read()
             .unwrap();
         browser.configure_page_size(40);
@@ -1932,7 +1952,7 @@ mod tests {
         // The selection baseline follows the same refreshed intent, so render
         // cannot replace a just-dispatched lookup with another logical request.
         let mut browser = PlaylistModel::default();
-        browser.select_playlist(1, "one".into(), 0);
+        browser.select_playlist(1, "one".into(), 0, Instant::now());
         let (old, _) = browser
             .prepare_playlist_lookup(revisions)
             .into_read()
@@ -1969,7 +1989,7 @@ mod tests {
                     limit: 20,
                 }
             } else {
-                model.select_playlist(1, "one".into(), 0);
+                model.select_playlist(1, "one".into(), 0, Instant::now());
                 model.search_playlist_entries(query.clone());
                 Query::PlaylistEntries {
                     playlist_id: 1,
@@ -2043,9 +2063,9 @@ mod tests {
                 rows: Vec::new(),
             })),
         };
-        browser.select_playlist(41, "empty".into(), 0);
+        browser.select_playlist(41, "empty".into(), 0, Instant::now());
         let (read, _) = browser
-            .request_playlist_entries(41, 0, 20, revisions)
+            .request_playlist_entries(41, 0, 20, revisions, Instant::now())
             .into_read()
             .unwrap();
         assert_eq!(browser.playlists.entries().rows.len(), 1);
@@ -2062,11 +2082,14 @@ mod tests {
         assert_eq!(loaded.pending_generation(), None);
         assert!(loaded.into_read().is_none());
 
-        browser.refresh_playlists(PlaylistRefresh {
-            summaries: false,
-            entries: true,
-            entry_payload_only: false,
-        });
+        browser.refresh_playlists(
+            Instant::now(),
+            PlaylistRefresh {
+                summaries: false,
+                entries: true,
+                entry_payload_only: false,
+            },
+        );
         let (read, _) = browser
             .demand_playlist_entries(0..1, 20, revisions)
             .into_read()
@@ -2112,13 +2135,13 @@ mod tests {
     fn empty_catalog_releases_selected_playlist_and_pending_entry_requests() {
         let mut browser = PlaylistModel::default();
         let revisions = QueryRevisions::default();
-        browser.select_playlist(41, "deleted".into(), 0);
+        browser.select_playlist(41, "deleted".into(), 0, Instant::now());
         let (lookup, _) = browser
             .prepare_playlist_lookup(revisions)
             .into_read()
             .unwrap();
         let (entries, _) = browser
-            .request_playlist_entries(41, 0, 20, revisions)
+            .request_playlist_entries(41, 0, 20, revisions, Instant::now())
             .into_read()
             .unwrap();
         let (catalog, _) = browser
@@ -2185,13 +2208,13 @@ mod tests {
         let catalog = browser.demand_playlist_summaries(0..1, 20, revisions);
         let catalog_generation = catalog.pending_generation().unwrap();
         let (catalog, catalog_ticket) = catalog.into_read().unwrap();
-        browser.select_playlist(41, "selected".into(), 0);
+        browser.select_playlist(41, "selected".into(), 0, Instant::now());
         let (lookup, lookup_ticket) = browser
             .prepare_playlist_lookup(revisions)
             .into_read()
             .unwrap();
         let (entries, entries_ticket) = browser
-            .request_playlist_entries(41, 0, 20, revisions)
+            .request_playlist_entries(41, 0, 20, revisions, Instant::now())
             .into_read()
             .unwrap();
         browser.remove_playlist_selection();
@@ -2237,7 +2260,7 @@ mod tests {
             for error in [QueryError::RevisionChanged, QueryError::Cancelled] {
                 let mut browser = PlaylistModel::default();
                 let revisions = QueryRevisions::default();
-                browser.select_playlist(1, "one".into(), 0);
+                browser.select_playlist(1, "one".into(), 0, Instant::now());
                 let (read, ticket) = automatic_request(&mut browser, kind, revisions)
                     .into_read()
                     .unwrap();
@@ -2299,7 +2322,7 @@ mod tests {
                 playlist: 7,
                 ..Default::default()
             };
-            browser.select_playlist(1, "one".into(), 0);
+            browser.select_playlist(1, "one".into(), 0, Instant::now());
             let (read, _) = automatic_request(&mut browser, kind, revisions)
                 .into_read()
                 .unwrap();

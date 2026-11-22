@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 impl Metadata {
     pub(super) fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
         self.artwork_loader.retain_negative(
             self.metadata
-                .track()
+                .display_track_at(now)
                 .filter(|_| self.visible)
                 .map(crate::artwork_source),
         );
@@ -19,12 +20,12 @@ impl Metadata {
             // Shared acquisition may finish, but hidden consumers own no demand.
             return;
         }
-        let cached = self.metadata.track().and_then(|track| {
+        let cached = self.metadata.display_track_at(now).and_then(|track| {
             self.artwork_manager
                 .cached_result(crate::artwork_source(track))
         });
         if let Some(result) = &cached
-            && let Some(track) = self.metadata.track()
+            && let Some(track) = self.metadata.display_track_at(now)
         {
             self.artwork_loader.remember_result(
                 ArtworkIdentity::new(crate::artwork_source(track)),
@@ -33,7 +34,7 @@ impl Metadata {
         }
         let cold = cached.is_none();
         self.artwork_view.replace(cached.flatten(), cx);
-        if let Some(track) = self.metadata.track().filter(|_| cold)
+        if let Some(track) = self.metadata.display_track_at(now).filter(|_| cold)
             && let Some(source) = self.artwork_loader.prepare(crate::artwork_source(track))
         {
             self.start_artwork(source, cx);
@@ -56,7 +57,7 @@ impl Metadata {
                 if this.visible
                     && this
                         .metadata
-                        .track()
+                        .display_track_at(cx.background_executor().now())
                         .is_some_and(|track| identity.matches(crate::artwork_source(track)))
                 {
                     this.artwork_loader

@@ -1,40 +1,32 @@
 use std::time::Instant;
 
-use gpui::{Context, Task};
+use gpui::Context;
+
+use crate::deadline::DeadlineWake;
 
 /// One cancellable wake per feature, independent of query completion or frames.
 #[derive(Default)]
 pub struct RefreshWake {
-    timer: Option<Task<()>>,
-    wake_at: Option<Instant>,
+    wake: DeadlineWake,
 }
 
 impl RefreshWake {
-    pub fn schedule<T: 'static>(
-        &mut self,
-        deadline: Option<Instant>,
+    /// Sync after a model change. The expiry callback must consume all deadlines
+    /// through `now`; the next deadline is read again after cleanup.
+    pub fn sync<T: 'static>(
+        owner: &mut T,
         cx: &mut Context<T>,
-        expire: impl Fn(&mut T, Instant, &mut Context<T>) -> bool + 'static,
+        locate: fn(&mut T) -> &mut Self,
+        next: fn(&T) -> Option<Instant>,
+        expire: fn(&mut T, Instant, &mut Context<T>) -> bool,
     ) {
-        if self.wake_at == deadline {
-            return;
-        }
-        self.timer = None;
-        self.wake_at = deadline;
-        let Some(deadline) = deadline else {
-            return;
-        };
-        let timer = cx
-            .background_executor()
-            .timer(deadline.saturating_duration_since(Instant::now()));
-        self.timer = Some(cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |this, cx| {
-                if expire(this, deadline.max(Instant::now()), cx) {
-                    cx.notify();
-                }
-            });
-        }));
+        let deadline = next(owner);
+        locate(owner).wake.arm(deadline, cx, move |owner, now, cx| {
+            if expire(owner, now, cx) {
+                cx.notify();
+            }
+            Self::sync(owner, cx, locate, next, expire);
+        });
     }
 }
 
@@ -55,23 +47,28 @@ mod tests {
             wake: RefreshWake,
         }
 
+        impl View {
+            fn sync(&mut self, cx: &mut Context<Self>) {
+                RefreshWake::sync(
+                    self,
+                    cx,
+                    |view| &mut view.wake,
+                    |view| view.retention.deadline(),
+                    |view, now, _| view.retention.expire(now) && view.text.take().is_some(),
+                );
+            }
+        }
+
         let view = cx.update(|cx| cx.new(|_| View::default()));
-        let start = Instant::now() + Duration::from_secs(60);
+        let start = cx.executor().now();
         view.update(cx, |view, cx| {
             view.text = Some("old result");
             view.retention.begin(start);
-            view.wake
-                .schedule(view.retention.deadline(), cx, |view, now, _| {
-                    if view.retention.expire(now) {
-                        return view.text.take().is_some();
-                    }
-                    false
-                });
+            view.sync(cx);
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |view, _| view.text), Some("old result"));
-        cx.executor()
-            .advance_clock(Duration::from_secs(60) + REFRESH_RETENTION);
+        cx.executor().advance_clock(REFRESH_RETENTION);
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |view, _| view.text), None);
 
@@ -79,24 +76,73 @@ mod tests {
             view.text = Some("another old result");
             view.retention.clear();
             view.retention
-                .begin(Instant::now() + Duration::from_secs(60));
-            view.wake
-                .schedule(view.retention.deadline(), cx, |view, _, _| {
-                    view.text = None;
-                    true
-                });
+                .begin(cx.background_executor().now() + Duration::from_secs(60));
+            view.sync(cx);
         });
         cx.run_until_parked();
         view.update(cx, |view, cx| {
             view.text = Some("fresh result");
             view.retention.clear();
-            view.wake.schedule(None, cx, |_, _, _| false);
+            view.sync(cx);
         });
         cx.executor().advance_clock(Duration::from_secs(61));
         cx.run_until_parked();
         assert_eq!(
             view.read_with(cx, |view, _| view.text),
             Some("fresh result")
+        );
+    }
+
+    #[gpui::test]
+    fn refresh_rearms_for_next_payload_without_publication(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        #[derive(Default)]
+        struct View {
+            deadlines: [Option<Instant>; 2],
+            last_wake: Option<Instant>,
+            wake: RefreshWake,
+        }
+
+        let view = cx.update(|cx| cx.new(|_| View::default()));
+        let start = cx.executor().now();
+        cx.executor().advance_clock(Duration::from_secs(61));
+        view.update(cx, |view, cx| {
+            view.deadlines = [
+                Some(start + Duration::from_secs(60)),
+                Some(start + Duration::from_secs(120)),
+            ];
+            RefreshWake::sync(
+                view,
+                cx,
+                |view| &mut view.wake,
+                |view| view.deadlines.into_iter().flatten().min(),
+                |view, now, _| {
+                    view.last_wake = Some(now);
+                    for deadline in &mut view.deadlines {
+                        if deadline.is_some_and(|at| at <= now) {
+                            *deadline = None;
+                        }
+                    }
+                    true
+                },
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.last_wake),
+            Some(start + Duration::from_secs(61)),
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.deadlines.map(|at| at.is_some())),
+            [false, true],
+        );
+        cx.executor().advance_clock(Duration::from_secs(59));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |view, _| view.deadlines), [None; 2]);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.last_wake),
+            Some(start + Duration::from_secs(120)),
         );
     }
 }

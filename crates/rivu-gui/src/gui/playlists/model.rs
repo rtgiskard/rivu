@@ -147,11 +147,11 @@ impl PlaylistBrowser {
         summaries || entries
     }
 
-    pub(super) fn invalidate_entry_payload(&mut self) {
-        self.entries.rows.invalidate_payload();
+    pub(super) fn invalidate_entry_payload(&mut self, now: Instant) {
+        self.entries.rows.invalidate_payload(now);
     }
-    pub(super) fn invalidate_summaries(&mut self) {
-        self.summaries.rows.invalidate();
+    pub(super) fn invalidate_summaries(&mut self, now: Instant) {
+        self.summaries.rows.refresh_at(now);
         self.selected_total = None;
     }
 
@@ -322,7 +322,7 @@ impl PlaylistBrowser {
         );
     }
 
-    pub(super) fn prepare_entries(&mut self, id: i64) {
+    pub(super) fn prepare_entries(&mut self, id: i64, now: Instant) {
         let changed = self.entries.playlist_id != Some(id);
         if changed {
             self.entries.query = None;
@@ -330,7 +330,7 @@ impl PlaylistBrowser {
             self.entries.rows.clear();
             self.entries.scroll.scroll_to_item(0, ScrollStrategy::Top);
         } else {
-            self.entries.rows.invalidate();
+            self.entries.rows.refresh_at(now);
         }
         self.entries.playlist_id = Some(id);
     }
@@ -396,7 +396,7 @@ mod tests {
     fn operation_snapshot_uses_one_ordered_occurrence_group_and_projection() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.prepare_page(true, 0, 20);
         playlists.accept_entries(Page {
             total: 3,
@@ -450,7 +450,7 @@ mod tests {
             assert_eq!(playlists.demand_page(false, 0..1, 20), None);
 
             for id in [1, 2] {
-                playlists.invalidate_summaries();
+                playlists.invalidate_summaries(Instant::now());
                 let range = 0..playlists.summaries().rows.len();
                 assert_eq!(playlists.demand_page(false, range, 20), Some(0));
                 playlists.prepare_page(false, 0, 20);
@@ -460,7 +460,7 @@ mod tests {
                 });
                 assert_eq!(playlists.summaries().rows.get(0).unwrap().id, id);
 
-                playlists.invalidate_summaries();
+                playlists.invalidate_summaries(Instant::now());
                 assert_eq!(playlists.demand_page(false, 0..1, 20), Some(0));
                 playlists.prepare_page(false, 0, 20);
                 playlists.accept_summaries(Page {
@@ -477,7 +477,7 @@ mod tests {
     fn playlist_batch_resize_preserves_counts_selection_and_viewport() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.prepare_page(false, 0, 20);
         playlists.accept_summaries(Page {
             total: 1,
@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(playlists.selected_entry(), Some(83));
         assert!(playlists.entry_ready());
         assert_eq!(playlists.demand_page(true, 80..90, 25), Some(75));
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         assert_eq!(playlists.entries().rows.total(), None);
         assert_eq!(playlists.entries().rows.len(), 100);
     }
@@ -508,7 +508,7 @@ mod tests {
     fn playlist_lookup_distinguishes_unloaded_empty_and_deleted_playlists() {
         let mut browser = PlaylistModel::default();
         browser.playlists.select(41, "selected".into(), 40);
-        browser.playlists.prepare_entries(41);
+        browser.playlists.prepare_entries(41, Instant::now());
         browser.playlists.prepare_page(false, 0, 20);
         browser.playlists.accept_summaries(Page {
             total: 100,
@@ -531,7 +531,7 @@ mod tests {
         let mut browser = PlaylistModel::default();
         browser.playlists.select(1, "one".into(), 0);
         browser.playlists.select(2, "two".into(), 1);
-        browser.playlists.prepare_entries(2);
+        browser.playlists.prepare_entries(2, Instant::now());
         browser.playlists.select_entry(20, 0);
         browser.accept_playlist_lookup(1, None);
         assert_eq!(browser.playlists.selected(), Some(2));
@@ -546,11 +546,11 @@ mod tests {
     fn playlist_switch_and_removal_clear_entry_identity_and_payload() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.select_entry(10, 0);
         assert!(playlists.select(2, "two".into(), 1));
         assert_eq!(playlists.selected_entry(), None);
-        playlists.prepare_entries(2);
+        playlists.prepare_entries(2, Instant::now());
         playlists.select_entry(20, 0);
         playlists.clear_selection();
         assert_eq!(playlists.selected(), None);
@@ -564,7 +564,7 @@ mod tests {
         use rivu_protocol::model::LibrarySnapshot;
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.prepare_page(false, 0, 20);
         playlists.accept_summaries(Page {
             total: 1,
@@ -597,7 +597,7 @@ mod tests {
             }
         );
         if refresh.entries {
-            playlists.prepare_entries(1);
+            playlists.prepare_entries(1, Instant::now());
             playlists.track_selection.invalidate();
         }
         assert_eq!(playlists.summaries.rows.get(0).unwrap().name, "one");
@@ -655,7 +655,7 @@ mod tests {
     fn refreshed_offviewport_entry_resolves_identity_without_cached_pages() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.select_entry(41, 3);
         playlists.prepare_page(true, 8_000, 20);
         playlists.accept_entries(Page {
@@ -665,7 +665,7 @@ mod tests {
                 .collect(),
         });
         playlists.demand_page(true, 8_000..8_010, 20);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.track_selection.invalidate();
         assert_eq!(playlists.selected_entry(), Some(41));
         assert!(!playlists.entry_ready());
@@ -689,7 +689,7 @@ mod tests {
             playlists.track_selection.active.map(|entry| entry.position),
             Some(7_000)
         );
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.track_selection.invalidate();
         assert!(!playlists.entry_ready());
         playlists.accept_entry_locations(vec![PlaylistEntryLocation {
@@ -710,9 +710,9 @@ mod tests {
     fn row_refresh_preserves_selection_until_location_lookup_confirms_removal() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.select_entry(41, 3);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         assert_eq!(playlists.selected_entry(), Some(41));
         assert!(playlists.entry_ready());
 
@@ -729,7 +729,7 @@ mod tests {
     fn changed_membership_rejects_stale_entry_identity() {
         let mut playlists = PlaylistBrowser::default();
         playlists.select(1, "one".into(), 0);
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.select_entry(41, 0);
         playlists.accept_entry_locations(vec![PlaylistEntryLocation {
             id: 41,
@@ -740,7 +740,7 @@ mod tests {
             total: 1,
         }]);
         assert!(playlists.entry_ready());
-        playlists.prepare_entries(1);
+        playlists.prepare_entries(1, Instant::now());
         playlists.track_selection.invalidate();
         assert!(!playlists.entry_ready());
         playlists.accept_entry_locations(vec![PlaylistEntryLocation {

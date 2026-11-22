@@ -4,7 +4,7 @@ use crate::gui::{chooser_path, chooser_result};
 use ashpd::desktop::file_chooser::SelectedFiles;
 use gpui::Stateful;
 use requests::ViewRequest;
-use std::time::Instant;
+
 impl Playlists {
     pub(in crate::gui) fn apply_playlist_search(
         &mut self,
@@ -53,7 +53,8 @@ impl Playlists {
         token: u64,
         cx: &mut Context<Self>,
     ) {
-        self.loading_text.begin(owner, token, Instant::now());
+        self.loading_text
+            .begin(owner, token, cx.background_executor().now());
         self.loading_text
             .schedule(cx, |this| &mut this.loading_text);
     }
@@ -211,6 +212,7 @@ impl Playlists {
             offset,
             self.view_page_size(),
             self.state.query_revisions(Some(playlist_id)),
+            cx.background_executor().now(),
         );
         self.request_view(prepared, cx);
     }
