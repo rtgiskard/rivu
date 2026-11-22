@@ -1070,7 +1070,11 @@ impl Core {
         &mut self,
         command: AudioCommand,
     ) -> Result<()> {
-        if let Err(error) = self.engine.send(command) {
+        if let Err(error) = self.engine.send_with_rejection(command, |command| {
+            if let AudioCommand::GraphAudition { runner, .. } = command {
+                self.processing.retire_runner(*runner);
+            }
+        }) {
             return self.finish_playback(Ok(None), Err(error));
         }
         if let Some(state) = self.state.playback.audio_output.take() {

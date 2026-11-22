@@ -128,6 +128,13 @@ impl Reclaimer {
     pub(super) fn retire_audition(&self, audition: RetainedAudition) {
         self.send(Work::RetireAudition(audition));
     }
+    pub(super) fn retire_runner(&self, runner: audio::GraphRunner) {
+        self.send(Work::ReleaseAudio {
+            outputs: Default::default(),
+            graph_outputs: Default::default(),
+            runner: Some(runner),
+        });
+    }
     pub(super) fn release_audio(
         &self,
         outputs: AudioOutputs,

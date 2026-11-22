@@ -581,6 +581,14 @@ impl AudioEngine {
     /// Admit an ordinary command without waiting on a worker blocked by events.
     /// Success means queued, not applied; a full queue explicitly rejects it.
     pub fn send(&self, command: AudioCommand) -> Result<()> {
+        self.send_with_rejection(command, drop)
+    }
+
+    pub fn send_with_rejection(
+        &self,
+        command: AudioCommand,
+        reject: impl FnOnce(AudioCommand),
+    ) -> Result<()> {
         if matches!(command, AudioCommand::Shutdown) {
             self.shutdown.lock().take();
             return Ok(());
@@ -591,16 +599,21 @@ impl AudioEngine {
             | AudioCommand::Audition { generation, .. }
             | AudioCommand::GraphAudition { generation, .. } => Some((*generation, 0)),
             AudioCommand::Seek { revision, .. } => {
-                anyhow::ensure!(
-                    admission.seek_revision.is_some(),
-                    "Cannot seek: playback has ended"
-                );
+                if admission.seek_revision.is_none() {
+                    drop(admission);
+                    reject(command);
+                    anyhow::bail!("Cannot seek: playback has ended");
+                }
                 Some((admission.generation, *revision))
             }
             _ => None,
         };
         let changes_pcm = admission.changes_pcm(&command);
-        self.ensure_command_capacity(1)?;
+        if let Err(error) = self.ensure_command_capacity(1) {
+            drop(admission);
+            reject(command);
+            return Err(error);
+        }
         let enabled = match &command {
             AudioCommand::VisualizationEnabled(enabled) => *enabled,
             _ => admission.visualization_enabled,
@@ -639,14 +652,15 @@ impl AudioEngine {
                 if changes_pcm {
                     self.pcm.cancel_intent();
                 }
-                return Err(match error {
-                    async_channel::TrySendError::Full(_) => {
-                        anyhow::anyhow!("Audio command queue is full; command not queued")
+                drop(admission);
+                let (queued, message) = match error {
+                    async_channel::TrySendError::Full(queued) => {
+                        (queued, "Audio command queue is full; command not queued")
                     }
-                    async_channel::TrySendError::Closed(_) => {
-                        anyhow::anyhow!("Audio worker stopped")
-                    }
-                });
+                    async_channel::TrySendError::Closed(queued) => (queued, "Audio worker stopped"),
+                };
+                reject(queued.command);
+                anyhow::bail!(message);
             }
         }
         // This is only a coalesced queue-ready notification. The bounded

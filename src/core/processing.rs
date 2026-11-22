@@ -71,7 +71,15 @@ impl Core {
                 }
             };
             // Capacity and persistence failures do not revoke selection.
-            self.replace_processing_source(selection.id, pcm, runner, Some(config))?;
+            let mut runner = runner.map(Box::new);
+            if let Err(error) =
+                self.replace_processing_source(selection.id, pcm, &mut runner, Some(config))
+            {
+                if let Some(runner) = runner {
+                    self.processing.retire_runner(*runner);
+                }
+                return Err(error);
+            }
             self.processing
                 .retain_audition_for_generation(self.transport.generation);
             if !bypassed {
@@ -895,7 +903,7 @@ impl Core {
         pcm: audio::PcmAudio,
         output: Option<GraphPort>,
     ) -> std::result::Result<(), (audio::PcmAudio, anyhow::Error)> {
-        if let Err(error) = self.replace_processing_source(id, Some(pcm.clone()), None, None) {
+        if let Err(error) = self.replace_processing_source(id, Some(pcm.clone()), &mut None, None) {
             return Err((pcm, error));
         }
         self.processing
@@ -919,7 +927,13 @@ impl Core {
             .graph_mode
             .context("Missing resolved graph mode")?;
         let snapshot = runner.snapshot();
-        self.replace_processing_source(id, pcm.clone(), Some(runner), None)?;
+        let mut runner = Some(Box::new(runner));
+        if let Err(error) = self.replace_processing_source(id, pcm.clone(), &mut runner, None) {
+            if let Some(runner) = runner {
+                self.processing.retire_runner(*runner);
+            }
+            return Err(error);
+        }
         self.processing.select_graph_audition(
             id,
             self.transport.generation,
@@ -932,7 +946,7 @@ impl Core {
     }
 
     fn restore_original_processing_source(&mut self, id: u64) -> Result<()> {
-        self.replace_processing_source(id, None, None, None)?;
+        self.replace_processing_source(id, None, &mut None, None)?;
         self.processing.clear_audition();
         Ok(())
     }
@@ -942,7 +956,7 @@ impl Core {
         &mut self,
         id: u64,
         pcm: Option<audio::PcmAudio>,
-        graph: Option<audio::GraphRunner>,
+        graph: &mut Option<Box<audio::GraphRunner>>,
         config: Option<Config>,
     ) -> Result<()> {
         let bypassing = config
@@ -1005,30 +1019,38 @@ impl Core {
         );
         // PCM is immutable; graph admission still validates the original source.
         let expected_identity = graph.as_ref().map(|_| admitted_source.identity());
-        self.engine.ensure_command_capacity(2)?;
+        self.engine.ensure_command_capacity(
+            2 + usize::from(
+                config
+                    .as_ref()
+                    .is_some_and(|config| config.equalizer.enabled),
+            ),
+        )?;
         let config = config.map(Arc::new);
         let previous = config.as_ref().map(|_| self.preferences.checkpoint());
         if let Some(config) = config.as_ref() {
             self.write_config(config)?;
         }
-        let replacement = match self.prepare_source_replacement() {
+        let replacement = self.prepare_source_replacement().and_then(|replacement| {
+            if let Some(config) = config.as_ref().filter(|config| config.equalizer.enabled) {
+                let mut equalizer = config.equalizer.clone();
+                equalizer.enabled = !config.processing_bypassed;
+                if let Err(error) = self
+                    .engine
+                    .send(AudioCommand::Equalizer(Arc::new(equalizer)))
+                {
+                    self.finish_playback(Ok(None), Err(error))?;
+                }
+            }
+            Ok(replacement)
+        });
+        let replacement = match replacement {
             Ok(replacement) => replacement,
             Err(error) => {
-                if let Some(previous) = previous {
-                    self.write_config(&Arc::new(previous))?;
-                }
-                return Err(error);
+                return Err(self.rollback_processing_route(previous, error));
             }
         };
         self.pending_processing_audition = None;
-        if let Some(config) = config {
-            let monitor_enabled = config.equalizer.enabled;
-            self.preferences.accept(config);
-            if monitor_enabled {
-                self.engine
-                    .send(AudioCommand::Equalizer(Arc::new(self.playback_equalizer())))?;
-            }
-        }
         let original = pcm.is_none();
         let source_info = if original {
             None
@@ -1059,7 +1081,7 @@ impl Core {
                 end_seconds: cue.end_seconds(),
             });
         let decoder_hint = track.decoder_hint;
-        let command = if let Some(runner) = graph {
+        let command = if let Some(runner) = graph.take() {
             AudioCommand::GraphAudition {
                 path,
                 pcm,
@@ -1073,7 +1095,7 @@ impl Core {
                 start_seconds: replacement.position,
                 paused: replacement.status == PlaybackStatus::Paused,
                 listened_seconds: replacement.heard,
-                runner: Box::new(runner),
+                runner,
             }
         } else {
             AudioCommand::Audition {
@@ -1089,7 +1111,27 @@ impl Core {
                 listened_seconds: replacement.heard,
             }
         };
-        self.commit_source_replacement(command)?;
+        if let Err(error) = self.commit_source_replacement(command) {
+            return Err(self.rollback_processing_route(previous, error));
+        }
+        if let Some(config) = config {
+            self.preferences.accept(config);
+        }
         Ok(())
+    }
+
+    fn rollback_processing_route(
+        &mut self,
+        previous: Option<Config>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if let Some(previous) = previous
+            && let Err(rollback) = self.write_config(&Arc::new(previous))
+        {
+            return error.context(format!(
+                "Restoring bypass settings also failed: {rollback:#}"
+            ));
+        }
+        error
     }
 }

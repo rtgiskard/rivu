@@ -660,6 +660,13 @@ impl Service {
         }
     }
 
+    pub fn retire_runner(&self, runner: audio::GraphRunner) {
+        self.reclaimer
+            .as_ref()
+            .expect("runner requires an admitted worker")
+            .retire_runner(runner);
+    }
+
     pub fn resume_audition(&self) -> Result<(Option<audio::PcmAudio>, Option<audio::GraphRunner>)> {
         let audition = self
             .audition
