@@ -339,6 +339,9 @@ fn runtime() -> Result<&'static Runtime> {
 pub(super) fn ensure_loaded() -> Result<()> {
     runtime().map(|_| ())
 }
+pub(super) fn is_loaded() -> bool {
+    matches!(LazyLock::get(&RUNTIME), Some(Ok(_)))
+}
 pub(super) async fn load_completed() {
     let _ = LOAD_COMPLETED.1.recv().await;
 }

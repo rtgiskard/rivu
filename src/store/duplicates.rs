@@ -305,8 +305,8 @@ impl Store {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         tx.execute("DELETE FROM tracks WHERE id=?1", [target.identity.id])?;
-        // Cache reuse requires current probe data for both the retained tags
-        // and the transferred file facts. A ReplayGain edit invalidates the tags.
+        // Cache reuse requires matching probe revisions and decoder provenance
+        // for the retained tags and transferred file facts.
         let updated = tx.execute(
             "UPDATE tracks SET missing=0, path=s.path, fingerprint=s.fingerprint,
                 file_size=s.file_size, modified_ns=s.modified_ns, duration=s.duration,

@@ -263,6 +263,7 @@ mod tests {
             size: metadata.len(),
             modified_ns: super::super::source::cache_modified_ns(metadata.modified().ok()),
             fingerprint: Some(blake3::hash(b"cached encoded content")),
+            probe_provenance: Default::default(),
             media: Some(MediaInfo {
                 title: "Cached title".into(),
                 artist: String::new(),
@@ -282,22 +283,24 @@ mod tests {
             cue: None,
         };
 
-        let result = futures::executor::block_on(prepare_external_admission(
-            workers,
-            vec![path.clone(), path.clone()],
-            |paths| {
-                assert_eq!(paths, vec![path.clone()]);
-                std::future::ready(Ok(vec![Some(known.clone())]))
-            },
-            false,
-            &ScanCancellation::default(),
-            |_| {},
-        ))
-        .unwrap();
-        assert_eq!(result.records[0].path, path);
-        assert_eq!(result.records[0].media.title, "Cached title");
-        assert_eq!(result.occurrences, vec![0, 0]);
-        assert_eq!(result.rejected, 0);
+        for enabled in [false, true] {
+            let result = futures::executor::block_on(prepare_external_admission(
+                workers,
+                vec![path.clone(), path.clone()],
+                |paths| {
+                    assert_eq!(paths, vec![path.clone()]);
+                    std::future::ready(Ok(vec![Some(known.clone())]))
+                },
+                enabled,
+                &ScanCancellation::default(),
+                |_| {},
+            ))
+            .unwrap();
+            assert_eq!(result.records[0].path, path);
+            assert_eq!(result.records[0].media.title, "Cached title");
+            assert_eq!(result.occurrences, vec![0, 0]);
+            assert_eq!(result.rejected, 0);
+        }
     }
 
     #[test]

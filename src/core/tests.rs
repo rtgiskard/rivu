@@ -95,6 +95,7 @@ pub(super) fn fixture_with_database(duration: Option<f64>) -> (tempfile::TempDir
                         size: 1,
                         modified_ns: 1,
                         fingerprint: None,
+                        probe_provenance: Default::default(),
                         media: MediaInfo {
                             title: format!("Track {id}"),
                             artist: String::new(),
@@ -256,6 +257,7 @@ pub(super) fn record_for_known_file(core: &Core, path: PathBuf) -> ScanRecord {
         size: known.size,
         modified_ns: known.modified_ns,
         fingerprint: known.fingerprint,
+        probe_provenance: known.probe_provenance,
         media: known.media.unwrap(),
     }
 }
@@ -480,6 +482,7 @@ fn register_cue(core: &mut Core, path: &Path, segment: CueSegment, title: &str) 
             size: source.size,
             modified_ns: source.modified_ns,
             fingerprint: source.fingerprint,
+            probe_provenance: source.probe_provenance,
             media: media.clone(),
         }),
         segment,

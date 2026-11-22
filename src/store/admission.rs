@@ -1,7 +1,8 @@
 use super::positions::insert_staged_tracks;
 use super::scan::{
-    PROBE_VERSION, effective_source_from_row, effective_source_select, staged_bitrate_update_sql,
-    staged_catalog_changes, staged_insert_sql, staged_table_schema, staged_update_sql,
+    effective_source_from_row, effective_source_select, encode_probe_version,
+    staged_bitrate_update_sql, staged_catalog_changes, staged_insert_sql, staged_table_schema,
+    staged_update_sql,
 };
 use super::{CatalogChanges, Store};
 use crate::library::ExternalAdmission;
@@ -71,7 +72,7 @@ impl Store {
                     media.codec,
                     i64::from(media.channels),
                     i64::from(media.sample_rate),
-                    PROBE_VERSION,
+                    encode_probe_version(record.probe_provenance),
                     bitrate,
                     media.bitrate_exact && bitrate.is_some(),
                     media.track_number,
@@ -138,6 +139,7 @@ mod tests {
             size: 1,
             modified_ns: 2,
             fingerprint: Some(blake3::hash(path.as_bytes())),
+            probe_provenance: Default::default(),
             media: MediaInfo {
                 title: path.into(),
                 artist: String::new(),
@@ -162,6 +164,30 @@ mod tests {
             paths.iter().map(|path| record(path)).collect(),
             occurrences,
         )
+    }
+
+    #[test]
+    fn external_admission_persists_ffmpeg_probe_provenance() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let path = "/fallback.wav";
+        // Both the first insertion and a refresh must publish the new decoder.
+        use crate::library::ProbeProvenance;
+        for probe in [
+            ProbeProvenance::Ffmpeg,
+            ProbeProvenance::NativeWaveWithoutFfmpegInspection,
+            ProbeProvenance::Native,
+        ] {
+            let mut source = record(path);
+            source.probe_provenance = probe;
+            let admission = ExternalAdmission::from_test_records(vec![source], vec![0]);
+            store.admit_external_queue(&admission, None, None)?;
+            let cached = store
+                .known_source(Path::new(path))?
+                .context("cached source")?;
+            assert!(cached.media.is_some());
+            assert_eq!(cached.probe_provenance, probe);
+        }
+        Ok(())
     }
 
     #[test]

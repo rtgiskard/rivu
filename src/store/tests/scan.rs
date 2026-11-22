@@ -1,5 +1,5 @@
-use crate::library::{CueRecord, RegisteredCueMetadata, ScanRecord, ScanResult};
-use crate::store::scan::PROBE_VERSION;
+use crate::library::{CueRecord, ProbeProvenance, RegisteredCueMetadata, ScanRecord, ScanResult};
+use crate::store::scan::{PROBE_VERSION, encode_probe_version};
 use crate::store::{CatalogChanges, Store};
 use rivu_audio::MediaInfo;
 use rivu_protocol::model::CueSegment;
@@ -11,6 +11,7 @@ fn record() -> ScanRecord {
         size: 1024,
         modified_ns: 42,
         fingerprint: Some(blake3::hash(b"fingerprint")),
+        probe_provenance: ProbeProvenance::Native,
         media: MediaInfo {
             title: "Title".into(),
             artist: "Artist".into(),
@@ -56,13 +57,27 @@ fn stale_probe_versions_invalidate_only_media_for_ordinary_and_cue_sources() {
         };
         let store = Store::open(Path::new(":memory:")).unwrap();
         store.apply_scan(&scan).unwrap();
-        for version in [0, PROBE_VERSION - 1, PROBE_VERSION + 1, PROBE_VERSION] {
+        for (version, probe) in [
+            (0, None),
+            (PROBE_VERSION - 1, None),
+            (PROBE_VERSION + 1, None),
+            (PROBE_VERSION, Some(ProbeProvenance::Native)),
+            (
+                encode_probe_version(ProbeProvenance::Ffmpeg),
+                Some(ProbeProvenance::Ffmpeg),
+            ),
+            (
+                encode_probe_version(ProbeProvenance::NativeWaveWithoutFfmpegInspection),
+                Some(ProbeProvenance::NativeWaveWithoutFfmpegInspection),
+            ),
+        ] {
             store
                 .conn
                 .execute("UPDATE tracks SET probe_version=?1", [version])
                 .unwrap();
             let cached = store.stored_scan_files(&scan.roots).unwrap().remove(0);
-            assert_eq!(cached.media.is_some(), version == PROBE_VERSION);
+            assert_eq!(cached.media.is_some(), probe.is_some());
+            assert_eq!(cached.probe_provenance, probe.unwrap_or_default());
             assert_eq!(cached.fingerprint, source.fingerprint);
             assert_eq!(cached.size, source.size);
             assert_eq!(cached.modified_ns, source.modified_ns);

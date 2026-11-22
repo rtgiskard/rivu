@@ -98,6 +98,7 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
                 size: 1,
                 modified_ns: 1,
                 fingerprint: Some(blake3::hash(b"committed fingerprint")),
+                probe_provenance: Default::default(),
                 media,
             })],
             ..ScanResult::default()
@@ -159,6 +160,7 @@ fn startup_and_catalog_refresh_retain_the_same_recent_history() {
                 size: 1,
                 modified_ns: 1,
                 fingerprint: None,
+                probe_provenance: Default::default(),
                 media: media.clone(),
             })
             .collect::<Vec<_>>())
@@ -244,6 +246,7 @@ fn unchanged_scans_keep_query_results_valid_and_still_import_playlists() {
                 size: known.size,
                 modified_ns: known.modified_ns,
                 fingerprint: known.fingerprint,
+                probe_provenance: known.probe_provenance,
                 media: known.media.unwrap(),
             })
             .collect::<Vec<_>>())
@@ -545,6 +548,7 @@ fn failed_playlist_import_keeps_committed_scan_visible() {
                 size: 1,
                 modified_ns: 2,
                 fingerprint: None,
+                probe_provenance: Default::default(),
                 media,
             })],
             ..ScanResult::default()
@@ -601,6 +605,7 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
             size: 1,
             modified_ns: 1,
             fingerprint: None,
+            probe_provenance: Default::default(),
             media: media.clone(),
         };
         let old = library::CueRecord::registered(
@@ -644,6 +649,7 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
                         size: 1,
                         modified_ns: 1,
                         fingerprint: None,
+                        probe_provenance: Default::default(),
                         media,
                     }]
                 } else {
@@ -1874,6 +1880,7 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
                 size: known.size,
                 modified_ns: known.modified_ns + 1,
                 fingerprint: known.fingerprint,
+                probe_provenance: known.probe_provenance,
                 media,
             })],
             errors: Vec::new(),
@@ -1953,6 +1960,7 @@ fn cue_playlist_import_preserves_repeated_segments_in_order() {
         size: 1,
         modified_ns: 1,
         fingerprint: None,
+        probe_provenance: Default::default(),
         media: MediaInfo {
             title: "Album source".into(),
             artist: String::new(),
@@ -2556,6 +2564,7 @@ fn projection_read_failure_recovers_on_query_without_replaying_committed_writes(
                 size: 1,
                 modified_ns: 1,
                 fingerprint: None,
+                probe_provenance: known.probe_provenance,
                 media: known.media.unwrap(),
             })],
             ..Default::default()

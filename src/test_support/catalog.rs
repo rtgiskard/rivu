@@ -32,6 +32,7 @@ impl CatalogFixture {
                         size: 1,
                         modified_ns: 0,
                         fingerprint: None,
+                        probe_provenance: Default::default(),
                         media: MediaInfo {
                             title,
                             artist: String::new(),

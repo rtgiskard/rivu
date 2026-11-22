@@ -795,6 +795,7 @@ mod tests {
                 size: 1,
                 modified_ns: 1,
                 fingerprint: Some(blake3::hash(b"admission-panic")),
+                probe_provenance: Default::default(),
                 media: MediaInfo {
                     title: "Admission panic".into(),
                     artist: String::new(),

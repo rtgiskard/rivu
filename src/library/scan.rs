@@ -1013,6 +1013,7 @@ mod recheck_tests {
             size: metadata.len(),
             modified_ns: cache_modified_ns(metadata.modified().ok()),
             fingerprint: Some(blake3::hash(b"cached source")),
+            probe_provenance: Default::default(),
             cue: None,
             media: Some(MediaInfo {
                 title: "Cached".into(),

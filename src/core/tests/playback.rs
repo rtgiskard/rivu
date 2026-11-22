@@ -937,6 +937,7 @@ pub(super) fn scan_written_source(
                     .unwrap()
                     .as_nanos() as i64,
                 fingerprint: None,
+                probe_provenance: Default::default(),
                 media,
             })],
             ..ScanResult::default()

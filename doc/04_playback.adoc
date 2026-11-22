@@ -77,9 +77,10 @@ disabled or not loaded, DTS inside a PCM-labelled WAVE may be treated as PCM,
 including incorrect metadata and noise on playback. For DTS-WAV, select FFmpeg
 and enable the extension; no prior load is required.
 
-Library rows are not automatically reprobed after FFmpeg loads; use a forced
-rescan to refresh stored metadata. Probe commands and recognition provenance:
-link:02_library.adoc#metadata-and-favorites[Library].
+Loading FFmpeg does not refresh library rows on its own. While it is enabled
+and loaded, a later scan rechecks WAVE rows previously probed without FFmpeg
+inspection. A forced scan refreshes metadata for all files it scans.
+See link:02_library.adoc#metadata-and-favorites[Library] for probe commands.
 
 Build prerequisites and ABI compatibility:
 link:00_getting_started.adoc#ffmpeg-and-native-only-builds[FFmpeg and native-only builds].

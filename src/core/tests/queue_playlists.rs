@@ -1495,6 +1495,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
             size: 1,
             modified_ns: 1,
             fingerprint: None,
+            probe_provenance: Default::default(),
             media: MediaInfo {
                 title: format!("Track {number}"),
                 artist: String::new(),

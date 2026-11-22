@@ -1090,8 +1090,9 @@ whole-file identities; failed sheets grant no exemption. See
 link:02_library.adoc#minimum-duration-for-new-tracks[Library].
 
 Metadata reuse requires the current probe version, independently of schema or
-protocol versions; mismatch reprobes without invalidating fingerprints. Force
-bypasses reuse. Cancellation and task identity are checked around lookup and
+protocol versions, and provenance compatible with the current decoder settings
+and availability. Incompatibility triggers a reprobe and keeps the fingerprint.
+Force bypasses reuse. Cancellation and task identity are checked around lookup and
 blocking work, so stale tasks cannot commit for a replacement. Preparation batches,
 hashing work bounds and shared-source reuse are described in
 link:20_architecture.adoc#storage-and-preparation-work[Storage and preparation work].

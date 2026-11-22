@@ -28,6 +28,7 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
                 )
                 .unwrap(),
                 fingerprint: Some(blake3::hash(b"same complete content")),
+                probe_provenance: Default::default(),
                 media: media.clone(),
             }
         })

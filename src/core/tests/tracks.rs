@@ -1203,6 +1203,7 @@ fn cue_rescan_preserves_loaded_source_and_seek_range_until_explicit_restart() {
                         size: known.size,
                         modified_ns: known.modified_ns,
                         fingerprint: known.fingerprint,
+                        probe_provenance: known.probe_provenance,
                         media,
                     })],
                     ..ScanResult::default()

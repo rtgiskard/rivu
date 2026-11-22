@@ -2,6 +2,122 @@ use super::*;
 
 const VALID_MIDI: &[u8] = b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x05\x87\x40\xff\x2f\0";
 
+// Zero-filled blocks are valid for both GSM 6.10 and IMA ADPCM. Symphonia
+// rejects the GSM format, but can decode IMA ADPCM without FFmpeg.
+fn write_block_wav(
+    path: &Path,
+    format: u16,
+    bits_per_sample: u16,
+    block_size: u16,
+    samples_per_block: u16,
+) -> Result<()> {
+    const SAMPLE_RATE: u32 = 8_000;
+    const BLOCKS: u32 = 4;
+    let data_size = u32::from(block_size) * BLOCKS;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(52 + data_size).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt \x14\0\0\0");
+    bytes.extend_from_slice(&format.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    let bytes_per_second = SAMPLE_RATE * u32::from(block_size) / u32::from(samples_per_block);
+    bytes.extend_from_slice(&bytes_per_second.to_le_bytes());
+    bytes.extend_from_slice(&block_size.to_le_bytes());
+    bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&samples_per_block.to_le_bytes());
+    bytes.extend_from_slice(b"fact\x04\0\0\0");
+    bytes.extend_from_slice(&(u32::from(samples_per_block) * BLOCKS).to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_size.to_le_bytes());
+    bytes.resize(bytes.len() + data_size as usize, 0);
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+#[test]
+fn ffmpeg_warm_cache_matches_cold_admission_and_reuses_fingerprints() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gsm = directory.path().join("gsm.wav");
+    let ima = directory.path().join("ima.wav");
+    write_block_wav(&gsm, 0x31, 0, 65, 320)?;
+    write_block_wav(&ima, 0x11, 4, 256, 505)?;
+    let paths = [gsm.clone(), ima.clone()];
+    if cfg!(feature = "ffmpeg") {
+        rivu_audio::ensure_ffmpeg_loaded()?;
+    }
+    let mut initial = scan_paths(&paths, &[], true)?;
+    assert_eq!(
+        initial.track_count(),
+        1 + usize::from(cfg!(feature = "ffmpeg"))
+    );
+    if cfg!(feature = "ffmpeg") {
+        assert!(
+            initial
+                .records
+                .iter()
+                .all(|record| record.probe_provenance == ProbeProvenance::Ffmpeg)
+        );
+    } else {
+        // A database populated by an FFmpeg-enabled build can be reopened here.
+        let mut record = (*initial.records[0]).clone();
+        let metadata = fs::metadata(&gsm)?;
+        record.path = gsm.clone();
+        record.size = metadata.len();
+        record.modified_ns = cache_modified_ns(metadata.modified().ok());
+        record.media.codec = "gsm_ms".into();
+        record.probe_provenance = ProbeProvenance::Ffmpeg;
+        initial.records.push(std::sync::Arc::new(record));
+    }
+    for record in &mut initial.records {
+        let record = std::sync::Arc::make_mut(record);
+        record.media.artist = "Cached metadata".into();
+        record.fingerprint = Some(blake3::hash(b"retained fingerprint"));
+    }
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&initial)?;
+    for (pass, enabled) in [true, false, true].into_iter().enumerate() {
+        let known = paths
+            .iter()
+            .cloned()
+            .zip(store.known_sources(&paths)?)
+            .map(|(path, record)| Ok((path, record.context("cached audio source")?)))
+            .collect::<Result<Vec<_>>>()?;
+        let cold = scan_paths(&paths, &[], enabled)?;
+        let warm = scan_paths(&paths, &known, enabled)?;
+        let expected_ffmpeg = enabled && cfg!(feature = "ffmpeg");
+        assert_eq!(warm.errors, cold.errors);
+        assert_eq!(warm.track_count(), cold.track_count());
+        assert_eq!(warm.track_count(), 1 + usize::from(expected_ffmpeg));
+        assert_eq!(
+            warm.records.iter().any(|record| record.path == gsm),
+            expected_ffmpeg
+        );
+        for record in &warm.records {
+            let fresh = cold
+                .records
+                .iter()
+                .find(|fresh| fresh.path == record.path)
+                .context("same source admitted in cold scan")?;
+            assert_eq!(record.probe_provenance, fresh.probe_provenance);
+            assert_eq!(record.media.codec, fresh.media.codec);
+            assert_eq!(
+                record.fingerprint,
+                Some(blake3::hash(b"retained fingerprint"))
+            );
+            // IMA is refreshed on both settings transitions. GSM retains its
+            // enabled cache, including after the intervening disabled scan.
+            assert_eq!(
+                record.media.artist == "Cached metadata",
+                pass == 0 || record.path == gsm || !cfg!(feature = "ffmpeg")
+            );
+        }
+        store.apply_scan(&warm)?;
+    }
+    Ok(())
+}
+
 fn cached_midi_segment(source: std::sync::Arc<ScanRecord>, sheet: &Path) -> CueRecord {
     CueRecord::registered(
         source,
@@ -31,6 +147,7 @@ fn cached_midi_source(path: &Path) -> Result<std::sync::Arc<ScanRecord>> {
         modified_ns: cache_modified_ns(metadata.modified().ok()),
         // Deliberately different from the file hash: reuse must not rehash.
         fingerprint: Some(blake3::hash(b"retained fingerprint")),
+        probe_provenance: ProbeProvenance::Native,
         media: rivu_audio::MediaInfo {
             title: "Cached MIDI".into(),
             artist: "Cached artist".into(),
@@ -231,6 +348,7 @@ fn rescans_keep_existing_midi_and_reconcile_deleted_sources() -> Result<()> {
             size: midi.len() as u64,
             modified_ns: 0,
             fingerprint: None,
+            probe_provenance: ProbeProvenance::Native,
             media: midi_media.clone(),
         })
     }));

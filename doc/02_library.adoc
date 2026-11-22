@@ -666,8 +666,9 @@ analysis fails rather than saving mixed-version metadata. Playback and waveform
 loading also require ordinary files.
 
 Ordinary scans reuse fingerprints when size and modification time are unchanged;
-metadata reuse also requires the current probe version. A build without `midi`
-does not reuse cached MIDI metadata; files it skips are not marked missing.
+metadata reuse also requires the current probe version. With FFmpeg disabled,
+sources verified by its decoder are probed again using native support. A build
+without `midi` skips cached MIDI metadata and leaves those files' missing state intact.
 `--force` rereads both; CUE sheets are always reread. Source tags may replace
 database-only descriptive edits, while matching identities, favorites, decoder
 hints, statistics and references are preserved; see

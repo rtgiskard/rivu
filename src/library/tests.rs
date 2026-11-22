@@ -1196,6 +1196,7 @@ fn known_records(result: &ScanResult) -> Vec<(PathBuf, KnownFile)> {
                     size: record.source.size,
                     modified_ns: record.source.modified_ns,
                     fingerprint: record.source.fingerprint,
+                    probe_provenance: record.source.probe_provenance,
                     media: Some(media),
                     cue: record.cue.map(cue_segment),
                 },
@@ -1241,6 +1242,7 @@ fn signed_mtime_cache_keys_preserve_epoch_and_reject_unavailable_or_out_of_range
             size: 1,
             modified_ns,
             fingerprint: None,
+            probe_provenance: Default::default(),
             media: None,
             cue: None,
         };

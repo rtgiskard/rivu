@@ -45,6 +45,10 @@ mod ffmpeg {
         availability().map(|_| ())
     }
 
+    pub(super) fn is_loaded() -> bool {
+        false
+    }
+
     pub(super) async fn load_completed() {
         std::future::pending::<()>().await;
     }
@@ -168,13 +172,23 @@ pub use processor::{NativeNodePlan, NativeProcessor};
 pub use render::{RenderFormat, SourceRenderer};
 use rivu_protocol::audio::{PlaybackRange, SourceIdentity};
 pub use source::{
-    AudioBackend, ProbeResult, probe, probe_details, probe_file, probe_with_cancel,
-    source_identity, source_identity_from_metadata,
+    AudioBackend, ProbeResult, probe, probe_details, probe_file, probe_file_details,
+    probe_with_cancel, source_identity, source_identity_from_metadata,
 };
 
 /// Read the published runtime status without starting or waiting for a load.
 pub fn ffmpeg_status() -> anyhow::Result<String> {
     ffmpeg::availability()
+}
+
+/// Load the FFmpeg extension if needed and check whether it is available.
+pub fn ensure_ffmpeg_loaded() -> anyhow::Result<()> {
+    ffmpeg::ensure_loaded()
+}
+
+/// Check whether FFmpeg is ready for WAVE inspection without starting a load.
+pub fn ffmpeg_is_loaded() -> bool {
+    ffmpeg::is_loaded()
 }
 
 /// Wait for the process-wide explicit load to publish success or failure.

@@ -1,6 +1,8 @@
 use super::rows::{cue_from_row, fingerprint_hash_from_row};
 use super::{CatalogChanges, Store};
-use crate::library::{CueRecord, KnownFile, RegisteredCueMetadata, ScanResult, ScanUncertainty};
+use crate::library::{
+    CueRecord, KnownFile, ProbeProvenance, RegisteredCueMetadata, ScanResult, ScanUncertainty,
+};
 use crate::library::{ImportBudget, ImportBudgetScope, is_audio_path};
 use anyhow::{Context, Result, bail};
 use rivu_audio::MediaInfo;
@@ -12,7 +14,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // Bump when probing semantics change; fingerprints remain reusable.
-pub(super) const PROBE_VERSION: i64 = 7;
+// Encode probe provenance in the revision so older rows stay stale.
+pub(super) const PROBE_VERSION: i64 = 8;
+const FFMPEG_PROBE_VERSION: i64 = -2 * PROBE_VERSION;
+const NATIVE_WAVE_PROBE_VERSION: i64 = FFMPEG_PROBE_VERSION - 1;
+
+pub(super) fn encode_probe_version(probe: ProbeProvenance) -> i64 {
+    match probe {
+        ProbeProvenance::Native => PROBE_VERSION,
+        ProbeProvenance::NativeWaveWithoutFfmpegInspection => NATIVE_WAVE_PROBE_VERSION,
+        ProbeProvenance::Ffmpeg => FFMPEG_PROBE_VERSION,
+    }
+}
 
 pub(super) const SOURCE_FIELDS: &str = "path,fingerprint,file_size,modified_ns,title,artist,album,duration,codec,channels,sample_rate,probe_version,bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date,replaygain_track_gain";
 const CUE_FIELDS: &str = "cue_sheet,cue_number,cue_start_frame,cue_end_frame";
@@ -412,12 +425,19 @@ const KNOWN_COLUMNS: &str = "file_size,modified_ns,fingerprint,title,artist,albu
     id,path";
 
 fn known_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownFile> {
+    let probe_provenance = match r.get::<_, i64>(14)? {
+        PROBE_VERSION => Some(ProbeProvenance::Native),
+        NATIVE_WAVE_PROBE_VERSION => Some(ProbeProvenance::NativeWaveWithoutFfmpegInspection),
+        FFMPEG_PROBE_VERSION => Some(ProbeProvenance::Ffmpeg),
+        _ => None,
+    };
     Ok(KnownFile {
         size: r.get::<_, i64>(0)? as u64,
         modified_ns: r.get(1)?,
         fingerprint: fingerprint_hash_from_row(r, 2)?,
         cue: cue_from_row(r, 10)?,
-        media: if r.get::<_, i64>(14)? == PROBE_VERSION {
+        probe_provenance: probe_provenance.unwrap_or_default(),
+        media: if probe_provenance.is_some() {
             Some(MediaInfo {
                 title: r.get(3)?,
                 artist: r.get(4)?,
@@ -449,6 +469,7 @@ pub(crate) struct StoredScanFile {
     pub modified_ns: i64,
     pub fingerprint: Option<blake3::Hash>,
     pub media: Option<MediaInfo>,
+    pub probe_provenance: ProbeProvenance,
     pub cue: Option<CueSegment>,
 }
 
@@ -460,6 +481,7 @@ fn stored_scan_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSc
         fingerprint,
         media,
         cue,
+        probe_provenance,
     } = known_file_from_row(r)?;
     Ok(StoredScanFile {
         track_id: r.get(22)?,
@@ -467,6 +489,7 @@ fn stored_scan_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSc
         size,
         modified_ns,
         fingerprint,
+        probe_provenance,
         media,
         cue,
     })
@@ -1099,7 +1122,7 @@ impl Store {
                 m.source.codec,
                 m.source.channels as i64,
                 m.source.sample_rate as i64,
-                PROBE_VERSION,
+                encode_probe_version(r.source.probe_provenance),
                 bitrate,
                 m.source.bitrate_exact && bitrate.is_some(),
                 m.track_number,
@@ -1247,6 +1270,7 @@ mod import_tests {
             modified_ns: known.modified_ns,
             fingerprint: known.fingerprint,
             media: known.media.unwrap(),
+            probe_provenance: known.probe_provenance,
         });
         let missing = Arc::new(ScanRecord {
             path: "/missing.wav".into(),

@@ -1,7 +1,10 @@
 use super::ScanCancellation;
 use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, bail};
-use rivu_audio::{MediaInfo, probe_file, source_identity_from_metadata};
+use rivu_audio::{
+    AudioBackend, MediaInfo, ensure_ffmpeg_loaded, ffmpeg_is_loaded, probe_file_details,
+    source_identity_from_metadata,
+};
 use rivu_protocol::{audio::SourceIdentity, model::CueSegment};
 use rivu_utils::regular_file::open_regular_file_with_metadata;
 use std::collections::HashMap;
@@ -22,6 +25,14 @@ pub(super) fn cache_modified_ns(modified: Option<SystemTime>) -> i64 {
         .unwrap_or(UNCACHEABLE_MODIFIED_NS)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProbeProvenance {
+    #[default]
+    Native,
+    NativeWaveWithoutFfmpegInspection,
+    Ffmpeg,
+}
+
 /// The filesystem information and cached probe result known to the database.
 #[derive(Clone, Debug)]
 pub struct KnownFile {
@@ -30,6 +41,7 @@ pub struct KnownFile {
     pub modified_ns: i64,
     pub fingerprint: Option<blake3::Hash>,
     pub media: Option<MediaInfo>,
+    pub probe_provenance: ProbeProvenance,
     pub cue: Option<CueSegment>,
 }
 
@@ -41,13 +53,19 @@ impl KnownFile {
     }
 }
 
-/// Reuse only facts that this build's source admission can still produce.
-/// MIDI has no catalog PCM format and is never an FFmpeg fallback source.
-fn cached_media_usable(media: &MediaInfo, ffmpeg_enabled: bool) -> bool {
+fn cached_media_usable(media: &MediaInfo, probe: ProbeProvenance, ffmpeg_enabled: bool) -> bool {
+    // MIDI has no catalog PCM format and is never an FFmpeg fallback source.
     if media.codec == "MIDI" {
-        cfg!(feature = "midi")
-    } else {
-        !ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0)
+        return cfg!(feature = "midi");
+    }
+    match probe {
+        // Some FFmpeg-decoded WAVE files can also be decoded natively.
+        ProbeProvenance::Ffmpeg => ffmpeg_enabled && ensure_ffmpeg_loaded().is_ok(),
+        // An enabled, loaded FFmpeg runtime inspects WAVE before native probing.
+        ProbeProvenance::NativeWaveWithoutFfmpegInspection if ffmpeg_enabled => {
+            !ffmpeg_is_loaded() && media.channels != 0 && media.sample_rate != 0
+        }
+        _ => !ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0),
     }
 }
 
@@ -59,6 +77,7 @@ pub struct ScanRecord {
     pub modified_ns: i64,
     pub fingerprint: Option<blake3::Hash>,
     pub media: MediaInfo,
+    pub probe_provenance: ProbeProvenance,
 }
 
 /// A subtrack borrows source facts and keeps metadata in its original owner:
@@ -267,6 +286,7 @@ struct PendingSource {
     known: Option<KnownFile>,
     initialized: bool,
     media: Option<MediaInfo>,
+    probe_provenance: ProbeProvenance,
     fingerprint: Option<blake3::Hash>,
     hasher: Option<blake3::Hasher>,
     hashed: u64,
@@ -288,23 +308,34 @@ impl PendingSource {
                 .known
                 .take()
                 .filter(|known| known.matches_metadata(size, modified_ns));
-            if let Some(mut known) = unchanged {
-                self.fingerprint = known.fingerprint.take();
-                let media = known.media.take().filter(|media| {
-                    known.cue.is_none() && cached_media_usable(media, ffmpeg_enabled)
-                });
-                if let (Some(budget), Some(media)) = (budget, &media) {
-                    budget.reserve(media_retained_bytes(media))?;
+            if let Some(known) = unchanged {
+                self.fingerprint = known.fingerprint;
+                if let Some(media) = known.media.filter(|media| {
+                    known.cue.is_none()
+                        && cached_media_usable(media, known.probe_provenance, ffmpeg_enabled)
+                }) {
+                    if let Some(budget) = budget {
+                        budget.reserve(media_retained_bytes(&media))?;
+                    }
+                    self.probe_provenance = known.probe_provenance;
+                    self.media = Some(media);
                 }
-                self.media = media;
             }
             if self.media.is_none() {
                 let file = self.file.try_clone()?;
-                let media = probe_file(&self.path, file, ffmpeg_enabled).context("probe audio")?;
+                let probe =
+                    probe_file_details(&self.path, file, ffmpeg_enabled).context("probe audio")?;
                 if let Some(budget) = budget {
-                    budget.reserve(media_retained_bytes(&media))?;
+                    budget.reserve(media_retained_bytes(&probe.info))?;
                 }
-                self.media = Some(media);
+                self.media = Some(probe.info);
+                self.probe_provenance = if matches!(probe.decoder_backend, AudioBackend::Ffmpeg) {
+                    ProbeProvenance::Ffmpeg
+                } else if probe.native_wave_without_ffmpeg_inspection {
+                    ProbeProvenance::NativeWaveWithoutFfmpegInspection
+                } else {
+                    ProbeProvenance::Native
+                };
                 cancellation.check()?;
             }
             if self.fingerprint.is_none() {
@@ -356,6 +387,7 @@ impl PendingSource {
             modified_ns,
             fingerprint: Some(fingerprint),
             media: self.media.take().context("Audio probe returned no media")?,
+            probe_provenance: self.probe_provenance,
         };
         if let Some(budget) = budget {
             budget.reserve(record.shared_storage_bytes())?;
@@ -515,6 +547,7 @@ where
                     known: known.next().expect("source lookup length is checked"),
                     initialized: false,
                     media: None,
+                    probe_provenance: ProbeProvenance::Native,
                     fingerprint: None,
                     hasher: None,
                     hashed: 0,

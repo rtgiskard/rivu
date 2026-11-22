@@ -21,11 +21,11 @@ pub use scan::{ScanCancellation, ScanResult, ScanUncertainty};
 pub(crate) use scan::{ScanSettings, recheck_sources, scan_paths_with_cues};
 #[cfg(test)]
 pub(crate) use scan::{SkippedDirectory, scan_paths};
-pub use source::KnownFile;
 pub(crate) use source::SOURCE_BATCH_SIZE;
 #[cfg(any(test, feature = "test-support"))]
 pub use source::ScanRecord;
 pub(crate) use source::{CueRecord, CueView, RegisteredCueMetadata, ScanTrack};
+pub use source::{KnownFile, ProbeProvenance};
 
 #[cfg(test)]
 mod tests;

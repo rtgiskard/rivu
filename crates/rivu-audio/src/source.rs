@@ -44,7 +44,10 @@ use symphonia::{
                 well_known::{CODEC_ID_OPUS, CODEC_ID_VORBIS},
             },
         },
-        formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType, probe::Hint},
+        formats::{
+            FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType, probe::Hint,
+            well_known::FORMAT_ID_WAVE,
+        },
         io::{MediaSourceStream, MediaSourceStreamOptions},
         meta::MetadataOptions,
         units::{Time, TimeBase},
@@ -237,6 +240,8 @@ pub struct ProbeResult {
     pub info: MediaInfo,
     pub probe_backend: AudioBackend,
     pub decoder_backend: AudioBackend,
+    /// Native WAVE admission that did not run the enabled FFmpeg inspection.
+    pub native_wave_without_ffmpeg_inspection: bool,
 }
 
 pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
@@ -253,11 +258,20 @@ pub fn probe_with_cancel(
 }
 
 /// Probe the already opened object without looking up its original path again.
-pub fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<MediaInfo> {
+pub fn probe_file(path: &Path, file: File, ffmpeg_enabled: bool) -> Result<MediaInfo> {
+    probe_file_details(path, file, ffmpeg_enabled).map(|result| result.info)
+}
+
+/// Probe an opened object and report both metadata and decoder backends.
+pub fn probe_file_details(
+    path: &Path,
+    mut file: File,
+    ffmpeg_enabled: bool,
+) -> Result<ProbeResult> {
     crate::source_identity(&file)?;
     file.rewind()
         .context("Rewinding audio source for probing")?;
-    probe_open_file(path, file, ffmpeg_enabled, None).map(|result| result.info)
+    probe_open_file(path, file, ffmpeg_enabled, None)
 }
 
 pub fn probe_details(path: &Path, ffmpeg_enabled: bool, enhanced: bool) -> Result<ProbeResult> {
@@ -288,6 +302,7 @@ fn probe_open_file(
         return Ok(ProbeResult {
             probe_backend: AudioBackend::Native,
             decoder_backend: AudioBackend::Native,
+            native_wave_without_ffmpeg_inspection: false,
             info: midi::probe(file, path, cancelled)?,
         });
     }
@@ -306,9 +321,16 @@ fn probe_open_file(
     } else {
         AudioBackend::Native
     };
+    let native_wave_without_ffmpeg_inspection =
+        matches!(source.probe_backend, AudioBackend::Native)
+            && source
+                .format
+                .as_ref()
+                .is_some_and(|format| format.format_info().format == FORMAT_ID_WAVE);
     Ok(ProbeResult {
         probe_backend: source.probe_backend,
         decoder_backend,
+        native_wave_without_ffmpeg_inspection,
         info: source.info,
     })
 }
