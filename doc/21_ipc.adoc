@@ -294,6 +294,9 @@ An unchanged request returns current revisions without section payloads, never
 waits for a future publication, and does not establish a revision subscription.
 Use a baseline from the bound instance only. `ClientSession::get_state_since`
 uses an unconditional selected-section Hello when the session is unbound.
+The client verifies that returned payloads match the selection and baseline of
+the request it sent. A successful wait must contain at least one changed selected
+section. A mismatched payload ends the session before any state is applied.
 
 Configuration state carries low-frequency settings and `config_path`. The
 decoded settings type has no volume, shuffle, repeat or output-device fields.

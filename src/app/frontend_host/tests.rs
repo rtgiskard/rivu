@@ -18,11 +18,15 @@ use std::{
 };
 
 fn hello_frame(instance_id: u32) -> Vec<u8> {
+    hello_frame_with_state(instance_id, StateResponse::default())
+}
+
+fn hello_frame_with_state(instance_id: u32, state: StateResponse) -> Vec<u8> {
     let mut frame = Vec::new();
     encode_response_frame_into(
         &WireResponse::Hello(HelloResponse {
             instance_id: instance_id.to_le_bytes(),
-            state: wire_state(StateResponse::default()),
+            state: wire_state(state),
         }),
         &mut frame,
     )
@@ -141,6 +145,16 @@ fn probe_rejects_invalid_handshakes_without_losing_the_protocol_error() {
         (malformed, "Decoding IPC Hello response"),
         (wrong_response, "not a Hello response"),
         (hello_frame(0), "IPC Hello returned instance 0"),
+        (
+            hello_frame_with_state(
+                7,
+                StateResponse {
+                    current_track: Some(Default::default()),
+                    ..Default::default()
+                },
+            ),
+            "IPC state sections mismatch",
+        ),
     ] {
         let error = probe_with_reply(&reply, Duration::from_secs(2)).unwrap_err();
         assert!(format!("{error:#}").contains(reason), "{error:#}");

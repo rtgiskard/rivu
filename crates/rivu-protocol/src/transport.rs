@@ -1,6 +1,7 @@
+use super::response::{StateRequest, StateResponse, StateSections};
 use super::wire::{
-    CommandRefusal, HelloResponse, MAX_REQUEST, MAX_RESPONSE, PROTOCOL_VERSION, RequestTag,
-    ResponseTag, UNKNOWN_INSTANCE, WireRequest, WireResponse,
+    CommandRefusal, MAX_REQUEST, MAX_RESPONSE, PROTOCOL_VERSION, RequestTag, ResponseTag,
+    UNKNOWN_INSTANCE, WireRequest, WireResponse, state_response,
 };
 use anyhow::{Context, Result, bail, ensure};
 use bytes::{Buf, BufMut, BytesMut};
@@ -373,19 +374,37 @@ pub fn unpack_error(response: WireResponse) -> Result<WireResponse> {
     Ok(response)
 }
 
-pub fn validate_hello(response: HelloResponse) -> Result<HelloResponse> {
+pub fn validate_state(state: StateResponse, request: StateRequest) -> Result<StateResponse> {
+    let expected = match request.since {
+        None => request.sections,
+        Some(since) => request
+            .sections
+            .intersection(state.revisions.changed_since(since)),
+    };
+    let received = state.sections();
     ensure!(
-        u32::from_le_bytes(response.instance_id) != UNKNOWN_INSTANCE,
-        "IPC Hello returned instance 0"
+        received == expected,
+        "IPC state sections mismatch: expected {expected:?}, received {received:?}"
     );
-    Ok(response)
+    Ok(state)
 }
 
-pub fn unpack_hello(response: WireResponse) -> Result<HelloResponse> {
+pub fn unpack_hello(
+    response: WireResponse,
+    sections: StateSections,
+    check_instance: impl FnOnce(u32) -> Result<()>,
+) -> Result<(u32, StateResponse)> {
     let WireResponse::Hello(response) = unpack_error(response)? else {
         bail!("IPC response was not a Hello response")
     };
-    validate_hello(response)
+    let instance = u32::from_le_bytes(response.instance_id);
+    ensure!(
+        instance != UNKNOWN_INSTANCE,
+        "IPC Hello returned instance 0"
+    );
+    check_instance(instance)?;
+    let state = validate_state(state_response(response.state), sections.into())?;
+    Ok((instance, state))
 }
 
 #[cfg(test)]

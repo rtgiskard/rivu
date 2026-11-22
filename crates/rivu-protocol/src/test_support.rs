@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::model::{Command, Query, Track};
-use crate::response::{QueryResponse, StateResponse, StateRevisions};
+use crate::response::{PlaybackSnapshot, QueryResponse, StateResponse, StateSections};
 use crate::transport::{decode_request_frame, encode_response_frame_into};
 use crate::wire::{
     CommandReply, HelloResponse, MAX_REQUEST, WireRequest, WireResponse, wire_state,
@@ -73,6 +73,23 @@ pub fn write_test_response(stream: &mut UnixStream, response: WireResponse) {
     stream.write_all(&frame).unwrap();
 }
 
+pub fn test_state(sections: StateSections) -> StateResponse {
+    StateResponse {
+        playback: sections.playback.then(|| PlaybackSnapshot {
+            playback: Default::default(),
+            processing_audition: None,
+            processing_selection: None,
+        }),
+        current_track: sections.current_track.then(Default::default),
+        queue: sections.queue.then(Default::default),
+        library: sections.library.then(Default::default),
+        system: sections.system.then(Default::default),
+        configuration: sections.configuration.then(Default::default),
+        processing: sections.processing.then(Default::default),
+        revisions: Default::default(),
+    }
+}
+
 pub fn complete_test_handshake(stream: &mut UnixStream) {
     complete_test_handshake_for_instance(stream, 1);
 }
@@ -81,21 +98,14 @@ pub fn complete_test_handshake_for_instance(stream: &mut UnixStream, instance_id
     let timeout = Some(Duration::from_secs(5));
     stream.set_read_timeout(timeout).unwrap();
     stream.set_write_timeout(timeout).unwrap();
-    assert!(matches!(read_test_request(stream), WireRequest::Hello(_)));
+    let WireRequest::Hello(sections) = read_test_request(stream) else {
+        panic!("expected Hello");
+    };
     write_test_response(
         stream,
         WireResponse::Hello(HelloResponse {
             instance_id: instance_id.to_le_bytes(),
-            state: wire_state(StateResponse {
-                revisions: StateRevisions::default(),
-                playback: None,
-                current_track: None,
-                queue: None,
-                library: None,
-                system: None,
-                configuration: None,
-                processing: None,
-            }),
+            state: wire_state(test_state(sections)),
         }),
     );
 }

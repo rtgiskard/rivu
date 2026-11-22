@@ -3,7 +3,8 @@ use async_io::Async;
 use bytes::BytesMut;
 use futures_lite::future;
 use rivu_protocol::transport::{
-    read_response_frame, timeout, unpack_error, unpack_hello, write_request_frame_buffered,
+    read_response_frame, timeout, unpack_error, unpack_hello, validate_state,
+    write_request_frame_buffered,
 };
 use rivu_protocol::wire::{
     SessionState, WireCommand, WireQuery, WireReadQuery, WireRequest, WireResponse, state_response,
@@ -100,6 +101,15 @@ impl SessionCancellation {
     }
 }
 
+enum ResponseWait<'a> {
+    Bounded(Duration),
+    Indefinite,
+    RetainedQuery {
+        id: u64,
+        cancelled: std::pin::Pin<&'a mut dyn Future<Output = ()>>,
+    },
+}
+
 /// Serial IPC requests share a socket, handshake, and framing buffers.
 /// A failed exchange discards the socket; only a later request reconnects, and
 /// the failed request is never replayed because its mutation may have executed.
@@ -188,29 +198,14 @@ impl ClientSession {
     }
 
     fn exchange(&mut self, request: &WireRequest, wait_timeout: Duration) -> Result<WireResponse> {
-        self.exchange_with_write_evidence(request, wait_timeout, &mut false)
-    }
-
-    fn exchange_with_write_evidence(
-        &mut self,
-        request: &WireRequest,
-        wait_timeout: Duration,
-        write_started: &mut bool,
-    ) -> Result<WireResponse> {
-        self.exchange_until(
-            request,
-            Some(wait_timeout),
-            write_started,
-            std::future::pending(),
-        )
+        self.exchange_until(request, ResponseWait::Bounded(wait_timeout), &mut false)
     }
 
     fn exchange_until(
         &mut self,
         request: &WireRequest,
-        wait_timeout: Option<Duration>,
+        wait: ResponseWait<'_>,
         write_started: &mut bool,
-        cancelled: impl Future<Output = ()>,
     ) -> Result<WireResponse> {
         #[cfg(test)]
         let response_clock = self
@@ -246,8 +241,8 @@ impl ClientSession {
                     )
                     .await?;
                     let response = read_response_frame(stream, &mut self.read_buffer);
-                    let response =
-                        if let (WireRequest::Query(query), None) = (request, wait_timeout) {
+                    let response = match wait {
+                        ResponseWait::RetainedQuery { id, cancelled } => {
                             match future::or(async { Some(response.await) }, async {
                                 cancelled.await;
                                 None
@@ -256,11 +251,10 @@ impl ClientSession {
                             {
                                 Some(response) => response,
                                 None => {
-                                    // Cancellation has no response of its own. Keep the
-                                    // serial read slot until Core has finished rollback.
+                                    // CancelRead has no reply. Drain the original read's slot.
                                     write_request_frame_buffered(
                                         stream,
-                                        &WireRequest::CancelRead(query.id),
+                                        &WireRequest::CancelRead(id),
                                         &mut self.write_buffer,
                                         &mut false,
                                     )
@@ -268,15 +262,10 @@ impl ClientSession {
                                     read_response_frame(stream, &mut self.read_buffer).await
                                 }
                             }
-                        } else if matches!(
-                            request,
-                            WireRequest::WaitState(_) | WireRequest::WaitTask(_)
-                        ) {
-                            response.await
-                        } else {
-                            let deadline = rivu_protocol::transport::response_timeout(
-                                wait_timeout.expect("only retained queries omit a timeout"),
-                            );
+                        }
+                        ResponseWait::Indefinite => response.await,
+                        ResponseWait::Bounded(duration) => {
+                            let deadline = rivu_protocol::transport::response_timeout(duration);
                             #[cfg(test)]
                             let response = match response_clock {
                                 Some((clock, started)) => {
@@ -287,7 +276,8 @@ impl ClientSession {
                             #[cfg(not(test))]
                             let response = timeout(deadline, response).await;
                             response.context("Reading IPC response timed out")?
-                        }?;
+                        }
+                    }?;
                     if self.stop.is_cancelled() {
                         bail!("IPC request cancelled");
                     }
@@ -325,32 +315,32 @@ impl ClientSession {
         let sections = request.sections;
         if !self.session.is_bound() {
             let response = self.exchange(&WireRequest::Hello(sections), query_wait_timeout())?;
-            return match unpack_hello(response) {
-                Ok(response) => {
-                    let instance_id = u32::from_le_bytes(response.instance_id);
-                    if self
-                        .expected_instance
-                        .is_some_and(|expected| expected != instance_id)
-                    {
-                        self.disconnect();
-                        return Err(InstanceChanged.into());
-                    }
-                    self.session = SessionState::Bound(instance_id);
-                    Ok(state_response(response.state))
+            let (instance, state) = unpack_hello(response, sections, |instance| {
+                if self
+                    .expected_instance
+                    .is_some_and(|expected| expected != instance)
+                {
+                    return Err(InstanceChanged.into());
                 }
-                Err(error) => {
-                    self.disconnect();
-                    Err(error)
-                }
-            };
+                Ok(())
+            })
+            .inspect_err(|_| self.disconnect())?;
+            self.session = SessionState::Bound(instance);
+            return Ok(state);
         }
         let response = self.exchange(&WireRequest::ReadState(request), query_wait_timeout())?;
-        self.decode_state(response)
+        self.decode_state(response, request)
     }
 
-    fn decode_state(&mut self, response: WireResponse) -> Result<StateResponse> {
+    fn decode_state(
+        &mut self,
+        response: WireResponse,
+        request: StateRequest,
+    ) -> Result<StateResponse> {
         match unpack_error(response)? {
-            WireResponse::State(state) => Ok(state_response(state)),
+            WireResponse::State(state) => {
+                validate_state(state_response(state), request).inspect_err(|_| self.disconnect())
+            }
             _ => {
                 self.disconnect();
                 bail!("IPC response was not a state response")
@@ -360,7 +350,8 @@ impl ClientSession {
 
     pub fn query(&mut self, query: Query) -> Result<QueryResponse> {
         self.ensure_handshake()?;
-        self.exchange_query(query, Some(query_wait_timeout()), std::future::pending())
+        let read = self.next_query(query);
+        self.exchange_query(read, ResponseWait::Bounded(query_wait_timeout()))
     }
 
     /// Wait for physical query completion without a transport response deadline.
@@ -386,21 +377,25 @@ impl ClientSession {
                 result: Err(QueryError::Cancelled),
             });
         }
-        self.exchange_query(query, None, cancelled)
+        let read = self.next_query(query);
+        let id = read.id;
+        self.exchange_query(read, ResponseWait::RetainedQuery { id, cancelled })
+    }
+
+    fn next_query(&mut self, query: Query) -> WireReadQuery {
+        self.next_query_id = self.next_query_id.wrapping_add(1);
+        WireReadQuery {
+            id: self.next_query_id,
+            query: WireQuery::from(query),
+        }
     }
 
     fn exchange_query(
         &mut self,
-        query: Query,
-        wait_timeout: Option<Duration>,
-        cancelled: impl Future<Output = ()>,
+        read: WireReadQuery,
+        wait: ResponseWait<'_>,
     ) -> Result<QueryResponse> {
-        self.next_query_id = self.next_query_id.wrapping_add(1);
-        let request = WireRequest::Query(WireReadQuery {
-            id: self.next_query_id,
-            query: WireQuery::from(query),
-        });
-        let response = self.exchange_until(&request, wait_timeout, &mut false, cancelled)?;
+        let response = self.exchange_until(&WireRequest::Query(read), wait, &mut false)?;
         // A protocol error can be a terminal rejection of the connection.
         // Typed query failures remain inside QueryResponse and are reusable.
         let response = unpack_error(response).inspect_err(|_| self.disconnect())?;
@@ -430,7 +425,11 @@ impl ClientSession {
         target: rivu_protocol::model::TaskTarget,
     ) -> Result<rivu_protocol::response::TaskOutcome> {
         self.ensure_handshake()?;
-        let response = self.exchange(&WireRequest::WaitTask(target), query_wait_timeout())?;
+        let response = self.exchange_until(
+            &WireRequest::WaitTask(target),
+            ResponseWait::Indefinite,
+            &mut false,
+        )?;
         match response {
             WireResponse::Task(Ok(outcome)) => {
                 use rivu_protocol::{
@@ -484,7 +483,11 @@ impl ClientSession {
         let request = WireRequest::Command(WireCommand::from(command));
         let mut write_started = false;
         let result = self
-            .exchange_with_write_evidence(&request, wait_timeout, &mut write_started)
+            .exchange_until(
+                &request,
+                ResponseWait::Bounded(wait_timeout),
+                &mut write_started,
+            )
             .and_then(unpack_error)
             .and_then(|response| match response {
                 WireResponse::Command(reply) => Ok(reply),
@@ -517,8 +520,27 @@ impl ClientSession {
     pub fn wait_state_until(&mut self, watch: StateWatch) -> Result<Option<StateResponse>> {
         let response = self
             .ensure_handshake()
-            .and_then(|()| self.exchange(&WireRequest::WaitState(watch), query_wait_timeout()))
-            .and_then(|response| self.decode_state(response));
+            .and_then(|()| {
+                self.exchange_until(
+                    &WireRequest::WaitState(watch),
+                    ResponseWait::Indefinite,
+                    &mut false,
+                )
+            })
+            .and_then(|response| {
+                let state = self.decode_state(
+                    response,
+                    StateRequest {
+                        sections: watch.sections,
+                        since: Some(watch.revisions),
+                    },
+                )?;
+                anyhow::ensure!(
+                    !state.sections().is_empty(),
+                    "IPC state wait returned no changed sections"
+                );
+                Ok(state)
+            });
         match response {
             Ok(state) => Ok(Some(state)),
             Err(error) => {
@@ -856,7 +878,21 @@ mod tests {
                     .unwrap();
             let server = std::thread::spawn(move || {
                 let mut stream = listener.accept().unwrap().0;
-                complete_test_handshake_for_instance(&mut stream, 22);
+                assert!(matches!(
+                    read_test_request(&mut stream),
+                    WireRequest::Hello(_)
+                ));
+                // The pinned identity takes precedence even over invalid state sections.
+                write_test_response(
+                    &mut stream,
+                    WireResponse::Hello(HelloResponse {
+                        instance_id: 22u32.to_le_bytes(),
+                        state: wire_state(StateResponse {
+                            current_track: Some(Default::default()),
+                            ..Default::default()
+                        }),
+                    }),
+                );
                 // A mismatched Hello must close the connection, not emit a task frame.
                 assert_eq!(stream.read(&mut [0]).unwrap(), 0);
             });
@@ -1253,6 +1289,10 @@ mod tests {
             configuration: true,
             ..Default::default()
         };
+        let initial_sections = StateSections {
+            system: true,
+            ..configuration
+        };
         let server = std::thread::spawn(move || {
             let mut stream = listener.accept().unwrap().0;
             stream
@@ -1262,7 +1302,7 @@ mod tests {
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             assert!(
-                matches!(read_test_request(&mut stream), WireRequest::Hello(sections) if sections == StateSections::ALL)
+                matches!(read_test_request(&mut stream), WireRequest::Hello(sections) if sections == initial_sections)
             );
             write_test_response(
                 &mut stream,
@@ -1325,7 +1365,7 @@ mod tests {
         });
         let mut client = client_session(directory.path());
         // Even an equal-looking baseline cannot suppress the first snapshot.
-        let first = client.get_state_since(StateSections::ALL, initial).unwrap();
+        let first = client.get_state_since(initial_sections, initial).unwrap();
         assert!(first.system.is_some());
         assert!(first.configuration.is_some());
         client.bind_instance(1).unwrap();

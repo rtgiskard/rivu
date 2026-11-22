@@ -208,7 +208,7 @@ impl Shared {
         let _owner = self.refresh.lock();
         let current = self.published.read().observed.applied();
         let response = session.get_state_since(StateSections::ALL, current)?;
-        self.apply_state_delta(current, response)
+        self.apply_state_delta(response)
     }
 
     fn apply_waited_state(&self, baseline: StateRevisions, response: StateResponse) -> Result<()> {
@@ -218,16 +218,12 @@ impl Shared {
             // The next wait captures the applied baseline again.
             return Ok(());
         }
-        self.apply_state_delta(baseline, response)
+        self.apply_state_delta(response)
     }
 
     // The caller holds refresh across the baseline check and the merge.
-    fn apply_state_delta(&self, baseline: StateRevisions, response: StateResponse) -> Result<()> {
-        let expected = response.revisions.changed_since(baseline);
-        let received = response.sections();
-        let complete = received.intersection(expected) == expected;
-        anyhow::ensure!(complete, "Incomplete GUI state refresh");
-        if !received.is_empty() {
+    fn apply_state_delta(&self, response: StateResponse) -> Result<()> {
+        if !response.sections().is_empty() {
             anyhow::ensure!(
                 self.merge(response),
                 "GUI disconnected before state refresh"
@@ -374,10 +370,6 @@ impl FrontendRuntime {
         let mut watcher = client_session_with_cancel(data_dir, stop.clone());
         watcher.bind_instance(expected_instance)?;
         let initial = watcher.get_state(StateSections::ALL)?;
-        anyhow::ensure!(
-            initial.sections() == StateSections::ALL,
-            "Incomplete initial GUI state"
-        );
         let instance_id = watcher
             .instance_id()
             .context("GUI Hello did not bind an instance")?;
@@ -1509,7 +1501,7 @@ mod tests {
         session.bind_instance(instance_id).unwrap();
         session.get_state(StateSections::default()).unwrap();
         let error = shared.refresh_state(&mut session).unwrap_err();
-        assert!(error.to_string().contains("Incomplete GUI state refresh"));
+        assert!(error.to_string().contains("IPC state sections mismatch"));
         assert_eq!(shared.published.read().publication, publication);
         assert_eq!(shared.published.read().observed.applied(), baseline);
         server.join().unwrap();

@@ -617,3 +617,115 @@ fn owner_cancel_sends_identified_control_and_returns_the_physical_reply_before_t
     assert!(matches!(next.result, Ok(ViewResponse::Track(None))));
     server.join().unwrap();
 }
+
+#[test]
+fn malformed_state_payloads_close_the_session_and_require_a_full_hello() {
+    use rivu_protocol::test_support::test_state;
+    use std::{io::Read, os::unix::net::UnixListener};
+
+    if isolate_socket_test() {
+        return;
+    }
+    let system = StateSections {
+        system: true,
+        ..Default::default()
+    };
+    let empty = StateSections::default();
+    let baseline = StateRevisions::default();
+    let changed = StateRevisions {
+        system: u64::MAX,
+        ..baseline
+    };
+    let full = WireRequest::ReadState(system.into());
+    let conditional = || {
+        WireRequest::ReadState(StateRequest {
+            sections: system,
+            since: Some(baseline),
+        })
+    };
+    let wait = || {
+        WireRequest::WaitState(StateWatch {
+            sections: system,
+            revisions: baseline,
+        })
+    };
+    for (request, revisions, received) in [
+        (WireRequest::Hello(system), baseline, empty),
+        (WireRequest::Hello(empty), baseline, system),
+        (full, baseline, empty),
+        (conditional(), changed, empty),
+        (conditional(), baseline, system),
+        (conditional(), changed, StateSections::ALL),
+        (wait(), changed, empty),
+        (wait(), baseline, empty),
+        (wait(), changed, StateSections::ALL),
+    ] {
+        let directory = socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::wire::address(directory.path()).unwrap())
+                .unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut stream = listener.accept().unwrap().0;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                if !matches!(request, WireRequest::Hello(_)) {
+                    complete_test_handshake(&mut stream);
+                }
+                let state = wire_state(StateResponse {
+                    revisions,
+                    ..test_state(received)
+                });
+                let response = match (&request, read_test_request(&mut stream)) {
+                    (WireRequest::Hello(selected), WireRequest::Hello(actual))
+                        if *selected == actual =>
+                    {
+                        WireResponse::Hello(HelloResponse {
+                            instance_id: 1u32.to_le_bytes(),
+                            state,
+                        })
+                    }
+                    (WireRequest::ReadState(request), WireRequest::ReadState(actual))
+                        if *request == actual =>
+                    {
+                        WireResponse::State(state)
+                    }
+                    (WireRequest::WaitState(watch), WireRequest::WaitState(actual))
+                        if *watch == actual =>
+                    {
+                        WireResponse::State(state)
+                    }
+                    _ => panic!("unexpected state request"),
+                };
+                write_test_response(&mut stream, response);
+                assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+                let mut fresh = listener.accept().unwrap().0;
+                complete_test_handshake(&mut fresh);
+            });
+            let mut client = client_session(directory.path());
+            if !matches!(request, WireRequest::Hello(_)) {
+                client.get_state(empty).unwrap();
+            }
+            let result = match request {
+                WireRequest::Hello(sections) => client.get_state_since(sections, baseline),
+                WireRequest::ReadState(StateRequest {
+                    sections,
+                    since: Some(since),
+                }) => client.get_state_since(sections, since),
+                WireRequest::ReadState(StateRequest {
+                    sections,
+                    since: None,
+                }) => client.get_state(sections),
+                WireRequest::WaitState(watch) => client.wait_state(watch),
+                _ => unreachable!(),
+            };
+            assert!(result.unwrap_err().to_string().contains("IPC state"));
+            assert_eq!(client.instance_id(), None);
+            assert_eq!(
+                client.get_state_since(system, baseline).unwrap().sections(),
+                system
+            );
+        });
+    }
+}

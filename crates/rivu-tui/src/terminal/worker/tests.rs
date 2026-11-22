@@ -412,7 +412,6 @@ fn watcher_applies_wait_deltas_without_another_read_and_keeps_shutdown() {
     }
     let (directory, listener) = fake_core();
     let (continue_watch, continuation) = bounded(1);
-    let (ignored, ignored_update) = bounded(1);
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         stream
@@ -426,7 +425,7 @@ fn watcher_applies_wait_deltas_without_another_read_and_keeps_shutdown() {
             &mut stream,
             WireResponse::Hello(HelloResponse {
                 instance_id: 1u32.to_le_bytes(),
-                state: wire_state(StateResponse::default()),
+                state: wire_state(rivu_protocol::test_support::test_state(TERMINAL_SECTIONS)),
             }),
         );
         assert!(
@@ -434,32 +433,14 @@ fn watcher_applies_wait_deltas_without_another_read_and_keeps_shutdown() {
             if watch.sections == TERMINAL_SECTIONS)
         );
         continuation.recv_timeout(Duration::from_secs(5)).unwrap();
-        let processing_only = StateRevisions {
-            processing: 1,
-            ..Default::default()
-        };
-        // No interested payload means no publication or applied token advance.
-        write_test_response(
-            &mut stream,
-            WireResponse::State(wire_state(StateResponse {
-                revisions: processing_only,
-                ..Default::default()
-            })),
-        );
-        assert!(matches!(
-            ipc::read_test_request(&mut stream),
-            WireRequest::WaitState(watch) if watch.revisions == StateRevisions::default()
-                && watch.sections == TERMINAL_SECTIONS
-        ));
-        ignored.send(()).unwrap();
-        continuation.recv_timeout(Duration::from_secs(5)).unwrap();
         write_test_response(
             &mut stream,
             WireResponse::State(wire_state(StateResponse {
                 revisions: StateRevisions {
                     playback: 2,
                     system: 1,
-                    ..processing_only
+                    processing: 1,
+                    ..Default::default()
                 },
                 playback: Some(rivu_protocol::response::PlaybackSnapshot {
                     playback: rivu_protocol::model::PlaybackState {
@@ -484,10 +465,6 @@ fn watcher_applies_wait_deltas_without_another_read_and_keeps_shutdown() {
         .unwrap();
     let (_, initial) = watcher.take_update().unwrap().unwrap();
     assert!(initial.processing.is_none());
-    continue_watch.send(()).unwrap();
-    ignored_update.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(watcher.latest.lock().is_none());
-    assert!(watcher.receiver.try_recv().is_err());
     continue_watch.send(()).unwrap();
     watcher
         .receiver

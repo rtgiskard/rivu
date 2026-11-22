@@ -40,16 +40,17 @@ async fn probe(data_dir: &Path, deadline: Instant) -> Result<u32> {
         let mut stream = connect(data_dir)
             .await
             .context("Connecting to Rivu service")?;
+        let sections = StateSections::default();
         write_request_frame_buffered(
             &mut stream,
-            &WireRequest::Hello(StateSections::default()),
+            &WireRequest::Hello(sections),
             &mut Vec::new(),
             &mut false,
         )
         .await?;
         let response = read_response_frame(&mut stream, &mut bytes::BytesMut::new()).await?;
-        let hello = unpack_hello(response)?;
-        Ok(u32::from_le_bytes(hello.instance_id))
+        let (instance, _) = unpack_hello(response, sections, |_| Ok(()))?;
+        Ok(instance)
     })
     .await
     .context("Waiting for service Hello readiness timed out")?

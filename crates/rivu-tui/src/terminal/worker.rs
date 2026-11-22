@@ -96,9 +96,6 @@ pub(super) fn spawn_watcher(data_dir: &Path, instance_id: u32) -> Watcher {
                 sections: TERMINAL_SECTIONS,
             }) {
                 Ok(Some(response)) => {
-                    if response.sections().is_empty() {
-                        continue;
-                    }
                     state.apply(state.instance_id(), response);
                     let shutting_down = state.snapshot().system.shutting_down;
                     *latest_worker.lock() =
