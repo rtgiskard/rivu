@@ -865,6 +865,16 @@ pub enum Command {
         name: String,
         track_ids: Vec<i64>,
     },
+    SetAlbumFavorite {
+        key: AlbumKey,
+        revision: u64,
+        favorite: bool,
+    },
+    CreatePlaylistFromAlbum {
+        key: AlbumKey,
+        revision: u64,
+        name: String,
+    },
     CreatePlaylistFromQueue {
         name: String,
     },

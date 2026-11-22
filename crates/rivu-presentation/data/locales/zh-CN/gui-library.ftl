@@ -548,4 +548,3 @@ li-remove-root = 移除音乐库目录…
 li-confirm-remove-root = 将此目录从音乐库目录配置中移除？已入库曲目和磁盘文件均会保留。
 li-remove-root-confirm = 移除音乐库目录
 li-source-changed = 来源已改变，请重试。
-li-source-busy = 正在加载集合，请稍后重试。

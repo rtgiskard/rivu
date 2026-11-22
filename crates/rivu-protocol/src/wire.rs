@@ -18,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 53;
+pub const PROTOCOL_VERSION: u8 = 54;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -584,6 +584,16 @@ pub enum WireCommand {
     },
     AdjustSpeed {
         delta: f64,
+    },
+    SetAlbumFavorite {
+        key: crate::model::AlbumKey,
+        revision: u64,
+        favorite: bool,
+    },
+    CreatePlaylistFromAlbum {
+        key: crate::model::AlbumKey,
+        revision: u64,
+        name: String,
     },
 }
 
@@ -1247,6 +1257,24 @@ impl From<Command> for WireCommand {
             Command::CreatePlaylistWithTracks { name, track_ids } => {
                 Self::CreatePlaylistWithTracks { name, track_ids }
             }
+            Command::SetAlbumFavorite {
+                key,
+                revision,
+                favorite,
+            } => Self::SetAlbumFavorite {
+                key,
+                revision,
+                favorite,
+            },
+            Command::CreatePlaylistFromAlbum {
+                key,
+                revision,
+                name,
+            } => Self::CreatePlaylistFromAlbum {
+                key,
+                revision,
+                name,
+            },
             Command::RenamePlaylist { playlist_id, name } => {
                 Self::RenamePlaylist { playlist_id, name }
             }
@@ -1578,6 +1606,24 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::CreatePlaylistWithTracks { name, track_ids } => {
                 Self::CreatePlaylistWithTracks { name, track_ids }
             }
+            WireCommand::SetAlbumFavorite {
+                key,
+                revision,
+                favorite,
+            } => Self::SetAlbumFavorite {
+                key,
+                revision,
+                favorite,
+            },
+            WireCommand::CreatePlaylistFromAlbum {
+                key,
+                revision,
+                name,
+            } => Self::CreatePlaylistFromAlbum {
+                key,
+                revision,
+                name,
+            },
             WireCommand::RenamePlaylist { playlist_id, name } => {
                 Self::RenamePlaylist { playlist_id, name }
             }

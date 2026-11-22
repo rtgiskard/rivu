@@ -1,12 +1,14 @@
+use super::albums::album_filter;
 use super::positions::{close_gaps, move_selection};
 use super::rows::cue_from_row;
 use super::tracks::{SOURCE_FILTER, search_filter, search_query, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
 use crate::library::PlaylistExportTrack;
 use anyhow::{Context, Result, anyhow, bail};
+use rivu_format::database::ORDER;
 use rivu_protocol::model::{
-    Batch, BatchContinuation, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow,
-    PlaylistSummary, QueryStamp,
+    AlbumKey, Batch, BatchContinuation, Page, PlaylistEntryCursor, PlaylistEntryLocation,
+    PlaylistEntryRow, PlaylistSummary, QueryStamp,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
@@ -464,6 +466,27 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let id = insert_playlist(&tx, name)?;
         append_tracks(&tx, id, tracks)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub(crate) fn create_playlist_from_album(&self, name: &str, key: &AlbumKey) -> Result<i64> {
+        let directory = key
+            .directory
+            .to_str()
+            .context("Album directory is not UTF-8")?;
+        let tx = self.conn.unchecked_transaction()?;
+        let id = insert_playlist(&tx, name)?;
+        let inserted = tx.execute(
+            &format!(
+                "INSERT INTO playlist_entries(playlist_id,track_id,position)
+                SELECT ?3,id,row_number() OVER (ORDER BY {ORDER})-1
+                FROM tracks INDEXED BY tracks_album_members WHERE {} ORDER BY {ORDER}",
+                album_filter()
+            ),
+            params![directory, key.title, id],
+        )?;
+        anyhow::ensure!(inserted != 0, "Album is empty");
         tx.commit()?;
         Ok(id)
     }

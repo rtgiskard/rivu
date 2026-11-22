@@ -125,12 +125,6 @@ link:21_ipc.adoc#query-results-and-pagination[IPC query stamps].
 Each listing displays the current page query's count: all entries when unfiltered,
 or matching entries during search. No separate unfiltered count is read for search.
 
-Whole-album ID collection accepts each successful page against the album token
-and current collection intent. Core still validates the full `AlbumTracks`
-stamp for each retained page: a concurrent statistics or bitrate update can
-return `RevisionChanged` before GUI acceptance. Membership or order changes
-also revoke the accumulated selection.
-
 Range anchors can survive bitrate-only changes, but range responses still need
 their full stamp. Hover uses retained rows rather than requesting Track again.
 
@@ -229,16 +223,9 @@ validity is independent of operation progress.
 |One read coordinator; explicit selections query Track, while playback-follow uses
 Core's current-track projection. Inline text and field-specific save acceptance
 have a separate owner; reads never overwrite the active input.
-|Collection resolution
-|Opening an album menu retains its identity, not all member IDs. Favorite,
-Unfavorite, and New playlist use one cancellable paged reader only after selection;
-that operation accumulates the complete ID selection before publishing it. Bounded
-pages and a single physical reader do not bound the final selection's size.
-Queue/Playlist copies instead use
-link:21_ipc.adoc#ordered-collections-and-transaction-ownership[versioned Core resolution]
-and bypass the GUI ID-reader gate. Loading retains menu-scope focus. Cancellation
-keeps the physical gate until its matching completion, which notifies the window
-even when the logical result is stale.
+|Whole-album actions
+|The menu and playlist name dialog retain the album key and revision, not
+member IDs. Core validates membership before applying the command.
 |Duplicate review
 |Stable selected identities survive reference refreshes, but commands require
 current facts. A failed or timed-out status read does not release the relocation

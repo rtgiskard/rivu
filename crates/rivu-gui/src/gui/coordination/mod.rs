@@ -1,5 +1,4 @@
 //! Window coordination of feature intents; feature models and workers remain owner-local.
-pub(super) mod collection;
 pub(super) mod content_menu;
 pub(super) mod manual_actions;
 pub(super) mod queue_replace;

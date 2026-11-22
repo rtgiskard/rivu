@@ -106,7 +106,13 @@ impl WindowView {
             return;
         }
         // Leaving an editor is one operation; dismissing its containing surface is another.
-        if cancel && self.input_focused(window, cx) {
+        if cancel
+            && surface
+                != Some(shell::KeyboardSurface::Dialog(
+                    shell::DialogSurface::PlaylistEditor,
+                ))
+            && self.input_focused(window, cx)
+        {
             self.metadata
                 .update(cx, |metadata, cx| metadata.cancel_edit(cx));
             self.focus_keyboard_surface(window, cx);

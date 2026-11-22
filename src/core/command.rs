@@ -120,6 +120,14 @@ impl Core {
         })
     }
 
+    fn require_current_album(&self, revision: u64) -> Result<()> {
+        ensure!(
+            self.state.library.album_revision == revision,
+            "Library changed. Reselect the album and try again."
+        );
+        Ok(())
+    }
+
     fn apply_command(&mut self, command: Command) -> Result<CommandExecution> {
         self.source_tag_control(&command)?;
         match command {
@@ -465,6 +473,15 @@ impl Core {
             Command::CreatePlaylistWithTracks { name, track_ids } => {
                 self.create_playlist_with_tracks(name, track_ids)?;
             }
+            Command::CreatePlaylistFromAlbum {
+                key,
+                revision,
+                name,
+            } => {
+                self.require_current_album(revision)?;
+                let id = self.store.create_playlist_from_album(&name, &key)?;
+                self.playlist_created(id, true)?;
+            }
             Command::CreatePlaylistFromQueue { name } => {
                 let (id, has_members) = self.store.create_playlist_from_queue(&name)?;
                 self.playlist_created(id, has_members)?;
@@ -602,6 +619,16 @@ impl Core {
                 track_ids,
                 favorite,
             } => self.set_favorite(&track_ids, favorite)?,
+            Command::SetAlbumFavorite {
+                key,
+                revision,
+                favorite,
+            } => {
+                self.require_current_album(revision)?;
+                let track_ids = self.store.album_track_ids(&key)?;
+                ensure!(!track_ids.is_empty(), "Album is empty");
+                self.set_favorite(&track_ids, favorite)?;
+            }
             Command::ToggleFavorite { track_ids } => self.toggle_favorite(&track_ids)?,
             Command::RemoveMissingTracks => self.remove_missing_tracks()?,
             Command::Device { name } => {

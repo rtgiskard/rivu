@@ -2,14 +2,6 @@ use super::*;
 use std::collections::HashMap;
 
 impl Core {
-    pub(in crate::core) fn invalidate_collection_impacts(&mut self, queue: bool, albums: bool) {
-        if queue {
-            self.advance_queue_revision();
-        }
-        if albums {
-            self.state.library.album_revision = self.state.library.album_revision.wrapping_add(1);
-        }
-    }
     pub(in crate::core) fn track(&self, id: i64) -> Result<Track> {
         self.store.track(id)?.context("Track not found")
     }
@@ -332,7 +324,9 @@ impl Core {
         favorite: bool,
     ) -> Result<()> {
         let impact = self.store.set_favorite(track_ids, favorite)?;
-        self.invalidate_collection_impacts(impact.queue, impact.albums);
+        if impact.queue {
+            self.advance_queue_revision();
+        }
         if impact.changed {
             self.state.library.count_revision = self.state.library.count_revision.wrapping_add(1);
             self.state
@@ -347,7 +341,9 @@ impl Core {
 
     pub(in crate::core) fn toggle_favorite(&mut self, track_ids: &[i64]) -> Result<()> {
         let impact = self.store.toggle_favorite(track_ids)?;
-        self.invalidate_collection_impacts(impact.queue, impact.albums);
+        if impact.queue {
+            self.advance_queue_revision();
+        }
         if impact.changed {
             self.state.library.count_revision = self.state.library.count_revision.wrapping_add(1);
             self.state
@@ -466,7 +462,9 @@ impl Core {
         track_id: i64,
         stats: crate::store::TrackStats,
     ) -> Result<()> {
-        self.invalidate_collection_impacts(stats.queue, false);
+        if stats.queue {
+            self.advance_queue_revision();
+        }
         if stats.changed {
             self.state
                 .library

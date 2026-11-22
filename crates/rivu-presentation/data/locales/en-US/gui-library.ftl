@@ -599,4 +599,3 @@ li-remove-root = Remove library folder…
 li-confirm-remove-root = Remove this folder from the configured library roots? Indexed tracks and files on disk will be kept.
 li-remove-root-confirm = Remove library folder
 li-source-changed = Source changed. Try again.
-li-source-busy = A collection is loading. Try again shortly.

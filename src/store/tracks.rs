@@ -248,7 +248,6 @@ struct TrackTagPatch<'a> {
 pub struct FavoriteImpact {
     pub changed: bool,
     pub queue: bool,
-    pub albums: bool,
     pub tracks: Option<Vec<i64>>,
     pub playlists: Option<Vec<i64>>,
 }
@@ -1685,13 +1684,12 @@ fn favorite_metadata(
         )?,
         None => None,
     };
-    let (queue, albums) = conn.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM tracks AS t JOIN playlist_entries AS q ON q.track_id=t.id WHERE q.playlist_id=0 AND t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2)), EXISTS(SELECT 1 FROM tracks AS t WHERE t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2) AND {})", super::albums::eligible_member("t")),
-        params![encoded_ids, favorite], |row| Ok((row.get(0)?, row.get(1)?)),
+    let queue = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tracks AS t JOIN playlist_entries AS q ON q.track_id=t.id WHERE q.playlist_id=0 AND t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2))",
+        params![encoded_ids, favorite], |row| row.get(0),
     )?;
     Ok(FavoriteImpact {
         queue,
-        albums,
         tracks,
         playlists,
         ..Default::default()
@@ -2354,11 +2352,11 @@ mod request_tests {
         assert!(display.library && display.albums && !display.queue);
         assert_eq!(display.playlists, Some(vec![playlist]));
         let plain = store.set_favorite(&[3], true)?;
-        assert!(plain.changed && plain.queue && !plain.albums);
+        assert!(plain.changed && plain.queue);
         let album = store.set_favorite(&[2], true)?;
-        assert!(album.changed && album.albums && !album.queue);
+        assert!(album.changed && !album.queue);
         let noop = store.set_favorite(&[2], true)?;
-        assert!(!noop.changed && !noop.queue && !noop.albums);
+        assert!(!noop.changed && !noop.queue);
         let removal = store.prepare_track_removal(&[2])?;
         let removed = store.remove_prepared_tracks(removal)?;
         assert_eq!(removed.removed, 1);

@@ -1,6 +1,6 @@
 use super::{PlaylistEvent, Playlists};
 use gpui::{AnyElement, Context, Focusable, Window, div, prelude::*, rems};
-use rivu_protocol::model::Command;
+use rivu_protocol::model::{AlbumKey, Command};
 use rivu_ui::{
     FormField, IconButton, IconButtonDensity, IconButtonStyle, StatusKind, caption, column, row,
     status_message,
@@ -8,6 +8,7 @@ use rivu_ui::{
 
 pub(in crate::gui) enum PlaylistNameAction {
     Create { track_ids: Vec<i64> },
+    CreateFromAlbum { key: AlbumKey, revision: u64 },
     Rename { playlist_id: i64 },
     SaveQueue,
 }
@@ -20,11 +21,27 @@ pub(in crate::gui) struct PlaylistEditor {
 
 impl Playlists {
     #[cfg(test)]
-    pub(in crate::gui) fn staged_create_tracks(&self) -> Option<&[i64]> {
+    pub(in crate::gui) fn staged_create_album(&self) -> Option<(&AlbumKey, u64)> {
         match &self.playlist_editor.as_ref()?.action {
-            PlaylistNameAction::Create { track_ids } => Some(track_ids),
+            PlaylistNameAction::CreateFromAlbum { key, revision } => Some((key, *revision)),
             _ => None,
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::gui) fn submit_test_name(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.name_input
+            .update(cx, |input, cx| input.set_text(name.to_owned(), cx));
+        self.submit_playlist_name(cx);
+    }
+
+    #[cfg(test)]
+    pub(in crate::gui) fn test_name_error<'a>(
+        &'a self,
+        cx: &'a gpui::App,
+    ) -> Option<(&'a str, &'a str)> {
+        let error = self.playlist_editor.as_ref()?.error.as_deref()?;
+        Some((self.name_input.read(cx).text(), error))
     }
 
     pub(in crate::gui) fn begin_playlist_name(
@@ -91,6 +108,13 @@ impl Playlists {
                 name,
                 track_ids: track_ids.clone(),
             },
+            PlaylistNameAction::CreateFromAlbum { key, revision } => {
+                Command::CreatePlaylistFromAlbum {
+                    key: key.clone(),
+                    revision: *revision,
+                    name,
+                }
+            }
             PlaylistNameAction::Rename { playlist_id } => Command::RenamePlaylist {
                 playlist_id: *playlist_id,
                 name,
@@ -136,7 +160,7 @@ impl Playlists {
         let theme = rivu_ui::theme::palette(cx);
         let editor = self.playlist_editor.as_ref().expect("playlist editor open");
         let (title, submit) = match editor.action {
-            PlaylistNameAction::Create { .. } => (
+            PlaylistNameAction::Create { .. } | PlaylistNameAction::CreateFromAlbum { .. } => (
                 self.tr("gl-playlist-new-title"),
                 self.tr("gl-playlist-create"),
             ),

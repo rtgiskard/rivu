@@ -254,10 +254,11 @@ individually. Transfers, Favorite, Unfavorite, and New playlist reject changed
 album membership rather than using stale or partial results. External database
 edits while Rivu is running are unsupported.
 
-Press Esc or Left to cancel loading for Favorite, Unfavorite, or New playlist.
-A cancelled action cannot later change favorites or open the playlist dialog.
-See link:22_cache.adoc#demand-cancellation-and-physical-retirement[collection resolution]
-for internal loading and source-identity rules.
+New playlist opens the naming dialog immediately. Press Esc or click Cancel to
+discard the draft before submitting. Core creates the playlist with the complete
+album in album order. Changing favorites does not invalidate the draft. If the
+album catalog has changed, submission is refused and the name stays in the
+dialog; reopen the action from the current album to try again.
 
 Search matches album titles or member artists across the library. An artist match
 keeps the complete album, including other artists' tracks. The sort icon switches

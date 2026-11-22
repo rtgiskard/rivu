@@ -155,17 +155,13 @@ impl WindowView {
                 });
             }
             ManualAction::Close(window) => {
-                self.content_resolution.cancel();
                 cx.defer(move |cx| {
                     let _ = window.update(cx, |_, window, _| {
                         window.remove_window();
                     });
                 });
             }
-            ManualAction::Quit => {
-                self.content_resolution.cancel();
-                self.finish_quit();
-            }
+            ManualAction::Quit => self.finish_quit(),
         }
         cx.notify();
     }

@@ -105,7 +105,6 @@ pub(crate) struct WindowView {
     pub(super) layout_action: Option<layout::layout_dialog::Action>,
     pub(super) panel_menu: Option<PanelMenu>,
     pub(super) content_menu: Option<coordination::content_menu::ContentMenu>,
-    pub(super) content_resolution: coordination::collection::CollectionResolution,
     pub(super) waveform: Entity<visualization::Waveform>,
     pub(super) full_waveform_request: FullWaveformRequest,
     pending_full_waveform: Option<PendingWaveformScan>,
@@ -747,7 +746,6 @@ impl WindowView {
             layout_action: None,
             panel_menu: None,
             content_menu: None,
-            content_resolution: coordination::collection::CollectionResolution::default(),
             waveform,
             full_waveform_request: FullWaveformRequest::default(),
             pending_full_waveform: None,
@@ -767,7 +765,6 @@ impl WindowView {
         app.shell.layout_focus().focus(window, cx);
         window
             .observe_release(&cx.entity(), cx, |this: &mut Self, window, cx| {
-                this.content_resolution.cancel();
                 this.release_display_resources(window, cx);
             })
             .detach();
@@ -855,7 +852,6 @@ impl WindowView {
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
         self.replace_content_menu(None, cx);
-        self.content_resolution.cancel();
         cx.notify();
     }
 
@@ -886,7 +882,6 @@ impl WindowView {
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
         self.replace_content_menu(None, cx);
-        self.content_resolution.cancel();
         self.set_browser_focus(None, cx);
         for view in self.panel_views.values() {
             view.update(cx, |_, cx| cx.notify());
@@ -902,9 +897,6 @@ impl WindowView {
             self.waveform
                 .update(cx, |waveform, cx| waveform.sync(track, cx));
             return;
-        }
-        if state.system.shutting_down && !self.state.system.shutting_down {
-            self.content_resolution.cancel();
         }
         let changed = state.revisions.changed_since(self.state.revisions);
         let error_changed = state.system.last_error != self.state.system.last_error;

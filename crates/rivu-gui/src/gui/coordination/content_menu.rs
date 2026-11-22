@@ -1,5 +1,4 @@
-//! Window-owned content menus and asynchronous collection resolution.
-use super::collection::{CollectionRead, resolve_album};
+//! Window-owned content menus.
 use crate::gui::{
     library::LibraryNode,
     list_interaction::{ContentGuard, ContentMenuRequest, DragDestination, TrackSource},
@@ -7,7 +6,7 @@ use crate::gui::{
     window::WindowView,
 };
 use gpui::{prelude::*, *};
-use rivu_protocol::model::{Command, Query};
+use rivu_protocol::model::Command;
 use rivu_ui::{POPOVER_MAX_REMS, Popover, caption, menu_item};
 use std::{collections::HashSet, path::PathBuf};
 
@@ -98,7 +97,6 @@ impl PlaylistTargets {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::gui) enum ContentMenuPage {
     Actions,
-    Resolving,
     Playlists,
     ConfirmRemove(RemoveTarget),
 }
@@ -133,47 +131,11 @@ enum ContentAction {
 }
 
 impl WindowView {
-    fn begin_content_resolution(&mut self, cx: &mut Context<Self>) -> Option<CollectionRead> {
-        let Some(read) = self.content_resolution.begin() else {
-            self.error = Some(self.i18n.text("li-source-busy").to_owned());
-            cx.notify();
-            return None;
-        };
-        Some(read)
-    }
-
-    fn finish_content_resolution(&mut self, read: &CollectionRead, cx: &mut Context<Self>) -> bool {
-        if !self.content_resolution.finish(read) {
-            return false;
-        }
-        self.refresh(cx);
-        cx.notify();
-        read.ticket.is_current() && self.window_visible && !self.state.system.shutting_down
-    }
-
-    fn timeout_content_resolution(
-        &mut self,
-        read: &CollectionRead,
-        response: rivu_protocol::response::QueryResponse,
-        current: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.content_resolution.timeout(read) {
-            return;
-        }
-        self.replace_content_menu(None, cx);
-        if current && self.window_visible && !self.state.system.shutting_down {
-            self.error = response.result.err().map(|error| error.to_string());
-            cx.notify();
-        }
-    }
-
     pub(in crate::gui) fn replace_content_menu(
         &mut self,
         menu: Option<ContentMenu>,
         cx: &mut Context<Self>,
     ) -> Option<ContentMenu> {
-        self.content_resolution.cancel();
         let previous = std::mem::replace(&mut self.content_menu, menu);
         if previous
             .as_ref()
@@ -273,96 +235,6 @@ impl WindowView {
             restore_playlist_trigger: false,
         });
         self.replace_content_menu(menu, cx);
-    }
-
-    // Only favorites and creating a playlist need concrete IDs. Keep the menu's
-    // cancellation owner alive until the complete, revision-fenced read finishes.
-    fn resolve_content_action(&mut self, action: ContentAction, cx: &mut Context<Self>) {
-        let Some(menu) = self.content_menu.as_ref() else {
-            return;
-        };
-        let TrackSource::Album { key, revision } = &menu.source else {
-            return;
-        };
-        let key = key.clone();
-        let guard = menu.guard.clone();
-        let album_revision = *revision;
-        let Some(read) = self.begin_content_resolution(cx) else {
-            return;
-        };
-        self.set_content_menu_page(ContentMenuPage::Resolving, cx);
-        let ticket = read.ticket.clone();
-        let query = Query::AlbumTracks {
-            key: key.clone(),
-            query: None,
-            offset: 0,
-            limit: rivu_protocol::model::MAX_QUERY_ROWS,
-        };
-        let stamp = query.stamp(self.state.query_revisions(None));
-        let handle = self.handle.clone();
-        cx.spawn(async move |this, cx| {
-            let (result, _) = crate::gui::query::run(
-                handle,
-                cx,
-                move |handle| async move {
-                    resolve_album(
-                        |query, ticket| {
-                            let handle = handle.clone();
-                            async move { handle.query_if_current(query, ticket).await }
-                        },
-                        key,
-                        stamp,
-                        &ticket,
-                    )
-                    .await
-                },
-                |response, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        let current = guard.current(&this.state)
-                            && album_revision == this.state.library.album_revision;
-                        this.timeout_content_resolution(&read, response, current, cx);
-                    });
-                },
-            )
-            .await;
-            let _ = this.update(cx, |this, cx| {
-                if !this.finish_content_resolution(&read, cx) {
-                    return;
-                }
-                match result {
-                    Ok(ids)
-                        if guard.current(&this.state)
-                            && album_revision == this.state.library.album_revision =>
-                    {
-                        let menu = this.content_menu.as_mut().unwrap();
-                        menu.source = TrackSource::Tracks(ids);
-                        menu.page = ContentMenuPage::Actions;
-                        this.content_action(action, cx);
-                    }
-                    Ok(_) => {
-                        this.replace_content_menu(None, cx);
-                        this.error = Some(this.i18n.text("li-source-changed").to_owned());
-                    }
-                    Err(error)
-                        if matches!(
-                            error.downcast_ref::<rivu_protocol::response::QueryError>(),
-                            Some(
-                                rivu_protocol::response::QueryError::RevisionChanged
-                                    | rivu_protocol::response::QueryError::Cancelled
-                            )
-                        ) =>
-                    {
-                        this.replace_content_menu(None, cx);
-                    }
-                    Err(error) => {
-                        this.replace_content_menu(None, cx);
-                        this.error = Some(error.to_string());
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     pub(in crate::gui) fn drop_content(
@@ -510,22 +382,21 @@ impl WindowView {
         let Some(menu) = self.content_menu.as_ref() else {
             return;
         };
-        if menu.page == ContentMenuPage::Resolving
-            || !menu.guard.current(&self.state)
-            || matches!(menu.source, TrackSource::Album { revision, .. }
-                if revision != self.state.library.album_revision)
+        // These album mutations carry the original revision to Core, which
+        // checks it at execution time and reports how to recover if stale.
+        let album_mutation = matches!(menu.source, TrackSource::Album { .. })
+            && matches!(
+                action,
+                ContentAction::Favorite(_) | ContentAction::CreatePlaylist(_)
+            );
+        if !album_mutation
+            && (!menu.guard.current(&self.state)
+                || matches!(menu.source, TrackSource::Album { revision, .. }
+                    if revision != self.state.library.album_revision))
         {
             self.replace_content_menu(None, cx);
             self.error = Some(self.i18n.text("li-source-changed").to_owned());
             cx.notify();
-            return;
-        }
-        if matches!(
-            action,
-            ContentAction::Favorite(_) | ContentAction::CreatePlaylist(_)
-        ) && matches!(menu.source, TrackSource::Album { .. })
-        {
-            self.resolve_content_action(action, cx);
             return;
         }
         let menu = self.replace_content_menu(None, cx).unwrap();
@@ -561,36 +432,45 @@ impl WindowView {
                     }
                 }
             }
-            ContentAction::Favorite(favorite) => {
-                let TrackSource::Tracks(mut track_ids) = menu.source else {
-                    unreachable!("album favorites resolve before dispatch");
-                };
-                let mut seen = HashSet::new();
-                track_ids.retain(|id| seen.insert(*id));
-                if !track_ids.is_empty() {
+            ContentAction::Favorite(favorite) => match menu.source {
+                TrackSource::Album { key, revision } => {
                     self.send(
-                        Command::SetFavorite {
-                            track_ids,
+                        Command::SetAlbumFavorite {
+                            key,
+                            revision,
                             favorite,
                         },
                         cx,
                     );
                 }
-            }
+                TrackSource::Tracks(mut track_ids) => {
+                    let mut seen = HashSet::new();
+                    track_ids.retain(|id| seen.insert(*id));
+                    if !track_ids.is_empty() {
+                        self.send(
+                            Command::SetFavorite {
+                                track_ids,
+                                favorite,
+                            },
+                            cx,
+                        );
+                    }
+                }
+            },
             ContentAction::CreatePlaylist(window) => {
-                let TrackSource::Tracks(track_ids) = menu.source else {
-                    unreachable!("album playlist creation resolves before dispatch");
+                let action = match menu.source {
+                    TrackSource::Tracks(track_ids) => {
+                        playlists::PlaylistNameAction::Create { track_ids }
+                    }
+                    TrackSource::Album { key, revision } => {
+                        playlists::PlaylistNameAction::CreateFromAlbum { key, revision }
+                    }
                 };
                 let playlists = self.playlists.clone();
                 cx.defer(move |cx| {
                     let _ = window.update(cx, |_, window, cx| {
                         playlists.update(cx, |playlists, cx| {
-                            playlists.begin_playlist_name(
-                                playlists::PlaylistNameAction::Create { track_ids },
-                                String::new(),
-                                window,
-                                cx,
-                            );
+                            playlists.begin_playlist_name(action, String::new(), window, cx);
                         });
                     });
                 });
@@ -706,8 +586,7 @@ impl WindowView {
         }
     }
 
-    // Rendered controls belong to both this menu instance and this page. Async
-    // collection completion deliberately uses content_action directly instead.
+    // Rendered controls belong to both this menu instance and this page.
     fn content_menu_callback(
         state: &ContentMenu,
         callback: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
@@ -743,9 +622,7 @@ impl WindowView {
             .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
                 dismiss(this, window, cx);
             }));
-        if state.page == ContentMenuPage::Resolving {
-            menu = menu.child(caption(theme, self.tr("shell-loading")));
-        } else if let ContentMenuPage::ConfirmRemove(target) = state.page {
+        if let ContentMenuPage::ConfirmRemove(target) = state.page {
             let (description, label, action) = match target {
                 RemoveTarget::Selection => (
                     "li-confirm-remove",
@@ -1100,7 +977,10 @@ mod tests {
         test_support::{CoreRuntime, save_quiet_config},
     };
     use core::prelude::v1::test;
-    use rivu_protocol::{model::AlbumKey, response::ViewResponse};
+    use rivu_protocol::{
+        model::{AlbumKey, Query},
+        response::ViewResponse,
+    };
     use std::sync::Arc;
 
     struct Fixture {
@@ -1148,7 +1028,7 @@ mod tests {
         let ids = paths.map(|path| catalog.track_id(&path).unwrap().unwrap());
         drop(catalog);
         let runtime = CoreRuntime::start(directory.path(), &config).unwrap();
-        // Album order must differ from insertion order for the staged playlist check.
+        // Album order must differ from insertion order for the playlist check.
         for (track_id, title) in ids.into_iter().zip(["B", "C", "A", "Outside"]) {
             let ack =
                 futures::executor::block_on(runtime.handle.request_command(Command::EditTrack {
@@ -1183,8 +1063,7 @@ mod tests {
                 window,
                 cx,
             );
-            // Keep real Core wakeups off GPUI's deterministic scheduler. Tests
-            // enable the window only when an explicitly chosen read must finish.
+            // Keep real Core wakeups off GPUI's deterministic scheduler.
             app.handle.set_wakeup(|| {});
             app.window_visible = false;
             app.reconcile_feature_demand(cx);
@@ -1550,195 +1429,89 @@ mod tests {
     }
 
     #[gpui::test]
-    fn album_open_dismiss_and_scoped_actions_do_not_claim_a_collection_worker(
-        cx: &mut TestAppContext,
-    ) {
-        let fixture = fixture(cx);
-        fixture.app.update(cx, |app, cx| {
-            open_album(app, &fixture.album, cx);
-            assert!(!app.content_resolution.pending());
-            app.back_content_menu(cx);
-            assert!(app.content_menu.is_none());
-            assert!(!app.content_resolution.pending());
-
-            // Even a cancelled read that has not physically retired must not
-            // block opening a menu or dispatching its album-scoped commands.
-            let retired = app.content_resolution.begin().unwrap();
-            for action in [
-                ContentAction::Play,
-                ContentAction::Queue,
-                ContentAction::Playlist(1),
-            ] {
-                open_album(app, &fixture.album, cx);
-                assert!(!retired.ticket.is_current());
-                app.content_action(action, cx);
-                assert!(app.content_menu.is_none());
-                assert!(app.content_resolution.pending());
-            }
-            assert!(app.content_resolution.finish(&retired));
-        });
-    }
-
-    #[gpui::test]
-    async fn album_favorites_resolve_on_selection_and_preserve_full_album_scope(
-        cx: &mut TestAppContext,
-    ) {
+    fn album_favorites_dispatch_directly_and_preserve_full_album_scope(cx: &mut TestAppContext) {
         let fixture = fixture(cx);
         for favorite in [true, false] {
             fixture.app.update(cx, |app, cx| {
                 open_album(app, &fixture.album, cx);
-                assert!(!app.content_resolution.pending());
-                app.window_visible = true;
                 app.content_action(ContentAction::Favorite(favorite), cx);
-                assert!(app.content_resolution.pending());
-                assert_eq!(
-                    app.content_menu.as_ref().unwrap().page,
-                    ContentMenuPage::Resolving
-                );
+                assert!(app.content_menu.is_none());
             });
-            cx.condition(&fixture.app, |app, _| {
-                !app.content_resolution.pending() && app.content_menu.is_none()
-            })
-            .await;
+            command_fence(&fixture.runtime);
             assert_eq!(favorites(&fixture.runtime, &fixture.album), [favorite; 3]);
             assert_eq!(favorites(&fixture.runtime, &fixture.other), [false]);
         }
     }
 
-    #[gpui::test]
-    async fn creating_a_playlist_from_an_album_resolves_only_after_selection(
-        cx: &mut TestAppContext,
-    ) {
-        let fixture = fixture(cx);
-        fixture.app.update(cx, |app, cx| {
+    fn open_album_name(fixture: &Fixture, cx: &mut TestAppContext) -> Entity<playlists::Playlists> {
+        let (owner, revision) = fixture.app.update(cx, |app, cx| {
             open_album(app, &fixture.album, cx);
             app.set_content_menu_page(ContentMenuPage::Playlists, cx);
-            assert!(!app.content_resolution.pending());
-            app.window_visible = true;
             app.content_action(ContentAction::CreatePlaylist(fixture.window), cx);
-            assert!(app.content_resolution.pending());
+            assert!(app.content_menu.is_none());
+            (app.playlists.clone(), app.state.library.album_revision)
+        });
+        owner.read_with(cx, |owner, _| {
             assert_eq!(
-                app.content_menu.as_ref().unwrap().page,
-                ContentMenuPage::Resolving
+                owner.staged_create_album(),
+                Some((&fixture.album, revision))
             );
         });
-        cx.condition(&fixture.app, |app, cx| {
-            !app.content_resolution.pending()
-                && app.content_menu.is_none()
-                && app.playlists.read(cx).editor_open()
-        })
-        .await;
-        fixture.app.read_with(cx, |app, cx| {
-            let [b, c, a, _outside] = fixture.ids;
-            assert_eq!(
-                app.playlists.read(cx).staged_create_tracks(),
-                Some([a, b, c].as_slice())
-            );
-        });
-        assert_eq!(favorites(&fixture.runtime, &fixture.album), [false; 3]);
+        owner
+    }
+
+    fn playlist_id(runtime: &CoreRuntime, name: &str) -> Option<i64> {
+        let ViewResponse::PlaylistSummaries(page) = runtime
+            .handle
+            .query(Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 10,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist summaries");
+        };
+        page.rows
+            .iter()
+            .find(|row| row.name == name)
+            .map(|row| row.id)
     }
 
     #[gpui::test]
-    async fn dismissing_chosen_album_id_actions_cancels_without_early_worker_retirement(
+    async fn album_name_dialog_stages_immediately_and_submits_the_full_album(
         cx: &mut TestAppContext,
     ) {
         let fixture = fixture(cx);
-        for action in [
-            ContentAction::Favorite(true),
-            ContentAction::CreatePlaylist(fixture.window),
-        ] {
-            fixture.app.update(cx, |app, cx| {
-                open_album(app, &fixture.album, cx);
-                app.window_visible = true;
-                app.set_content_menu_page(ContentMenuPage::Playlists, cx);
-                app.content_action(action, cx);
-                assert!(app.content_resolution.pending());
-                assert_eq!(
-                    app.content_menu.as_ref().unwrap().page,
-                    ContentMenuPage::Resolving
-                );
-                app.back_content_menu(cx);
-                assert!(app.content_menu.is_none());
-                assert!(app.content_resolution.pending());
-            });
-            cx.condition(&fixture.app, |app, _| !app.content_resolution.pending())
-                .await;
-            assert_eq!(favorites(&fixture.runtime, &fixture.album), [false; 3]);
-            assert!(
-                !fixture
-                    .app
-                    .read_with(cx, |app, cx| app.playlists.read(cx).editor_open())
-            );
-        }
+        let owner = open_album_name(&fixture, cx);
+        assert_eq!(playlist_id(&fixture.runtime, "From Album"), None);
+        owner.update(cx, |owner, cx| owner.submit_test_name("From Album", cx));
+        cx.condition(&owner, |owner, _| !owner.editor_open()).await;
+        let ViewResponse::PlaylistEntries(page) = fixture
+            .runtime
+            .handle
+            .query(Query::PlaylistEntries {
+                playlist_id: playlist_id(&fixture.runtime, "From Album").unwrap(),
+                query: None,
+                offset: 0,
+                limit: 10,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist entries");
+        };
+        let [b, c, a, _outside] = fixture.ids;
+        assert_eq!(
+            page.rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+            [a, b, c]
+        );
     }
 
-    #[gpui::test]
-    fn loading_album_actions_keep_keyboard_cancellation_until_worker_retirement(
-        cx: &mut TestAppContext,
-    ) {
-        fn draw(handle: AnyWindowHandle, cx: &mut TestAppContext) {
-            cx.run_until_parked();
-            cx.update_window(handle, |_, window, cx| {
-                window.refresh();
-                window.draw(cx).clear(cx);
-            })
-            .unwrap();
-            cx.run_until_parked();
-            cx.update_window(handle, |_, window, cx| {
-                window.simulate_next_frame(cx);
-                window.refresh();
-                window.draw(cx).clear(cx);
-            })
-            .unwrap();
-            cx.run_until_parked();
-        }
+    const RESELECT_ALBUM: &str = "Library changed. Reselect the album and try again.";
 
-        let fixture = fixture(cx);
-        for key in ["escape", "left"] {
-            fixture.app.update(cx, |app, cx| {
-                open_album(app, &fixture.album, cx);
-                app.set_content_menu_page(ContentMenuPage::Playlists, cx);
-            });
-            draw(fixture.window, cx);
-            // Hold the physical reader deterministically, without racing a real
-            // AlbumTracks response against the loading page's deferred focus.
-            let read = fixture.app.update(cx, |app, cx| {
-                let read = app.begin_content_resolution(cx).unwrap();
-                app.set_content_menu_page(ContentMenuPage::Resolving, cx);
-                read
-            });
-            draw(fixture.window, cx);
-            cx.update_window(fixture.window, |_, window, cx| {
-                let keystroke = Keystroke::parse(key).unwrap();
-                window.dispatch_event(
-                    KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }
-                    .to_platform_input(),
-                    cx,
-                );
-                window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
-            })
-            .unwrap();
-            fixture.app.update(cx, |app, cx| {
-                assert!(app.content_menu.is_none(), "{key} must dismiss loading");
-                assert!(!read.ticket.is_current());
-                assert!(app.content_resolution.pending());
-                assert!(!app.finish_content_resolution(&read, cx));
-                assert!(!app.content_resolution.pending());
-                assert!(!app.playlists.read(cx).editor_open());
-            });
-        }
-    }
-
-    #[gpui::test]
-    fn stale_album_favorite_action_rejects_without_resolving_or_mutating(cx: &mut TestAppContext) {
-        let fixture = fixture(cx);
-        fixture.app.update(cx, |app, cx| {
-            open_album(app, &fixture.album, cx);
-        });
+    fn change_album(fixture: &Fixture) {
         let ack = futures::executor::block_on(fixture.runtime.handle.request_command(
             Command::EditTrack {
                 track_id: fixture.ids[0],
@@ -1750,15 +1523,51 @@ mod tests {
             },
         ));
         assert!(ack.is_success(), "{:?}", ack.error());
+    }
+
+    #[gpui::test]
+    async fn stale_album_name_submit_keeps_the_name_and_prompts_reselection(
+        cx: &mut TestAppContext,
+    ) {
+        let fixture = fixture(cx);
+        let owner = open_album_name(&fixture, cx);
+        change_album(&fixture);
+        owner.update(cx, |owner, cx| {
+            owner.submit_test_name(" Keep this name ", cx)
+        });
+        cx.condition(&owner, |owner, cx| owner.test_name_error(cx).is_some())
+            .await;
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(
+                owner.test_name_error(cx),
+                Some((" Keep this name ", RESELECT_ALBUM))
+            );
+        });
+        assert_eq!(playlist_id(&fixture.runtime, "Keep this name"), None);
+    }
+
+    #[gpui::test]
+    fn stale_album_favorite_action_rejects_without_mutating(cx: &mut TestAppContext) {
+        let fixture = fixture(cx);
+        fixture
+            .app
+            .update(cx, |app, cx| open_album(app, &fixture.album, cx));
+        change_album(&fixture);
         fixture.app.update(cx, |app, cx| {
             app.content_action(ContentAction::Favorite(true), cx);
             assert!(app.content_menu.is_none());
-            assert!(!app.content_resolution.pending());
-            assert_eq!(
-                app.error.as_deref(),
-                Some(app.i18n.text("li-source-changed"))
-            );
         });
+        command_fence(&fixture.runtime);
+        assert_eq!(
+            fixture
+                .runtime
+                .handle
+                .gui_snapshot()
+                .system
+                .last_error
+                .as_deref(),
+            Some(RESELECT_ALBUM)
+        );
         assert_eq!(favorites(&fixture.runtime, &fixture.album), [false; 2]);
         assert_eq!(favorites(&fixture.runtime, &fixture.other), [false]);
     }

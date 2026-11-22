@@ -681,8 +681,8 @@ link:21_ipc.adoc#business-ownership-and-transactions[Business ownership and tran
 Shared list interactions freeze source identities and ordered selections against
 the Core snapshot; features keep occurrence-reordering rules and asynchronous
 Library resolution. Targets decide acceptance and insertion position. The window
-coordinator owns content menus, manual-intent arbitration, queue replacement and
-album-menu resolution, not feature listing models. Copying tracks and reordering
+coordinator owns content menus, manual-intent arbitration, and queue replacement,
+not feature listing models. Copying tracks and reordering
 occurrences are distinct. Query cancellation, acceptance and physical-slot rules
 are authoritative in link:22_cache.adoc#query-projection-retention[Query projection retention].
 

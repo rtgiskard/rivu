@@ -867,6 +867,11 @@ whole-album actions. Indexed membership and persistent summary costs are covered
 under <<transactional-inputs-and-bounded-storage-queries,storage ownership>>;
 browsing behavior is in link:02_library.adoc[Library].
 
+`SetAlbumFavorite {key, revision, favorite}` and `CreatePlaylistFromAlbum
+{key, revision, name}` require the current album catalog revision. Core resolves
+the complete album, ignoring browse filters. Playlist creation inserts members
+in album order in the same transaction as the playlist.
+
 `DuplicateGroups` pages ordinary-file groups by cached fingerprint and reports
 present/missing counts. `DuplicateMembers {fingerprint, offset, limit}` returns
 full track, size/mtime verification, independent status, and playlist/queue

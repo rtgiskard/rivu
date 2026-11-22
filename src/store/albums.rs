@@ -151,6 +151,20 @@ impl Store {
         Ok(Page { total, rows })
     }
 
+    pub(crate) fn album_track_ids(&self, key: &AlbumKey) -> Result<Vec<i64>> {
+        let directory = key
+            .directory
+            .to_str()
+            .context("Album directory is not UTF-8")?;
+        let mut statement = self.conn.prepare_cached(&format!(
+            "SELECT id FROM tracks INDEXED BY tracks_album_members WHERE {} ORDER BY {ORDER}",
+            album_filter(),
+        ))?;
+        Ok(statement
+            .query_map(params![directory, key.title], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub(crate) fn album_has_tracks(&self, key: &AlbumKey) -> Result<bool> {
         let directory = key
             .directory

@@ -50,6 +50,115 @@ fn prepare(core: &mut Core) {
 }
 
 #[test]
+fn album_actions_reject_stale_and_empty_albums_without_mutating() {
+    let (_directory, mut core) = fixture();
+    prepare(&mut core);
+    let query = album_query(&core);
+    let response = core.query_response(&query);
+    response.result.unwrap();
+    let Query::AlbumTracks { key, .. } = query else {
+        unreachable!();
+    };
+    core.command(Command::EditTrack {
+        track_id: 1,
+        title: None,
+        artist: None,
+        album: Some("Moved album".into()),
+        decoder_hint: None,
+        release_date: None,
+    })
+    .unwrap();
+
+    let revisions = core.state.query_revisions();
+    let playlists = core.store.playlist_ids().unwrap();
+    for (key, revision, message) in [
+        (key.clone(), response.revisions.album, "Reselect the album"),
+        (
+            AlbumKey {
+                title: "Missing album".into(),
+                ..key
+            },
+            revisions.album,
+            "Album is empty",
+        ),
+    ] {
+        for command in [
+            Command::SetAlbumFavorite {
+                key: key.clone(),
+                revision,
+                favorite: true,
+            },
+            Command::CreatePlaylistFromAlbum {
+                key,
+                revision,
+                name: "New playlist".into(),
+            },
+        ] {
+            let error = core.command(command).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(core.state.query_revisions(), revisions);
+            assert_eq!(core.store.playlist_ids().unwrap(), playlists);
+            assert!(!core.track(1).unwrap().favorite);
+            assert!(!core.track(2).unwrap().favorite);
+        }
+    }
+}
+
+#[test]
+fn album_actions_use_all_members_instead_of_the_visible_page() {
+    let (_directory, mut core) = fixture();
+    prepare(&mut core);
+    let Query::AlbumTracks { key, .. } = album_query(&core) else {
+        unreachable!();
+    };
+    let query = Query::AlbumTracks {
+        key: key.clone(),
+        query: Some("Track 2".into()),
+        offset: 0,
+        limit: 1,
+    };
+    let response = core.query_response(&query);
+    let ViewResponse::AlbumTracks(page) = response.result.unwrap() else {
+        unreachable!();
+    };
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].title, "Track 2");
+    core.command(Command::SetAlbumFavorite {
+        key: key.clone(),
+        revision: response.revisions.album,
+        favorite: true,
+    })
+    .unwrap();
+    for (id, favorite) in [(1, true), (2, true), (3, false), (4, false)] {
+        assert_eq!(core.track(id).unwrap().favorite, favorite);
+    }
+
+    let updated = core.query_response(&query);
+    assert_eq!(updated.revisions.album, response.revisions.album);
+    assert_ne!(updated.revisions.library, response.revisions.library);
+    let ViewResponse::AlbumTracks(page) = updated.result.unwrap() else {
+        unreachable!();
+    };
+    assert!(page.rows[0].favorite);
+    core.command(Command::CreatePlaylistFromAlbum {
+        key,
+        revision: response.revisions.album,
+        name: "Whole album".into(),
+    })
+    .unwrap();
+    let playlist_id = *core.store.playlist_ids().unwrap().last().unwrap();
+    let page = core
+        .store
+        .playlist_entries_page(playlist_id, None, 0, 20)
+        .unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(
+        page.rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+        vec![1, 2],
+    );
+}
+
+#[test]
 fn core_source_changes_reject_collection_transfers_without_destination_changes() {
     for album in [true, false] {
         let (_directory, mut core) = fixture();

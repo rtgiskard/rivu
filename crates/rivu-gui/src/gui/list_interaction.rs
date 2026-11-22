@@ -227,7 +227,7 @@ mod tests {
             key: key.clone(),
             revision: state.library.album_revision,
         });
-        // A pending Library selection does not gate an already resolved album.
+        // A pending Library selection does not gate an initialized album drag.
         assert!(can_transfer(&drag, &state, DragDestination::Queue, true));
         state.library.album_revision += 1;
         drag.initialize(TrackSource::Album {

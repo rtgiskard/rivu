@@ -179,6 +179,8 @@ dropdowns). `Tab`/`Shift+Tab` closes the dropdown and moves focus.
 
 Editors and input methods retain their own keys. Successive `Escape` presses
 cancel preedit, close a dropdown, leave the editor, then close the dialog.
+In a playlist name dialog, `Escape` discards an unsubmitted draft directly
+once no preedit is active.
 Playback shortcuts apply to the layout, not focused editors or buttons.
 Playback keys: link:04_playback.adoc#keyboard-controls[Keyboard controls].
 

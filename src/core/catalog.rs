@@ -351,10 +351,12 @@ impl Core {
         }
         let dependencies = impacts.dependencies(false);
         self.projections.track_total |= dependencies.refresh_track_total;
-        self.invalidate_collection_impacts(
-            dependencies.queue_revision,
-            dependencies.album_revision,
-        );
+        if dependencies.queue_revision {
+            self.advance_queue_revision();
+        }
+        if dependencies.album_revision {
+            self.state.library.album_revision = self.state.library.album_revision.wrapping_add(1);
+        }
         if dependencies.library_revision {
             self.state.library.change_metadata(tracks, playlists);
         }
