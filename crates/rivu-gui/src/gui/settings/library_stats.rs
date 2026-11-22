@@ -229,7 +229,7 @@ impl Settings {
         let ticket = read.ticket.clone();
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let response = crate::gui::query::run(
+            let (response, _) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_if_current(query, ticket).await },

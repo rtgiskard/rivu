@@ -495,7 +495,7 @@ impl AlbumBrowser {
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let worker_query = query.clone();
-            let response = super::query::run(
+            let (response, _) = super::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_if_current(worker_query, ticket).await },

@@ -200,7 +200,7 @@ impl Library {
                 };
                 let handle = handle.clone();
                 let ticket = ticket.clone();
-                let response = crate::gui::query::run(
+                let (response, _) = crate::gui::query::run(
                     handle,
                     cx,
                     move |handle| async move { handle.query_if_current(query, ticket).await },

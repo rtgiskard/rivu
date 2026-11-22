@@ -812,13 +812,11 @@ impl Library {
                 let ticket = self.library.range_selection.projection.ticket();
                 let handle = self.context.handle().clone();
                 cx.spawn(async move |this, cx| {
-                    let mut timed_out = false;
-                    let response = crate::gui::query::run(
+                    let (response, timed_out) = crate::gui::query::run(
                         handle,
                         cx,
                         move |handle| async move { handle.query_if_current(query, ticket).await },
                         |response, cx| {
-                            timed_out = true;
                             let _ = this.update(cx, |this, cx| {
                                 this.refresh(cx);
                                 let revisions = this.state.query_revisions(None);

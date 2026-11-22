@@ -107,15 +107,12 @@ struct DuplicateReview {
     members_loading: bool,
     groups_pending: bool,
     members_pending: bool,
-    groups_timed_out: bool,
-    members_timed_out: bool,
     source: Option<DuplicateMember>,
     target: Option<DuplicateMember>,
     retired_selection: Option<(Option<i64>, Option<i64>)>,
     confirming: bool,
     busy: Option<Busy>,
     task_query_pending: bool,
-    task_read_timed_out: bool,
     task_read_failed: Option<(u64, u64)>,
     feedback: Option<ReviewFeedback>,
 }
@@ -259,7 +256,6 @@ impl DuplicateReview {
             return None;
         }
         self.task_query_pending = true;
-        self.task_read_timed_out = false;
         Some(self.epoch)
     }
 
@@ -268,9 +264,10 @@ impl DuplicateReview {
         epoch: u64,
         id: u64,
         response: QueryResponse,
+        timed_out: bool,
     ) -> TaskReadOutcome {
         self.task_query_pending = false;
-        if std::mem::take(&mut self.task_read_timed_out) {
+        if timed_out {
             return TaskReadOutcome::Ignored;
         }
         if !self.open || self.epoch != epoch || self.task_id() != Some(id) {
@@ -297,7 +294,6 @@ impl DuplicateReview {
     }
 
     fn timeout_task_read(&mut self, epoch: u64, id: u64, response: QueryResponse) -> bool {
-        self.task_read_timed_out = true;
         if !self.open || self.epoch != epoch || self.task_id() != Some(id) {
             return false;
         }
@@ -456,7 +452,6 @@ impl DuplicateReview {
         self.groups_dirty = false;
         self.groups_loading = true;
         self.groups_pending = true;
-        self.groups_timed_out = false;
         Some(ReviewRead {
             epoch: self.epoch,
             query: self.groups_query(),
@@ -473,7 +468,6 @@ impl DuplicateReview {
         self.members_dirty = false;
         self.members_loading = true;
         self.members_pending = true;
-        self.members_timed_out = false;
         let (source, target) = self.selection_ids();
         let selected = source.into_iter().chain(target).collect();
         Some((
@@ -487,16 +481,14 @@ impl DuplicateReview {
         ))
     }
 
-    fn groups_worker_finished(&mut self) -> bool {
+    fn groups_worker_finished(&mut self) {
         self.groups_pending = false;
         self.groups_loading = false;
-        std::mem::take(&mut self.groups_timed_out)
     }
 
-    fn members_worker_finished(&mut self) -> bool {
+    fn members_worker_finished(&mut self) {
         self.members_pending = false;
         self.members_loading = false;
-        std::mem::take(&mut self.members_timed_out)
     }
 
     fn timeout_groups(
@@ -507,7 +499,6 @@ impl DuplicateReview {
         response: QueryResponse,
         revisions: QueryRevisions,
     ) -> bool {
-        self.groups_timed_out = true;
         if !self.accepts_groups(epoch, query, generation, revisions) {
             return false;
         }
@@ -528,7 +519,6 @@ impl DuplicateReview {
         response: QueryResponse,
         revisions: QueryRevisions,
     ) -> bool {
-        self.members_timed_out = true;
         if !self.accepts_members(epoch, query, generation, revisions) {
             return false;
         }
@@ -987,7 +977,7 @@ impl Duplicates {
                 return;
             }
             let worker_query = query.clone();
-            let response = crate::gui::query::run(
+            let (response, timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_if_current(worker_query, ticket).await },
@@ -1007,7 +997,8 @@ impl Duplicates {
             )
             .await;
             let _ = this.update(cx, |this, cx| {
-                if this.duplicate_review.groups_worker_finished() {
+                this.duplicate_review.groups_worker_finished();
+                if timed_out {
                     this.start_duplicate_groups(cx);
                     return;
                 }
@@ -1087,7 +1078,7 @@ impl Duplicates {
             }
             let worker_query = query.clone();
             let executor = cx.background_executor().clone();
-            let (response, existence, selected) = crate::gui::query::run(
+            let ((response, existence, selected), timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move {
@@ -1150,7 +1141,8 @@ impl Duplicates {
             )
             .await;
             let _ = this.update(cx, |this, cx| {
-                if this.duplicate_review.members_worker_finished() {
+                this.duplicate_review.members_worker_finished();
+                if timed_out {
                     this.start_duplicate_members(cx);
                     return;
                 }
@@ -1211,7 +1203,7 @@ impl Duplicates {
         };
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let response =
+            let (response, timed_out) =
                 crate::gui::query::run(
                     handle,
                     cx,
@@ -1229,7 +1221,7 @@ impl Duplicates {
                 )
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_retained_relocation(epoch, id, response, cx);
+                this.finish_retained_relocation(epoch, id, response, timed_out, cx);
             });
         })
         .detach();
@@ -1240,11 +1232,15 @@ impl Duplicates {
         epoch: u64,
         id: u64,
         response: QueryResponse,
+        timed_out: bool,
         cx: &mut Context<Self>,
     ) {
         let superseded =
             self.duplicate_review.epoch != epoch || self.duplicate_review.task_id() != Some(id);
-        match self.duplicate_review.accept_task_read(epoch, id, response) {
+        match self
+            .duplicate_review
+            .accept_task_read(epoch, id, response, timed_out)
+        {
             TaskReadOutcome::Finished => {
                 self.refresh_snapshot(cx);
                 self.sync_duplicate_review(cx);
@@ -2217,7 +2213,7 @@ mod tests {
                     let old = if members {
                         review.request_members("fingerprint".into(), 0, revisions, Instant::now());
                         let (read, _) = review.begin_members().unwrap();
-                        assert!(!review.members_worker_finished());
+                        review.members_worker_finished();
                         assert!(review.accept_members(
                             read.epoch,
                             &read.query,
@@ -2246,7 +2242,7 @@ mod tests {
                     } else {
                         review.request_groups(0, revisions, Instant::now());
                         let read = review.begin_groups().unwrap();
-                        assert!(!review.groups_worker_finished());
+                        review.groups_worker_finished();
                         assert!(review.accept_groups(
                             read.epoch,
                             &read.query,
@@ -2305,7 +2301,7 @@ mod tests {
                             current,
                             Instant::now(),
                         ));
-                        assert!(!review.members_worker_finished());
+                        review.members_worker_finished();
                         assert!(review.accept_members(
                             next.epoch,
                             &next.query,
@@ -2338,7 +2334,7 @@ mod tests {
                             current,
                             Instant::now(),
                         ));
-                        assert!(!review.groups_worker_finished());
+                        review.groups_worker_finished();
                         assert!(review.accept_groups(
                             next.epoch,
                             &next.query,
@@ -2404,7 +2400,7 @@ mod tests {
                 rows: vec![member(1, true).value],
             })),
         };
-        assert!(!review.members_worker_finished());
+        review.members_worker_finished();
         assert!(!review.accept_members(
             members.epoch,
             &members.query,
@@ -2474,7 +2470,7 @@ mod tests {
         review.request_members("new group".into(), 0, revisions, Instant::now());
         review.feedback = Some(ReviewFeedback::ReadFailed("new selection error".into()));
         assert!(review.begin_members().is_none());
-        assert!(review.members_worker_finished());
+        review.members_worker_finished();
         assert!(review.source.is_none());
         assert!(review.target.is_none());
         assert!(review.members.is_empty());
@@ -2534,10 +2530,8 @@ mod tests {
         review.feedback = Some(ReviewFeedback::ReadFailed("newer error".into()));
         assert!(review.begin_groups().is_none());
         assert!(review.begin_members().is_none());
-        // The production completion consumers take this branch before accepting
-        // any response, including a successful page/selection from a late worker.
-        assert!(review.groups_worker_finished());
-        assert!(review.members_worker_finished());
+        review.groups_worker_finished();
+        review.members_worker_finished();
         assert!(matches!(
             &review.feedback,
             Some(ReviewFeedback::ReadFailed(error)) if error == "newer error"
@@ -2582,8 +2576,8 @@ mod tests {
         assert!(review.members_dirty);
         assert!(review.begin_groups().is_none());
         assert!(review.begin_members().is_none());
-        assert!(review.groups_worker_finished());
-        assert!(review.members_worker_finished());
+        review.groups_worker_finished();
+        review.members_worker_finished();
         assert!(matches!(
             &review.feedback,
             Some(ReviewFeedback::ReadFailed(error)) if error == "newer error"
@@ -2609,7 +2603,7 @@ mod tests {
         review.feedback = Some(ReviewFeedback::ReadFailed("newer error".into()));
         assert!(review.begin_task_read(8).is_none());
         assert!(matches!(
-            review.accept_task_read(epoch, 7, task_response(7, RelocationPhase::Completed)),
+            review.accept_task_read(epoch, 7, task_response(7, RelocationPhase::Completed), true),
             TaskReadOutcome::Ignored
         ));
         assert_eq!(review.task_id(), Some(8));
@@ -2624,7 +2618,7 @@ mod tests {
         review.feedback = Some(ReviewFeedback::ReadFailed("latest error".into()));
         assert!(!review.timeout_task_read(epoch, 8, timeout_response()));
         assert!(matches!(
-            review.accept_task_read(epoch, 8, task_response(8, RelocationPhase::Completed)),
+            review.accept_task_read(epoch, 8, task_response(8, RelocationPhase::Completed), true),
             TaskReadOutcome::Ignored
         ));
         assert_eq!(review.task_id(), Some(9));
@@ -2677,7 +2671,7 @@ mod tests {
                 } else {
                     task_response(7, RelocationPhase::Verifying)
                 };
-                this.finish_retained_relocation(epoch, 7, response, cx);
+                this.finish_retained_relocation(epoch, 7, response, false, cx);
                 assert_eq!(this.duplicate_review.task_query_pending, reopen && !closed);
                 if reopen && !closed {
                     assert_eq!(this.duplicate_review.task_id(), Some(8));
@@ -3220,13 +3214,23 @@ mod tests {
         review.accept_ack(new_epoch, false, &ack(true, Some(8)));
         assert!(review.begin_task_read(8).is_none());
         assert!(matches!(
-            review.accept_task_read(epoch, 7, task_response(7, RelocationPhase::Completed)),
+            review.accept_task_read(
+                epoch,
+                7,
+                task_response(7, RelocationPhase::Completed),
+                false
+            ),
             TaskReadOutcome::Ignored
         ));
         assert_eq!(review.task_id(), Some(8));
         assert_eq!(review.begin_task_read(8), Some(new_epoch));
         assert!(matches!(
-            review.accept_task_read(new_epoch, 8, task_response(8, RelocationPhase::Cancelled)),
+            review.accept_task_read(
+                new_epoch,
+                8,
+                task_response(8, RelocationPhase::Cancelled),
+                false
+            ),
             TaskReadOutcome::Finished
         ));
         assert!(review.busy.is_none());
@@ -3241,7 +3245,12 @@ mod tests {
         review.accept_ack(epoch, false, &ack(true, Some(7)));
         review.begin_task_read(7);
         assert!(matches!(
-            review.accept_task_read(epoch, 7, task_response(8, RelocationPhase::Completed)),
+            review.accept_task_read(
+                epoch,
+                7,
+                task_response(8, RelocationPhase::Completed),
+                false
+            ),
             TaskReadOutcome::Failed
         ));
         assert_eq!(review.task_id(), Some(7));
@@ -3368,7 +3377,7 @@ mod tests {
                 assert!(review.timeout_task_read(epoch, 7, timeout_response()));
             } else {
                 assert!(matches!(
-                    review.accept_task_read(epoch, 7, timeout_response()),
+                    review.accept_task_read(epoch, 7, timeout_response(), false),
                     TaskReadOutcome::Failed
                 ));
             }
@@ -3383,7 +3392,12 @@ mod tests {
             assert!(review.begin_task_read(7).is_none());
             assert_eq!(review.close(), Some(7));
             assert!(matches!(
-                review.accept_task_read(epoch, 7, task_response(7, RelocationPhase::Completed)),
+                review.accept_task_read(
+                    epoch,
+                    7,
+                    task_response(7, RelocationPhase::Completed),
+                    false
+                ),
                 TaskReadOutcome::Ignored
             ));
             assert!(!review.open);

@@ -301,7 +301,7 @@ impl WindowView {
         let stamp = query.stamp(self.state.query_revisions(None));
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let result = crate::gui::query::run(
+            let (result, _) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move {

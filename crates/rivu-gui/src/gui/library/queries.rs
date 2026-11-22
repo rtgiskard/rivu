@@ -111,13 +111,11 @@ impl Library {
         let query = read.query.clone();
         let ticket = read.ticket.clone();
         cx.spawn(async move |this, cx| {
-            let mut timed_out = false;
-            let response = crate::gui::query::run(
+            let (response, timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_if_current(query, ticket).await },
                 |response, cx| {
-                    timed_out = true;
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
                         let state = Rc::clone(&this.state);
@@ -163,8 +161,7 @@ impl Library {
         let handle = self.context.handle().clone();
         let ticket = read.ticket.clone();
         cx.spawn(async move |this, cx| {
-            let mut timed_out = false;
-            let response = crate::gui::query::run(
+            let (response, timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move {
@@ -173,7 +170,6 @@ impl Library {
                         .await
                 },
                 |response, cx| {
-                    timed_out = true;
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
                         this.publish_other_count(&read, response, cx);
@@ -247,13 +243,11 @@ impl Library {
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             let read = &request;
-            let mut timed_out = false;
-            let counts = crate::gui::query::run(
+            let (counts, timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move { library_search_counts(&handle, read).await },
                 |response, cx| {
-                    timed_out = true;
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
                         if this.library.publish_search_counts(
@@ -357,13 +351,11 @@ impl Library {
             }
             let query = read.query.clone();
             let ticket = read.ticket.clone();
-            let mut timed_out = false;
-            let response = crate::gui::query::run(
+            let (response, timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_if_current(query, ticket).await },
                 |response, cx| {
-                    timed_out = true;
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
                         this.finish_loading_text(&read.branch, read.generation, cx);

@@ -44,12 +44,13 @@ impl ReadReservation {
     }
 }
 
+/// Returns the worker result and whether `on_timeout` was called before retirement.
 pub(super) async fn run<T, F: Future<Output = T>>(
     handle: FrontendHandle,
     cx: &mut AsyncApp,
     operation: impl FnOnce(FrontendHandle) -> F,
-    mut on_timeout: impl FnMut(QueryResponse, &mut AsyncApp),
-) -> T {
+    on_timeout: impl FnOnce(QueryResponse, &mut AsyncApp),
+) -> (T, bool) {
     // A composed operation reports its first failure only. The original future
     // remains owned here; dropping logical demand cannot drop its reply wait.
     let (sender, timeout) = oneshot::channel();
@@ -59,23 +60,66 @@ pub(super) async fn run<T, F: Future<Output = T>>(
             let _ = sender.send(response);
         }
     });
-    let worker = operation(handle);
-    futures::pin_mut!(timeout, worker);
-    // Poll the notice first so a reply arriving just after the deadline cannot
-    // skip logical failure delivery when both futures are ready in one UI turn.
-    match select(timeout, worker).await {
+    finish_read(timeout, operation(handle), |response| {
+        on_timeout(response, cx)
+    })
+    .await
+}
+
+async fn finish_read<T>(
+    timeout: oneshot::Receiver<QueryResponse>,
+    worker: impl Future<Output = T>,
+    on_timeout: impl FnOnce(QueryResponse),
+) -> (T, bool) {
+    let notify = |notice: Option<QueryResponse>| notice.map(on_timeout).is_some();
+    // Deliver an already queued notice before polling the worker again.
+    match select(timeout, std::pin::pin!(worker)).await {
         Either::Left((notice, worker)) => {
-            if let Ok(response) = notice {
-                on_timeout(response, cx);
-            }
-            worker.await
+            let timed_out = notify(notice.ok());
+            (worker.await, timed_out)
         }
-        Either::Right((result, _)) => result,
+        Either::Right((result, mut timeout)) => {
+            // The worker can send the notice and finish in the same poll.
+            (result, notify(timeout.try_recv().ok().flatten()))
+        }
     }
 }
 #[cfg(test)]
 mod tests {
-    use super::ReadReservation;
+    use super::{ReadReservation, finish_read};
+    use futures::{FutureExt, channel::oneshot};
+    use rivu_protocol::response::{QueryError, QueryResponse};
+
+    #[test]
+    fn timeout_notice_precedes_retirement_even_if_worker_finishes_in_the_same_poll() {
+        for finish_immediately in [false, true] {
+            let (notice, timeout) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let published = std::cell::Cell::new(false);
+            let worker = async move {
+                notice
+                    .send(QueryResponse {
+                        revisions: Default::default(),
+                        result: Err(QueryError::Message("timed out".into())),
+                    })
+                    .unwrap();
+                if !finish_immediately {
+                    released.await.unwrap();
+                }
+                42
+            };
+            let mut read = std::pin::pin!(finish_read(timeout, worker, |_| published.set(true)));
+            if !finish_immediately {
+                assert!(read.as_mut().now_or_never().is_none());
+                // The first poll sent the notice; the second must deliver it while the worker waits.
+                assert!(read.as_mut().now_or_never().is_none());
+                assert!(published.get());
+                release.send(()).unwrap();
+            }
+            assert_eq!(read.now_or_never(), Some((42, true)));
+            assert!(published.get());
+        }
+    }
 
     #[test]
     fn only_matching_worker_can_retire_a_reservation() {

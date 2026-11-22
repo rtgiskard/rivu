@@ -92,7 +92,7 @@ impl TaskDetailsSlot {
                     }
                 });
             };
-            let reply = crate::gui::query::run(
+            let (reply, _) = crate::gui::query::run(
                 handle,
                 cx,
                 |handle| async move { handle.query_for_gui(Query::ScanTask { id }).await },

@@ -559,7 +559,7 @@ impl Metadata {
             {
                 return;
             }
-            let response = super::query::run(
+            let (response, _) = super::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_if_current(read.query(), ticket).await },
@@ -665,7 +665,7 @@ impl Metadata {
                     this.finish_playback_reload(reload, response, cx);
                 });
             };
-            let response = super::query::run(
+            let (response, _) = super::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_and_refresh_state(reload.query()).await },

@@ -947,7 +947,7 @@ impl Playlists {
                     let entry_ids = chunk.to_vec();
                     let ticket = ticket.clone();
                     let query = filter.clone();
-                    let response = crate::gui::query::run(
+                    let (response, _) = crate::gui::query::run(
                         handle,
                         cx,
                         move |handle| async move {
@@ -1171,7 +1171,7 @@ impl Playlists {
                     let scope = job.commit.scope;
                     let ticket = ticket.clone();
                     let query = filter.clone();
-                    let response = crate::gui::query::run(
+                    let (response, _) = crate::gui::query::run(
                         handle,
                         cx,
                         move |handle| async move {
@@ -1320,7 +1320,7 @@ impl Playlists {
             .ticket();
         let query = self.browser.playlists().entries().query.clone();
         cx.spawn(async move |this, cx| {
-            let response = crate::gui::query::run(
+            let (response, _) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move {

@@ -83,13 +83,11 @@ impl Queue {
         let ticket = self.model.locate.projection.ticket();
         let query = job.query;
         cx.spawn(async move |this, cx| {
-            let mut timed_out = false;
-            let response = crate::gui::query::run(
+            let (response, timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_if_current(query, ticket).await },
                 |response, cx| {
-                    timed_out = true;
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
                         if this.queue_locate_current(request)
@@ -266,7 +264,7 @@ impl Queue {
                     let queue_ids = chunk.to_vec();
                     let ticket = ticket.clone();
                     let query = job.query.clone();
-                    let response = crate::gui::query::run(
+                    let (response, _) = crate::gui::query::run(
                         handle,
                         cx,
                         move |handle| async move {
@@ -378,13 +376,11 @@ impl Queue {
         let handle = self.context.handle().clone();
         let ticket = self.model.page_projection.ticket();
         cx.spawn(async move |this, cx| {
-            let mut timed_out = false;
-            let response = crate::gui::query::run(
+            let (response, timed_out) = crate::gui::query::run(
                 handle,
                 cx,
                 move |handle| async move { handle.query_if_current(query, ticket).await },
                 |response, cx| {
-                    timed_out = true;
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
                         this.sync_queue(cx);
@@ -582,7 +578,7 @@ impl Queue {
                         let handle = handle.clone();
                         let ticket = ticket.clone();
                         let query = job.query.clone();
-                        let response = crate::gui::query::run(
+                        let (response, _) = crate::gui::query::run(
                             handle,
                             cx,
                             move |handle| async move {
@@ -663,7 +659,7 @@ impl Queue {
                         let handle = handle.clone();
                         let ticket = ticket.clone();
                         let query = job.query.clone();
-                        let response = crate::gui::query::run(
+                        let (response, _) = crate::gui::query::run(
                             handle,
                             cx,
                             move |handle| async move {
