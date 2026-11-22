@@ -4,7 +4,8 @@ use super::tracks::{SOURCE_FILTER, search_filter, search_query};
 use super::{Store, batch_limit};
 use anyhow::{Context, Result, ensure};
 use rivu_protocol::model::{
-    Batch, BatchContinuation, MAX_QUERY_ROWS, Page, QueryStamp, QueueCursor, QueueRow, QueueState,
+    Batch, BatchContinuation, MAX_QUERY_ROWS, Page, QueryStamp, QueueCursor, QueueIdentity,
+    QueueRow, QueueState,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::collections::HashSet;
@@ -67,12 +68,50 @@ fn reorder_interval(tx: &Transaction<'_>, start: i64, ids: &[u64]) -> Result<boo
     Ok(changed != 0)
 }
 
+#[derive(Clone, Copy)]
+enum QueueProjection {
+    Full,
+    Identity,
+}
+
+impl QueueProjection {
+    fn track_columns(self) -> &'static str {
+        match self {
+            Self::Full => LIBRARY_ROW_COLUMNS_QUALIFIED,
+            Self::Identity => "q.track_id",
+        }
+    }
+
+    fn tracks_join(self, filtered: bool) -> &'static str {
+        if filtered || matches!(self, Self::Full) {
+            "JOIN tracks t ON t.id=q.track_id"
+        } else {
+            ""
+        }
+    }
+}
+
 fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
+    queue_row_at_rank(row, None)
+}
+
+fn queue_row_at_rank(row: &rusqlite::Row<'_>, rank: Option<usize>) -> rusqlite::Result<QueueRow> {
+    let position = integer(row, 1)?;
     Ok(QueueRow {
         id: integer(row, 0)?,
-        position: integer(row, 1)?,
-        offset: integer(row, 1)?,
+        position,
+        offset: rank.unwrap_or(position),
         track: library_row_at(row, 2)?,
+    })
+}
+
+fn queue_identity(row: &rusqlite::Row<'_>, rank: Option<usize>) -> rusqlite::Result<QueueIdentity> {
+    let position = integer(row, 1)?;
+    Ok(QueueIdentity {
+        id: integer(row, 0)?,
+        track_id: row.get(2)?,
+        position,
+        offset: rank.unwrap_or(position),
     })
 }
 
@@ -203,6 +242,38 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Page<QueueRow>> {
+        self.queue_page_with(
+            query,
+            offset,
+            limit,
+            QueueProjection::Full,
+            queue_row_at_rank,
+        )
+    }
+
+    pub(crate) fn queue_identity_page(
+        &self,
+        query: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<QueueIdentity>> {
+        self.queue_page_with(
+            query,
+            offset,
+            limit,
+            QueueProjection::Identity,
+            queue_identity,
+        )
+    }
+
+    fn queue_page_with<T>(
+        &self,
+        query: Option<&str>,
+        offset: usize,
+        limit: usize,
+        projection: QueueProjection,
+        decode: impl Fn(&rusqlite::Row<'_>, Option<usize>) -> rusqlite::Result<T>,
+    ) -> Result<Page<T>> {
         let query = search_query(query);
         let total = self.cached_count(super::CountDomain::Queue, &[query.as_deref().unwrap_or("")], || {
             if query.is_some() {
@@ -217,29 +288,39 @@ impl Store {
                 rows: Vec::new(),
             });
         }
-        let filter = search_filter!("t", "?1");
-        let paging = if query.is_some() {
-            "ORDER BY q.position,q.id LIMIT ?3 OFFSET ?2"
+        let filtered = query.is_some();
+        let (filter, paging) = if filtered {
+            (
+                search_filter!("t", "?1"),
+                "ORDER BY q.position,q.id LIMIT ?3 OFFSET ?2",
+            )
         } else {
-            "AND q.position>=?2 ORDER BY q.position,q.id LIMIT ?3"
+            (
+                "?1 IS NULL",
+                "AND q.position>=?2 ORDER BY q.position,q.id LIMIT ?3",
+            )
         };
-        let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND {filter} {paging}"))?;
-        let mut rows = statement
-            .query_map(
-                params![
-                    query,
-                    offset.min(i64::MAX as usize) as i64,
-                    limit.min(MAX_QUERY_ROWS) as i64
-                ],
-                queue_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if query.is_some() {
-            for (index, row) in rows.iter_mut().enumerate() {
-                row.offset = offset + index;
-            }
+        let columns = projection.track_columns();
+        let join = projection.tracks_join(filtered);
+        let mut statement = self.conn.prepare_cached(&format!(
+            "SELECT q.id,q.position,{columns} FROM playlist_entries q {join}
+             WHERE q.playlist_id=0 AND {filter} {paging}"
+        ))?;
+        let limit = limit.min(MAX_QUERY_ROWS);
+        let mut rows = statement.query(params![
+            query,
+            offset.min(i64::MAX as usize) as i64,
+            limit as i64
+        ])?;
+        let mut result = Vec::with_capacity((total - offset).min(limit));
+        while let Some(row) = rows.next()? {
+            let rank = filtered.then(|| offset + result.len());
+            result.push(decode(row, rank)?);
         }
-        Ok(Page { total, rows })
+        Ok(Page {
+            total,
+            rows: result,
+        })
     }
 
     pub fn queue_batch(
@@ -297,7 +378,11 @@ impl Store {
         Ok(Batch { rows, next })
     }
 
-    pub fn queue_entries(&self, query: Option<&str>, ids: &[u64]) -> Result<Vec<QueueRow>> {
+    pub(crate) fn queue_entry_locations(
+        &self,
+        query: Option<&str>,
+        ids: &[u64],
+    ) -> Result<Vec<QueueIdentity>> {
         ensure!(
             ids.len() <= MAX_QUERY_ROWS,
             "Queue entry query exceeds {MAX_QUERY_ROWS} IDs"
@@ -318,7 +403,7 @@ impl Store {
             let filter = search_filter!("t", "?2");
             (
                 format!(
-                    "SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},
+                    "SELECT q.id,q.position,q.track_id,
                     (SELECT COUNT(*) FROM playlist_entries p JOIN tracks t ON t.id=p.track_id
                      WHERE p.playlist_id=0 AND p.position<=q.position
                        AND (p.position,p.id)<(q.position,q.id) AND {filter}) AS match_offset
@@ -338,24 +423,24 @@ impl Store {
                         SELECT MAX(target.position) FROM playlist_entries target NOT INDEXED
                         WHERE target.playlist_id=0 AND target.id IN (SELECT value FROM json_each(?1))
                     ) AND {}
-                 ) SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.match_offset
-                 FROM matched q JOIN tracks t ON t.id=q.track_id
+                 ) SELECT q.id,q.position,q.track_id,q.match_offset
+                 FROM matched q
                  WHERE q.id IN (SELECT value FROM json_each(?1)) ORDER BY q.position,q.id",
                 search_filter!("t", "?2")
             )
             } else {
-                format!(
-                    "SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED},q.position AS match_offset FROM playlist_entries q NOT INDEXED JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL ORDER BY q.position,q.id"
-                )
+                "SELECT q.id,q.position,q.track_id,q.position AS match_offset
+                 FROM playlist_entries q NOT INDEXED
+                 WHERE q.playlist_id=0 AND q.id IN (SELECT value FROM json_each(?1)) AND ?2 IS NULL
+                 ORDER BY q.position,q.id"
+                    .to_owned()
             };
             (sql, &encoded)
         };
         let mut statement = self.conn.prepare_cached(&sql)?;
         Ok(statement
             .query_map(params![identity, query], |row| {
-                let mut result = queue_row(row)?;
-                result.offset = row.get::<_, i64>("match_offset")? as usize;
-                Ok(result)
+                queue_identity(row, Some(row.get::<_, i64>("match_offset")? as usize))
             })?
             .collect::<rusqlite::Result<_>>()?)
     }

@@ -1,6 +1,107 @@
 use super::*;
 
 #[test]
+fn queue_identity_projections_preserve_filtered_occurrences_and_scope() {
+    use rivu_protocol::model::{MAX_QUERY_ROWS, QueueIdentity};
+
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(path,artist) VALUES
+             ('/music/a.wav','needle %_'),('/needle %_/b.wav','other'),('/music/NEEDLE %_.wav','other');",
+        )
+        .unwrap();
+    store.enqueue_tracks(&[1, 2, 1, 3, 2]).unwrap();
+    let ids = store.queue_ids().unwrap();
+    store
+        .reorder_queue(&[ids[4], ids[2], ids[1], ids[3], ids[0]])
+        .unwrap();
+    let (playlist, _) = store.create_playlist_from_queue("Other queue").unwrap();
+    let foreign: u64 = store
+        .conn
+        .query_row(
+            "SELECT id FROM playlist_entries WHERE playlist_id=?1 AND track_id=1 LIMIT 1",
+            [playlist],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let query = Some("NEEDLE %_");
+    let expected = [
+        QueueIdentity {
+            id: ids[2],
+            track_id: 1,
+            position: 1,
+            offset: 0,
+        },
+        QueueIdentity {
+            id: ids[3],
+            track_id: 3,
+            position: 3,
+            offset: 1,
+        },
+        QueueIdentity {
+            id: ids[0],
+            track_id: 1,
+            position: 4,
+            offset: 2,
+        },
+    ];
+    let first = store.queue_identity_page(query, 0, 2).unwrap();
+    let second = store.queue_identity_page(query, 2, 2).unwrap();
+    assert_eq!((first.total, second.total), (3, 3));
+    assert_eq!(first.rows, expected[..2]);
+    assert_eq!(second.rows, expected[2..]);
+    assert!(
+        store
+            .queue_identity_page(query, 3, 1)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+
+    let locations = store
+        .queue_entry_locations(query, &[ids[0], foreign, ids[1], ids[2], ids[0], u64::MAX])
+        .unwrap();
+    assert_eq!(locations, [expected[0], expected[2]]);
+    assert_eq!(
+        store.queue_entry_locations(query, &[ids[0]]).unwrap(),
+        [expected[2]]
+    );
+    assert!(
+        store
+            .queue_entry_locations(query, &[foreign])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.queue_entry_locations(query, &[]).unwrap().is_empty());
+    assert!(
+        store
+            .queue_entry_locations(query, &[ids[0]; MAX_QUERY_ROWS + 1])
+            .is_err()
+    );
+
+    let unfiltered = store.queue_identity_page(Some(""), 4, 1).unwrap();
+    assert_eq!(unfiltered.total, 5);
+    assert_eq!(
+        unfiltered.rows,
+        [QueueIdentity {
+            offset: 4,
+            ..expected[2]
+        }]
+    );
+    assert_eq!(
+        store
+            .queue_entry_locations(None, &[foreign, ids[0]])
+            .unwrap(),
+        unfiltered.rows
+    );
+}
+
+#[test]
 fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playlist_in_sql() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
@@ -51,7 +152,7 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     assert_eq!(before.total, 200_000);
     assert!(store.enqueue_tracks(&[1, 999_999]).is_err());
     assert_eq!(store.queue_state().unwrap(), before);
-    assert!(store.queue_entries(None, &vec![current; 257]).is_err());
+    assert!(store.queue_entry_locations(None, &[current; 257]).is_err());
     store
         .conn
         .execute("INSERT INTO tracks(path) VALUES('/music/later.wav')", [])

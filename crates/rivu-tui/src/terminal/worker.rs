@@ -356,7 +356,7 @@ impl ReadKind<'_> {
         let mut query = self.into_query(offset, limit);
         match &mut query {
             Query::QueuePage { query, .. }
-            | Query::QueueEntries { query, .. }
+            | Query::QueueEntryLocations { query, .. }
             | Query::LibraryPage { query, .. }
             | Query::DirectoryPage { query, .. }
             | Query::LibraryLocate { query, .. }
@@ -402,7 +402,7 @@ impl ReadKind<'_> {
                 offset,
                 limit,
             },
-            ReadKind::QueueSelection(queue_id) => Query::QueueEntries {
+            ReadKind::QueueSelection(queue_id) => Query::QueueEntryLocations {
                 query: None,
                 queue_ids: vec![queue_id],
             },
@@ -530,7 +530,7 @@ impl ReadSpec {
     pub(super) fn borrowed(&self) -> ReadDemand<'_> {
         let (kind, filter) = match self.query.identity() {
             QueryIdentity::QueuePage(filter) => (ReadKind::Queue, filter.as_deref()),
-            QueryIdentity::QueueEntries([id], filter) => {
+            QueryIdentity::QueueEntryLocations([id], filter) => {
                 (ReadKind::QueueSelection(*id), filter.as_deref())
             }
             QueryIdentity::LibraryPage(query, ..) => (
@@ -610,7 +610,7 @@ impl ReadSpec {
     pub(super) fn accepts_view(&self, view: &ViewResponse) -> bool {
         match (self.kind(), view) {
             (ReadKind::Queue, ViewResponse::QueuePage(_))
-            | (ReadKind::QueueSelection(_), ViewResponse::QueueEntries(_))
+            | (ReadKind::QueueSelection(_), ViewResponse::QueueEntryLocations(_))
             | (
                 ReadKind::Search(_) | ReadKind::OtherTracks { anchor: None, .. },
                 ViewResponse::LibraryPage(_),

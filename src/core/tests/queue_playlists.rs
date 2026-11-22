@@ -2352,8 +2352,10 @@ fn stale_queue_does_not_block_pause_toggle_pause_or_stop() {
 
 #[test]
 fn queue_queries_recover_committed_structure_before_reply_without_replaying_mutations() {
+    use rivu_protocol::model::QueueIdentity;
+
     for worker in [false, true] {
-        for kind in ["page", "batch", "entries"] {
+        for kind in ["page", "batch", "identity-page", "locations"] {
             let (directory, mut core) = fixture();
             pending(&mut core, 5);
             let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
@@ -2376,10 +2378,16 @@ fn queue_queries_recover_committed_structure_before_reply_without_replaying_muta
                     limit: 10,
                     expected: Some(core.state.query_revisions()),
                 },
-                _ => Query::QueueEntries {
+                "identity-page" => Query::QueueIdentityPage {
+                    query: None,
+                    offset: 0,
+                    limit: 10,
+                },
+                "locations" => Query::QueueEntryLocations {
                     query: None,
                     queue_ids: vec![1, 4, 5],
                 },
+                _ => unreachable!(),
             };
             for repaired in [false, true] {
                 if repaired {
@@ -2414,10 +2422,16 @@ fn queue_queries_recover_committed_structure_before_reply_without_replaying_muta
                     let rows = match response.result.unwrap() {
                         ViewResponse::QueuePage(page) => {
                             assert_eq!(page.total, 3);
+                            page.rows.iter().map(QueueIdentity::from).collect()
+                        }
+                        ViewResponse::QueueBatch(batch) => {
+                            batch.rows.iter().map(QueueIdentity::from).collect()
+                        }
+                        ViewResponse::QueueIdentityPage(page) => {
+                            assert_eq!(page.total, 3);
                             page.rows
                         }
-                        ViewResponse::QueueBatch(batch) => batch.rows,
-                        ViewResponse::QueueEntries(rows) => rows,
+                        ViewResponse::QueueEntryLocations(rows) => rows,
                         _ => panic!("expected queue rows"),
                     };
                     assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 4, 5]);

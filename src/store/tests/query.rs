@@ -1,4 +1,5 @@
 use super::*;
+use rivu_protocol::model::QueueIdentity;
 
 #[test]
 fn projection_totals_and_rows_follow_filters_and_writer_changes() {
@@ -212,7 +213,7 @@ fn unfiltered_occurrence_lookup_work_is_bounded_by_requested_ids() {
         )
         .unwrap();
     let counter = SqlVmSteps::new(&store.conn);
-    let queue = store.queue_entries(None, &[1000, 1, 1001]).unwrap();
+    let queue = store.queue_entry_locations(None, &[1000, 1, 1001]).unwrap();
     let queue_steps = counter.take();
     let playlist = store
         .playlist_entry_locations(1, None, &[2000, 1001, 1])
@@ -326,7 +327,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
     assert_eq!(entry_batches, entry_matches);
     let hidden_queue = original.rows[0].id;
     let lookup = store
-        .queue_entries(
+        .queue_entry_locations(
             Some("needle"),
             &[
                 queue_matches[4].id,
@@ -336,19 +337,22 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
             ],
         )
         .unwrap();
-    assert_eq!(lookup, [queue_matches[0].clone(), queue_matches[4].clone()]);
+    assert_eq!(
+        lookup,
+        [&queue_matches[0], &queue_matches[4]].map(QueueIdentity::from)
+    );
     for row in &queue_matches {
         assert_eq!(
             store
-                .queue_entries(Some("needle"), &[row.id])
+                .queue_entry_locations(Some("needle"), &[row.id])
                 .unwrap()
                 .as_slice(),
-            std::slice::from_ref(row)
+            &[QueueIdentity::from(row)]
         );
     }
     assert!(
         store
-            .queue_entries(Some("needle"), &[hidden_queue])
+            .queue_entry_locations(Some("needle"), &[hidden_queue])
             .unwrap()
             .is_empty()
     );
@@ -396,7 +400,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
     );
     assert!(
         store
-            .queue_entries(
+            .queue_entry_locations(
                 Some("needle"),
                 &[u64::try_from(hidden_entry).unwrap(), hidden_queue],
             )
@@ -448,7 +452,7 @@ fn filtered_occurrence_pages_keep_ids_positions_and_match_offsets() {
             .is_empty()
     );
     assert_eq!(
-        store.queue_entries(None, &[hidden_queue]).unwrap()[0].offset,
+        store.queue_entry_locations(None, &[hidden_queue]).unwrap()[0].offset,
         0
     );
     let location = store

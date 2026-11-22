@@ -1248,7 +1248,7 @@ fn queue_rejects_delayed_pages_and_selection_lookups_after_navigation() {
                 queue: 1,
                 ..QueryRevisions::default()
             },
-            view: ViewResponse::QueueEntries(vec![queue_row(0, 1008)]),
+            view: ViewResponse::QueueEntryLocations(vec![QueueIdentity::from(&queue_row(0, 1008))]),
         })
     ));
     assert_eq!(tui.ui.queue.selection.selected(), Some(9));
@@ -1317,11 +1317,11 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     let request = tui.ui.query_request(&state).unwrap();
     assert_eq!(request.demand.kind(), ReadKind::QueueSelection(1008));
     assert!(
-        matches!(request.demand.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1008])
+        matches!(request.demand.query(), Query::QueueEntryLocations { queue_ids, query: None } if queue_ids == vec![1008])
     );
     let relocated = result(
         &request,
-        ViewResponse::QueueEntries(vec![queue_row(2, 1008)]),
+        ViewResponse::QueueEntryLocations(vec![QueueIdentity::from(&queue_row(2, 1008))]),
     );
     assert!(tui.ui.apply_query(&state, &request, Ok(relocated)));
     assert_eq!(tui.ui.queue.selection.selected(), Some(2));
@@ -1341,7 +1341,10 @@ fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
     tui.ui.apply_query(
         &state,
         &request,
-        Ok(result(&request, ViewResponse::QueueEntries(Vec::new()))),
+        Ok(result(
+            &request,
+            ViewResponse::QueueEntryLocations(Vec::new()),
+        )),
     );
     assert_eq!(tui.ui.queue.selection.selected(), Some(1));
     load_queue(&mut tui.ui, &state);

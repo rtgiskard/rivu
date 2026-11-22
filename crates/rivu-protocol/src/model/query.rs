@@ -131,7 +131,12 @@ pub enum Query {
         limit: usize,
         expected: Option<crate::response::QueryRevisions>,
     },
-    QueueEntries {
+    QueueIdentityPage {
+        query: Option<String>,
+        offset: usize,
+        limit: usize,
+    },
+    QueueEntryLocations {
         query: Option<String>,
         queue_ids: Vec<u64>,
     },
@@ -303,7 +308,8 @@ pub enum QueryIdentity<'a> {
     ScanTask(u64),
     QueuePage(&'a Option<String>),
     QueueBatch(&'a Option<String>),
-    QueueEntries(&'a [u64], &'a Option<String>),
+    QueueIdentityPage(&'a Option<String>),
+    QueueEntryLocations(&'a [u64], &'a Option<String>),
     PlaylistEntry(i64),
     DuplicateGroups,
     DuplicateMembers(&'a str),
@@ -391,7 +397,10 @@ impl Query {
                 }
             }
             Self::PlaylistEntry { .. } => stamp.playlist_entries = revisions.playlist_entries,
-            Self::QueuePage { .. } | Self::QueueBatch { .. } | Self::QueueEntries { .. } => {
+            Self::QueuePage { .. }
+            | Self::QueueBatch { .. }
+            | Self::QueueIdentityPage { .. }
+            | Self::QueueEntryLocations { .. } => {
                 stamp.queue = revisions.queue;
             }
             Self::DuplicateGroups { .. } => stamp.duplicate_groups = revisions.duplicate_groups,
@@ -415,7 +424,6 @@ impl Query {
                 | Self::PlaylistEntryBatch { .. }
                 | Self::QueuePage { .. }
                 | Self::QueueBatch { .. }
-                | Self::QueueEntries { .. }
                 | Self::DuplicateMembers { .. }
                 | Self::DuplicateReviewMembers { .. }
         ) {
@@ -520,8 +528,9 @@ impl Query {
             Self::ScanTask { id } => QueryIdentity::ScanTask(*id),
             Self::QueuePage { query, .. } => QueryIdentity::QueuePage(query),
             Self::QueueBatch { query, .. } => QueryIdentity::QueueBatch(query),
-            Self::QueueEntries { queue_ids, query } => {
-                QueryIdentity::QueueEntries(queue_ids, query)
+            Self::QueueIdentityPage { query, .. } => QueryIdentity::QueueIdentityPage(query),
+            Self::QueueEntryLocations { queue_ids, query } => {
+                QueryIdentity::QueueEntryLocations(queue_ids, query)
             }
             Self::PlaylistEntry { entry_id } => QueryIdentity::PlaylistEntry(*entry_id),
             Self::DuplicateGroups { .. } => QueryIdentity::DuplicateGroups,
@@ -630,10 +639,6 @@ mod tests {
                 limit: 2,
                 expected: None,
             },
-            Query::QueueEntries {
-                query: None,
-                queue_ids: vec![1],
-            },
             Query::DuplicateMembers {
                 fingerprint: "hash".into(),
                 offset: 0,
@@ -656,6 +661,10 @@ mod tests {
             assert_eq!(change, impact(&query, next, previous), "{query:?}");
         }
         for query in [
+            Query::QueueEntryLocations {
+                query: None,
+                queue_ids: vec![1],
+            },
             Query::Albums {
                 query: None,
                 sort: AlbumSort::default(),
@@ -873,6 +882,51 @@ mod tests {
             ..previous
         };
         assert!(impact(&query, previous, queue).coordinates_changed);
+    }
+
+    #[test]
+    fn queue_identity_queries_select_queue_coordinates_not_bitrate_payloads() {
+        let baseline = QueryRevisions::default();
+        let unrelated = QueryRevisions {
+            library: 1,
+            structure: 2,
+            playlist: 3,
+            bitrate: 4,
+            ..baseline
+        };
+        let changed_queue = QueryRevisions {
+            queue: 1,
+            ..unrelated
+        };
+        for filter in [None, Some("needle".to_owned())] {
+            let page = Query::QueueIdentityPage {
+                query: filter.clone(),
+                offset: 1,
+                limit: 2,
+            };
+            let next_page = Query::QueueIdentityPage {
+                query: filter.clone(),
+                offset: 3,
+                limit: 1,
+            };
+            let changed_filter = Query::QueueIdentityPage {
+                query: Some("other".to_owned()),
+                offset: 1,
+                limit: 2,
+            };
+            assert_eq!(page.identity(), next_page.identity());
+            assert_ne!(page.identity(), changed_filter.identity());
+            for query in [
+                page,
+                Query::QueueEntryLocations {
+                    query: filter,
+                    queue_ids: vec![9],
+                },
+            ] {
+                assert_eq!(query.stamp(baseline), query.stamp(unrelated));
+                assert!(impact(&query, baseline, changed_queue).coordinates_changed);
+            }
+        }
     }
 
     #[test]

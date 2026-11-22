@@ -375,7 +375,8 @@ impl Core {
                         &query,
                         Query::QueuePage { .. }
                             | Query::QueueBatch { .. }
-                            | Query::QueueEntries { .. }
+                            | Query::QueueIdentityPage { .. }
+                            | Query::QueueEntryLocations { .. }
                     )
                     && !self.database_maintenance_active()
                     && !self.database_unavailable

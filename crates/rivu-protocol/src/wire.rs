@@ -18,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 56;
+pub const PROTOCOL_VERSION: u8 = 57;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -205,10 +205,6 @@ pub enum WireQuery {
         limit: u64,
         expected: Option<crate::response::QueryRevisions>,
     },
-    QueueEntries {
-        query: Option<String>,
-        queue_ids: Vec<u64>,
-    },
     PlaylistEntry {
         entry_id: i64,
     },
@@ -275,6 +271,15 @@ pub enum WireQuery {
         favorite: Option<bool>,
         missing: Option<bool>,
         include_other: bool,
+    },
+    QueueIdentityPage {
+        query: Option<String>,
+        offset: u64,
+        limit: u64,
+    },
+    QueueEntryLocations {
+        query: Option<String>,
+        queue_ids: Vec<u64>,
     },
 }
 
@@ -826,7 +831,18 @@ impl From<Query> for WireQuery {
                 limit: limit as u64,
                 expected,
             },
-            Query::QueueEntries { query, queue_ids } => Self::QueueEntries { query, queue_ids },
+            Query::QueueIdentityPage {
+                query,
+                offset,
+                limit,
+            } => Self::QueueIdentityPage {
+                query,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::QueueEntryLocations { query, queue_ids } => {
+                Self::QueueEntryLocations { query, queue_ids }
+            }
             Query::PlaylistEntry { entry_id } => Self::PlaylistEntry { entry_id },
             Query::DuplicateGroups { offset, limit } => Self::DuplicateGroups {
                 offset: offset as u64,
@@ -1071,7 +1087,18 @@ impl TryFrom<WireQuery> for Query {
                 limit: wire_usize(limit, "limit")?,
                 expected,
             },
-            WireQuery::QueueEntries { query, queue_ids } => Self::QueueEntries { query, queue_ids },
+            WireQuery::QueueIdentityPage {
+                query,
+                offset,
+                limit,
+            } => Self::QueueIdentityPage {
+                query,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::QueueEntryLocations { query, queue_ids } => {
+                Self::QueueEntryLocations { query, queue_ids }
+            }
             WireQuery::PlaylistEntry { entry_id } => Self::PlaylistEntry { entry_id },
             WireQuery::DuplicateGroups { offset, limit } => Self::DuplicateGroups {
                 offset: wire_usize(offset, "offset")?,

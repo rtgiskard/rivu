@@ -119,7 +119,7 @@ impl Queue {
                     )
                 {
                     match response.result {
-                        Ok(ViewResponse::QueueEntries(rows)) => {
+                        Ok(ViewResponse::QueueEntryLocations(rows)) => {
                             if let Some(row) = rows.into_iter().find(|row| row.id == request.id) {
                                 this.model
                                     .locate
@@ -246,6 +246,7 @@ impl Queue {
         let handle = self.context.handle().clone();
         let i18n = std::sync::Arc::clone(&self.context.i18n);
         let ticket = self.model.reconcile_projection.ticket();
+        let projection = self.model.reconcile_query();
         cx.spawn(async move |this, cx| {
             let result: Result<Option<Vec<QueueIdentity>>, String> = async {
                 let mut selected = Vec::with_capacity(job.ids.len());
@@ -269,7 +270,10 @@ impl Queue {
                         cx,
                         move |handle| async move {
                             handle
-                                .query_if_current(Query::QueueEntries { query, queue_ids }, ticket)
+                                .query_if_current(
+                                    Query::QueueEntryLocations { query, queue_ids },
+                                    ticket,
+                                )
                                 .await
                         },
                         |response, cx| {
@@ -300,19 +304,14 @@ impl Queue {
                     ) {
                         return Ok(None);
                     }
-                    if matches!(&response.result, Ok(ViewResponse::QueueEntries(_)))
-                        && (Query::QueueEntries {
-                            query: job.query.clone(),
-                            queue_ids: Vec::new(),
-                        })
-                        .stamp(response.revisions)
-                            != job.stamp
+                    if matches!(&response.result, Ok(ViewResponse::QueueEntryLocations(_)))
+                        && projection.stamp(response.revisions) != job.stamp
                     {
                         return Ok(None);
                     }
                     match response.result {
-                        Ok(ViewResponse::QueueEntries(rows)) => {
-                            selected.extend(rows.iter().map(QueueIdentity::from));
+                        Ok(ViewResponse::QueueEntryLocations(rows)) => {
+                            selected.extend(rows);
                         }
                         Err(error) => return Err(error.to_string()),
                         _ => return Err(i18n.text("gl-queue-selection-response").to_owned()),
@@ -442,7 +441,10 @@ impl Queue {
     }
 
     pub(in crate::gui) fn queue_commit_valid(&self, commit: &QueueCommit) -> bool {
-        self.model.query().stamp(self.state.query_revisions(None)) == commit.stamp
+        self.model
+            .selection_query()
+            .stamp(self.state.query_revisions(None))
+            == commit.stamp
             && self.model.current(commit.generation, commit.stamp)
     }
 
@@ -533,7 +535,7 @@ impl Queue {
     ) {
         self.refresh(cx);
         if self.queue_job_current(job)
-            && self.model.query().stamp(response.revisions) == job.stamp
+            && self.model.selection_query().stamp(response.revisions) == job.stamp
             && let Err(error) = response.result
         {
             let error = error.to_string();
@@ -546,7 +548,11 @@ impl Queue {
 
     fn queue_job_current(&self, job: &QueueJob) -> bool {
         self.model.manual == Some(job.intent)
-            && self.model.query().stamp(self.state.query_revisions(None)) == job.stamp
+            && self
+                .model
+                .selection_query()
+                .stamp(self.state.query_revisions(None))
+                == job.stamp
             && self.model.current(job.generation, job.stamp)
     }
 
@@ -561,6 +567,7 @@ impl Queue {
         let handle = self.context.handle().clone();
         let i18n = std::sync::Arc::clone(&self.context.i18n);
         let ticket = self.model.projection.ticket();
+        let projection = self.model.selection_query();
         cx.spawn(async move |this, cx| {
             let result: Result<Option<QueueCommit>, String> = async {
                 if !this
@@ -573,7 +580,8 @@ impl Queue {
                     return Ok(None);
                 }
                 let target = match job.target {
-                    QueueTarget::Row(row) => row,
+                    _ if job.all => None,
+                    QueueTarget::Row(row) => Some(row),
                     QueueTarget::Offset(offset) => {
                         let handle = handle.clone();
                         let ticket = ticket.clone();
@@ -584,7 +592,7 @@ impl Queue {
                             move |handle| async move {
                                 handle
                                     .query_if_current(
-                                        Query::QueuePage {
+                                        Query::QueueIdentityPage {
                                             query,
                                             offset,
                                             limit: 1,
@@ -606,18 +614,12 @@ impl Queue {
                         ) {
                             return Ok(None);
                         }
-                        if matches!(&response.result, Ok(ViewResponse::QueuePage(_)))
-                            && (Query::QueuePage {
-                                query: job.query.clone(),
-                                offset: 0,
-                                limit: 1,
-                            })
-                            .stamp(response.revisions)
-                                != job.stamp
+                        if matches!(&response.result, Ok(ViewResponse::QueueIdentityPage(_)))
+                            && projection.stamp(response.revisions) != job.stamp
                         {
                             return Ok(None);
                         }
-                        let ViewResponse::QueuePage(page) =
+                        let ViewResponse::QueueIdentityPage(page) =
                             response.result.map_err(|error| error.to_string())?
                         else {
                             return Err(i18n.text("gl-queue-selection-response").into());
@@ -625,24 +627,18 @@ impl Queue {
                         let Some(row) = page.rows.first().filter(|row| row.offset == offset) else {
                             return Err(i18n.text("gl-queue-changed").into());
                         };
-                        QueueIdentity::from(row)
+                        Some(*row)
                     }
                 };
-                let anchor = if job.all {
-                    target
+                let span = if job.all {
+                    Some(0..job.total)
+                } else if let (true, Some(anchor), Some(target)) = (job.shift, job.anchor, target) {
+                    Some(anchor.offset.min(target.offset)..anchor.offset.max(target.offset) + 1)
                 } else {
-                    job.anchor.unwrap_or(target)
+                    None
                 };
                 let mut rows = None;
-                if job.all || (job.shift && job.anchor.is_some()) {
-                    let (start, end) = if job.all {
-                        (0, job.total)
-                    } else {
-                        (
-                            anchor.offset.min(target.offset),
-                            anchor.offset.max(target.offset) + 1,
-                        )
-                    };
+                if let Some(Range { start, end }) = span {
                     let mut identities = Vec::with_capacity(end - start);
                     let mut offset = start;
                     while offset < end {
@@ -665,7 +661,7 @@ impl Queue {
                             move |handle| async move {
                                 handle
                                     .query_if_current(
-                                        Query::QueuePage {
+                                        Query::QueueIdentityPage {
                                             query,
                                             offset,
                                             limit,
@@ -687,18 +683,12 @@ impl Queue {
                         ) {
                             return Ok(None);
                         }
-                        if matches!(&response.result, Ok(ViewResponse::QueuePage(_)))
-                            && (Query::QueuePage {
-                                query: job.query.clone(),
-                                offset: 0,
-                                limit: 1,
-                            })
-                            .stamp(response.revisions)
-                                != job.stamp
+                        if matches!(&response.result, Ok(ViewResponse::QueueIdentityPage(_)))
+                            && projection.stamp(response.revisions) != job.stamp
                         {
                             return Ok(None);
                         }
-                        let ViewResponse::QueuePage(Page { rows: page, total }) =
+                        let ViewResponse::QueueIdentityPage(Page { rows: page, total }) =
                             response.result.map_err(|error| error.to_string())?
                         else {
                             return Err(i18n.text("gl-queue-range-response").into());
@@ -713,10 +703,18 @@ impl Queue {
                             return Err(i18n.text("gl-queue-changed").into());
                         }
                         offset += page.len();
-                        identities.extend(page.iter().map(QueueIdentity::from));
+                        identities.extend(page);
                     }
                     rows = Some(identities);
                 }
+                let target = target
+                    .or_else(|| rows.as_ref()?.first().copied())
+                    .ok_or_else(|| i18n.text("gl-queue-changed").to_owned())?;
+                let anchor = if job.all {
+                    target
+                } else {
+                    job.anchor.unwrap_or(target)
+                };
                 Ok(Some(QueueCommit {
                     stamp: job.stamp,
                     generation: job.generation,

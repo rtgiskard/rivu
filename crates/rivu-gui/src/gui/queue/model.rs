@@ -1,4 +1,5 @@
 use crate::gui::{coordination::manual_actions::ManualIntentId, paged};
+pub(in crate::gui) use rivu_protocol::model::QueueIdentity;
 use rivu_protocol::query_tracking::{QuerySubmission, QueryTracker};
 use rivu_protocol::{
     model::{Query, QueryStamp, QueueRow},
@@ -34,25 +35,6 @@ pub(super) struct QueueJob {
     pub(super) scroll: bool,
     pub(super) total: usize,
     pub(super) query: Option<String>,
-}
-
-/// Selection retains only occurrence identity and absolute position, never track metadata.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::gui) struct QueueIdentity {
-    pub(in crate::gui) id: u64,
-    pub(in crate::gui) track_id: i64,
-    pub(in crate::gui) position: usize,
-    pub(in crate::gui) offset: usize,
-}
-impl From<&QueueRow> for QueueIdentity {
-    fn from(row: &QueueRow) -> Self {
-        Self {
-            id: row.id,
-            track_id: row.track.id,
-            position: row.position,
-            offset: row.offset,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +82,7 @@ impl QueueLocate {
         revisions: QueryRevisions,
     ) -> QueueLocateRequest {
         self.invalidate();
-        let query = Query::QueueEntries {
+        let query = Query::QueueEntryLocations {
             query: filter,
             queue_ids: vec![id],
         };
@@ -332,7 +314,7 @@ impl QueueBrowser {
         }
         self.manual = Some(intent);
         self.navigation = Some(row.offset);
-        let stamp = self.query().stamp(revisions);
+        let stamp = self.selection_query().stamp(revisions);
         let generation = self.projection.generation();
         if shift && self.anchor.is_some() {
             self.busy = true;
@@ -376,7 +358,7 @@ impl QueueBrowser {
         self.pending = Some(QueueJob {
             intent,
             generation: self.projection.generation(),
-            stamp: self.query().stamp(revisions),
+            stamp: self.selection_query().stamp(revisions),
             target: QueueTarget::Offset(offset),
             anchor: self.anchor,
             shift: false,
@@ -407,15 +389,21 @@ impl QueueBrowser {
             limit: 1,
         }
     }
+    pub(super) fn selection_query(&self) -> Query {
+        Query::QueueIdentityPage {
+            query: self.query.clone(),
+            offset: 0,
+            limit: 1,
+        }
+    }
     pub(super) fn current(&self, generation: u64, stamp: QueryStamp) -> bool {
         self.projection
-            .accepts(&self.query(), generation, stamp.revisions())
+            .accepts(&self.selection_query(), generation, stamp.revisions())
     }
     pub(super) fn sync(&mut self, revisions: QueryRevisions, total: usize, now: Instant) -> bool {
         let query = self.query();
         let impact = self.page_projection.impact(&query, revisions);
         let changed = self.page_projection.sync(&query, revisions);
-        self.projection.sync(&query, revisions);
         if changed {
             self.locate.invalidate();
             self.locate_filtered = None;
@@ -427,6 +415,7 @@ impl QueueBrowser {
                 self.rows.invalidate_payload(now);
             }
             if impact.coordinates_changed {
+                self.projection.sync(&self.selection_query(), revisions);
                 self.cancel();
                 self.schedule_reconcile(revisions);
             } else {
@@ -509,8 +498,8 @@ impl QueueBrowser {
             _ => self.rows.fail(unexpected()),
         }
     }
-    fn reconcile_query(&self) -> Query {
-        Query::QueueEntries {
+    pub(super) fn reconcile_query(&self) -> Query {
+        Query::QueueEntryLocations {
             query: self.query.clone(),
             queue_ids: Vec::new(),
         }
@@ -1186,7 +1175,7 @@ mod tests {
         assert_eq!(job.request, old);
         assert!(matches!(
             job.query,
-            Query::QueueEntries { query: Some(query), queue_ids }
+            Query::QueueEntryLocations { query: Some(query), queue_ids }
                 if query == "needle" && queue_ids == [11]
         ));
         let ticket = queue.locate.projection.ticket();
@@ -1238,7 +1227,7 @@ mod tests {
         assert_eq!(job.request, filtered);
         assert!(matches!(
             job.query,
-            Query::QueueEntries { query: Some(query), queue_ids }
+            Query::QueueEntryLocations { query: Some(query), queue_ids }
                 if query == "needle" && queue_ids == [11]
         ));
     }
@@ -1265,13 +1254,13 @@ mod tests {
     #[test]
     fn selection_changes_cancel_pending_navigation_and_range_results() {
         let mut queue = queue(7);
-        let stamp = queue.query().stamp(revisions(7));
+        let stamp = queue.selection_query().stamp(revisions(7));
         let generation = queue.projection.generation();
         queue.select(identity(1, 0), false);
         assert!(!queue.current(generation, stamp));
         assert!(!queue.current(
             queue.projection.generation(),
-            queue.query().stamp(revisions(8))
+            queue.selection_query().stamp(revisions(8))
         ));
         queue.busy = true;
         queue.navigation = Some(199_999);
@@ -1285,7 +1274,7 @@ mod tests {
         let mut queue = queue(0);
         queue.select(identity(1, 0), false);
         let generation = queue.projection.generation();
-        let stamp = queue.query().stamp(revisions(0));
+        let stamp = queue.selection_query().stamp(revisions(0));
         let anchor = identity(2, 199_997);
         let range = vec![anchor, identity(3, 199_998), identity(4, 199_999)];
         let target = identity(4, 199_999);
@@ -1309,7 +1298,7 @@ mod tests {
         ));
         assert!(!queue.complete_range(
             queue.projection.generation(),
-            queue.query().stamp(revisions(1)),
+            queue.selection_query().stamp(revisions(1)),
             anchor,
             target,
             vec![identity(1, 0)],
@@ -1400,7 +1389,10 @@ mod tests {
         assert_eq!(queue.rows.get(10).unwrap().id, 10);
         assert!(queue.rows.error(20).is_some());
         assert_eq!(queue.ordered_ids(), vec![10]);
-        assert!(queue.current(selected_generation, queue.query().stamp(unrelated)));
+        assert!(queue.current(
+            selected_generation,
+            queue.selection_query().stamp(unrelated)
+        ));
         assert!(
             queue
                 .page_projection
@@ -1585,7 +1577,10 @@ mod tests {
                     .accepts(&old, generation, revisions(7))
             );
             if !cancel {
-                assert!(queue.current(selection_generation, queue.query().stamp(revisions(7))));
+                assert!(queue.current(
+                    selection_generation,
+                    queue.selection_query().stamp(revisions(7))
+                ));
                 assert_eq!(queue.ordered_ids(), vec![10]);
                 assert!(queue.locate.current(locate, revisions(7), Some(11)));
                 assert!(queue.reconcile_pending.is_none());

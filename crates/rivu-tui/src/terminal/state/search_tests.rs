@@ -200,14 +200,17 @@ fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
     assert_eq!(tui.ui.queue.total, 2);
     let lookup = tui.ui.query_request(&next).unwrap();
     assert!(
-        matches!(lookup.demand.query(), Query::QueueEntries { query: Some(query), queue_ids } if query == "duplicate" && queue_ids == vec![202])
+        matches!(lookup.demand.query(), Query::QueueEntryLocations { query: Some(query), queue_ids } if query == "duplicate" && queue_ids == vec![202])
     );
     duplicate.position = 16;
     duplicate.offset = 0;
     assert!(tui.ui.apply_query(
         &next,
         &lookup,
-        Ok(result(&lookup, ViewResponse::QueueEntries(vec![duplicate])))
+        Ok(result(
+            &lookup,
+            ViewResponse::QueueEntryLocations(vec![QueueIdentity::from(&duplicate)])
+        ))
     ));
     assert_eq!(tui.ui.queue.selection.selected(), Some(0));
     let page = tui.ui.query_request(&next).unwrap();
@@ -232,7 +235,7 @@ fn filtered_queue_actions_use_occurrences_and_refresh_uses_filtered_offsets() {
     let clear = tui.ui.query_request(&next).unwrap();
     assert!(matches!(
         clear.demand.query(),
-        Query::QueueEntries { query: None, queue_ids } if queue_ids == vec![202]
+        Query::QueueEntryLocations { query: None, queue_ids } if queue_ids == vec![202]
     ));
 }
 
@@ -777,14 +780,17 @@ fn queue_search_changes_and_tab_clear_preserve_duplicate_occurrence() {
     replace_query(&mut ui, &state, "second");
     let lookup = ui.query_request(&state).unwrap();
     assert!(
-        matches!(lookup.demand.query(), Query::QueueEntries { queue_ids, query: Some(query) } if queue_ids == vec![1001] && query == "second")
+        matches!(lookup.demand.query(), Query::QueueEntryLocations { queue_ids, query: Some(query) } if query == "second" && queue_ids == vec![1001])
     );
     let mut selected = queue_row(17, 1001);
     selected.offset = 5;
     assert!(ui.apply_query(
         &state,
         &lookup,
-        Ok(result(&lookup, ViewResponse::QueueEntries(vec![selected])))
+        Ok(result(
+            &lookup,
+            ViewResponse::QueueEntryLocations(vec![QueueIdentity::from(&selected)])
+        ))
     ));
     let page = ui.query_request(&state).unwrap();
     assert_eq!(page.demand.offset, 4);
@@ -807,12 +813,12 @@ fn queue_search_changes_and_tab_clear_preserve_duplicate_occurrence() {
     key(&mut ui, &state, KeyCode::BackTab);
     let clear = ui.query_request(&state).unwrap();
     assert!(
-        matches!(clear.demand.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1001])
+        matches!(clear.demand.query(), Query::QueueEntryLocations { queue_ids, query: None } if queue_ids == vec![1001])
     );
     assert!(!ui.apply_query(
         &state,
         &lookup,
-        Ok(result(&lookup, ViewResponse::QueueEntries(vec![])))
+        Ok(result(&lookup, ViewResponse::QueueEntryLocations(vec![])))
     ));
 }
 
@@ -917,7 +923,7 @@ fn missing_search_identity_falls_back_once_without_ghost_targets() {
             replace_query(&mut tui.ui, &state, "second");
             let lookup = tui.ui.query_request(&state).unwrap();
             let missing = match kind {
-                0 => ViewResponse::QueueEntries(vec![]),
+                0 => ViewResponse::QueueEntryLocations(vec![]),
                 4 => ViewResponse::PlaylistEntryLocations(vec![]),
                 _ => ViewResponse::LibraryLocate(LibraryLocateResult::Filtered),
             };
@@ -1501,7 +1507,7 @@ fn navigation_cancels_pending_track_and_occurrence_search_locates() {
             0 => {
                 let mut row = queue_row(7, 1001);
                 row.offset = 7;
-                ViewResponse::QueueEntries(vec![row])
+                ViewResponse::QueueEntryLocations(vec![QueueIdentity::from(&row)])
             }
             4 => ViewResponse::PlaylistEntryLocations(vec![PlaylistEntryLocation {
                 id: 1,

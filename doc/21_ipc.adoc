@@ -799,10 +799,18 @@ order, and `offset` is its rank among query matches.
 matching rank, never the SQL keyset position. Queue content validates both
 unfiltered and filtered batches; bitrate-bearing payloads also select bitrate.
 Playback-only selection changes do not interrupt traversal.
-`QueueEntries {query, queue_ids}` resolves at most 256 occurrence IDs,
-omits removed IDs, deduplicates repeated IDs, and returns rows in queue order.
-The query response's `revisions.queue` is captured with the rows; clients discard
-late results if the active queue-content revision no longer matches.
+
+`QueueIdentityPage {query, offset, limit}` returns `Page<QueueIdentity>` for
+offset-based selection with the same filter, matching total, order, and page
+limit as `QueuePage`. Its rows are `{id, track_id, position, offset}` without
+display metadata. Duplicate track occurrences keep distinct IDs.
+`QueueEntryLocations {query, queue_ids}` returns the same compact rows for at
+most 256 requested occurrence IDs. It deduplicates repeated IDs, omits missing,
+filtered-out, and non-queue entries, and returns matches in queue order.
+For both projections, `position` is absolute and `offset` is the zero-based rank
+among all matches, not among the requested IDs. Both select the queue-content
+revision, not the bitrate revision; discard late results when the filter, request
+generation, or captured queue revision is no longer current.
 
 `PlaylistEntryLocations {playlist_id, query, entry_ids}` resolves at most 256 stable
 entry IDs to compact `{id, playlist_id, track_id, position, offset, total}` records
@@ -833,7 +841,7 @@ depend on library content and structure; the page also selects bitrate.
 identifies the collection, not a filesystem path.
 Display track rows include their logical source `path`.
 
-`QueuePage`, `QueueBatch`, `QueueEntries`, `PlaylistSummaries`,
+`QueuePage`, `QueueBatch`, `QueueIdentityPage`, `QueueEntryLocations`, `PlaylistSummaries`,
 `PlaylistSummaryBatch`, `PlaylistEntries`, `PlaylistEntryBatch`,
 `PlaylistEntryLocations`, and `AlbumTracks` accept an optional `query`.
 Summary searches match playlist names; track searches match effective title,

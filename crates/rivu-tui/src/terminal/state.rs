@@ -18,7 +18,7 @@ use rivu_protocol::query_tracking::QueryTracker;
 use rivu_protocol::{
     model::{
         Command, DirectoryRow, HistoryEntry, LibraryRow, PlaylistEntryRow, PlaylistSummary, Query,
-        QueueRow,
+        QueueIdentity, QueueRow,
     },
     response::{QueryError, ViewResponse},
 };
@@ -470,7 +470,7 @@ impl QueuePage {
     }
 
     // Report a miss only for an explicit :now command, not selection recovery.
-    fn locate(&mut self, queue_id: u64, rows: &[QueueRow]) -> bool {
+    fn locate(&mut self, queue_id: u64, rows: &[QueueIdentity]) -> bool {
         let row = rows.iter().find(|row| row.id == queue_id);
         if let Some(row) = row {
             self.rows.selection.select(Some(row.offset));
@@ -923,7 +923,7 @@ impl View {
             (View::Queue, ViewResponse::QueuePage(page)) if request.demand.kind() == ReadKind::Queue => {
                 queue.accept_page(&request.demand, page);
             }
-            (View::Queue, ViewResponse::QueueEntries(rows)) => {
+            (View::Queue, ViewResponse::QueueEntryLocations(rows)) => {
                 if let ReadKind::QueueSelection(queue_id) = request.demand.kind() {
                     return Ok(queue.locate(queue_id, &rows));
                 } else {

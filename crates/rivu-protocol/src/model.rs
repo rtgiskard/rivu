@@ -258,6 +258,27 @@ pub struct QueueRow {
     pub track: LibraryRow,
 }
 
+/// A queue occurrence and its coordinates in a query, without track metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueIdentity {
+    pub id: u64,
+    pub track_id: i64,
+    pub position: usize,
+    /// Zero-based index among the current query's matches.
+    pub offset: usize,
+}
+
+impl From<&QueueRow> for QueueIdentity {
+    fn from(row: &QueueRow) -> Self {
+        Self {
+            id: row.id,
+            track_id: row.track.id,
+            position: row.position,
+            offset: row.offset,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueCursor {
     pub position: usize,
@@ -1196,7 +1217,7 @@ mod tests {
                 limit: 2,
                 expected: None,
             },
-            Query::QueueEntries {
+            Query::QueueEntryLocations {
                 query: None,
                 queue_ids: vec![1],
             },
@@ -1210,7 +1231,7 @@ mod tests {
             | Query::PlaylistEntryBatch { query: filter, .. }
             | Query::QueuePage { query: filter, .. }
             | Query::QueueBatch { query: filter, .. }
-            | Query::QueueEntries { query: filter, .. }) = &mut query
+            | Query::QueueEntryLocations { query: filter, .. }) = &mut query
             else {
                 unreachable!()
             };
@@ -1298,7 +1319,7 @@ mod tests {
                     limit: 2,
                     expected: None,
                 },
-                Query::QueueEntries {
+                Query::QueueEntryLocations {
                     query: query.clone(),
                     queue_ids: vec![1],
                 },

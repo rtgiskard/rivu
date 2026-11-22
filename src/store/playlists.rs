@@ -1817,7 +1817,7 @@ mod occurrence_tests {
         assert!(store.remove_queue_entries(&[foreign]).is_err());
         assert!(store.move_queue_entries(&[foreign], 0).is_err());
         assert!(store.queue_track_id(foreign).is_err());
-        assert!(store.queue_entries(None, &[foreign])?.is_empty());
+        assert!(store.queue_entry_locations(None, &[foreign])?.is_empty());
         let queue_entry = copied_queue.rows[0].id as i64;
         assert!(
             store

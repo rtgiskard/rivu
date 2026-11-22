@@ -389,9 +389,14 @@ fn optional_search_queries_round_trip() {
                 limit: 3,
                 expected: None,
             },
-            Query::QueueEntries {
+            Query::QueueIdentityPage {
                 query: query.clone(),
-                queue_ids: vec![42, 43],
+                offset: 2,
+                limit: 3,
+            },
+            Query::QueueEntryLocations {
+                query: query.clone(),
+                queue_ids: vec![42, 43, 42],
             },
         ] {
             assert_query_round_trip(&mut encoded, expected);
@@ -1772,7 +1777,7 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
             limit: 64,
             expected: None,
         },
-        Query::QueueEntries {
+        Query::QueueEntryLocations {
             query: None,
             queue_ids: vec![1, 3, 3],
         },
@@ -1783,6 +1788,51 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
         name: "All occurrences".into(),
     };
     assert_command_round_trip(&mut encoded, command);
+}
+
+#[test]
+fn queue_identity_replies_round_trip() {
+    use rivu_protocol::{
+        model::{Page, QueueIdentity},
+        response::{QueryRevisions, ViewResponse},
+    };
+
+    let rows = vec![
+        QueueIdentity {
+            id: 42,
+            track_id: 7,
+            position: 10,
+            offset: 3,
+        },
+        QueueIdentity {
+            id: 20,
+            track_id: 7,
+            position: 12,
+            offset: 4,
+        },
+    ];
+    let mut encoded = Vec::new();
+    for result in [
+        ViewResponse::QueueIdentityPage(Page {
+            rows: rows.clone(),
+            total: 9,
+        }),
+        ViewResponse::QueueEntryLocations(rows),
+    ] {
+        let response = QueryResponse {
+            revisions: QueryRevisions {
+                queue: 11,
+                ..Default::default()
+            },
+            result: Ok(result),
+        };
+        let expected = serde_json::to_value(&response).unwrap();
+        encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
+        let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+            panic!("expected query response");
+        };
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+    }
 }
 
 #[test]

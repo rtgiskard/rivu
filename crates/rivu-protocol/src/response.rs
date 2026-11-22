@@ -1,8 +1,8 @@
 use crate::model::{
     Batch, BatchContinuation, ClientSnapshot, ConfigurationState, DirectoryRow, LibraryRootCount,
     LibraryRow, LibrarySnapshot, LibraryStats, Page, PlaybackState, PlaylistEntryCursor,
-    PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, QueueCursor, QueueRow, QueueState,
-    SystemState, Track,
+    PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, QueueCursor, QueueIdentity, QueueRow,
+    QueueState, SystemState, Track,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
@@ -280,7 +280,6 @@ pub enum ViewResponse {
     ScanTask(crate::model::ScanTaskStatus),
     QueuePage(Page<QueueRow>),
     QueueBatch(Batch<QueueRow, BatchContinuation<QueueCursor>>),
-    QueueEntries(Vec<QueueRow>),
     PlaylistEntry(Option<PlaylistEntryLocation>),
     DuplicateGroups(Page<crate::model::DuplicateGroup>),
     DuplicateMembers(Page<crate::model::DuplicateMember>),
@@ -296,6 +295,8 @@ pub enum ViewResponse {
         page: Page<crate::model::DuplicateMember>,
         selected: Vec<crate::model::DuplicateMember>,
     },
+    QueueIdentityPage(Page<QueueIdentity>),
+    QueueEntryLocations(Vec<QueueIdentity>),
 }
 /// Final task status, returned only after the owner commits its outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]

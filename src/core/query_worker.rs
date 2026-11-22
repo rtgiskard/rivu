@@ -152,9 +152,19 @@ impl ReadView<'_> {
                 *limit,
                 current_stamp,
             )?),
-            Query::QueueEntries { query, queue_ids } => {
-                ViewResponse::QueueEntries(self.store.queue_entries(query.as_deref(), queue_ids)?)
-            }
+            Query::QueueIdentityPage {
+                query,
+                offset,
+                limit,
+            } => ViewResponse::QueueIdentityPage(self.store.queue_identity_page(
+                query.as_deref(),
+                *offset,
+                *limit,
+            )?),
+            Query::QueueEntryLocations { query, queue_ids } => ViewResponse::QueueEntryLocations(
+                self.store
+                    .queue_entry_locations(query.as_deref(), queue_ids)?,
+            ),
             Query::ScanTask { .. } => unreachable!("task status stays on Core"),
             Query::OtherTracksPage { limit: 0, .. } | Query::LibraryRootPage { limit: 0, .. } => {
                 return Err(QueryError::Message(
@@ -1357,6 +1367,8 @@ mod tests {
 
     #[test]
     fn filtered_queue_reads_and_continuations_follow_only_queue_inputs() {
+        use rivu_protocol::model::QueueIdentity;
+
         let (directory, mut core) = super::super::tests::fixture();
         let queue_id = core.store.queued_track(4).unwrap().unwrap();
         core.command(Command::RemoveQueue { queue_id }).unwrap();
@@ -1443,9 +1455,14 @@ mod tests {
                 limit: 10,
                 expected: None,
             };
+            let identities: Vec<_> = page.rows.iter().map(QueueIdentity::from).collect();
             let assert_unchanged = |response: QueryResponse| match response.result.unwrap() {
                 ViewResponse::QueuePage(current) => assert_eq!(current, page),
-                ViewResponse::QueueEntries(current) => assert_eq!(current, page.rows),
+                ViewResponse::QueueIdentityPage(current) => {
+                    assert_eq!(current.total, page.total);
+                    assert_eq!(current.rows, identities);
+                }
+                ViewResponse::QueueEntryLocations(current) => assert_eq!(current, identities),
                 ViewResponse::QueueBatch(current) => {
                     assert_eq!(current.rows, page.rows[1..]);
                     assert!(current.next.is_none());
@@ -1456,7 +1473,12 @@ mod tests {
             core.publish();
             for query in [
                 page_query.clone(),
-                Query::QueueEntries {
+                Query::QueueIdentityPage {
+                    query: Some("track".into()),
+                    offset: 0,
+                    limit: 10,
+                },
+                Query::QueueEntryLocations {
                     query: Some("track".into()),
                     queue_ids: page.rows.iter().map(|row| row.id).collect(),
                 },
