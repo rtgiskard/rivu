@@ -200,6 +200,25 @@ pub struct AudioRenderSnapshot {
 }
 
 impl AudioRenderSnapshot {
+    pub(crate) fn active(
+        source: &source::Source,
+        path: PathBuf,
+        range: Option<PlaybackRange>,
+        signal: rivu_format::config::VisualizationSignal,
+        equalizer: Arc<rivu_dsp::equalizer::config::EqualizerConfig>,
+    ) -> Self {
+        // Only file-backed sources use this route. Retained PCM is rendered directly.
+        let decoder_hint = if source.uses_ffmpeg() {
+            DecoderHint::Ffmpeg
+        } else {
+            DecoderHint::Native
+        };
+        let mut snapshot = Self::original(path, range, decoder_hint, signal, equalizer);
+        snapshot.expected_identity = Some(source.identity());
+        snapshot.pcm = source.pcm().cloned();
+        snapshot
+    }
+
     pub fn original(
         path: PathBuf,
         range: Option<PlaybackRange>,

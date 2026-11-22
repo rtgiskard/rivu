@@ -93,9 +93,9 @@ requested range. A CUE selection is the origin for range and media time.
 Realtime and finite layouts contain 1–18 unique standard channel IDs; both
 endpoints validate the same count, ID range and uniqueness constraints before
 exposing native channels to consumers.
-The renderer captures immutable actual source, graph and monitor EQ state. After
-rerenders that snapshot; it does not retrieve historical output. Reconstruction
-errors are explicit, never a fallback to a different source or graph.
+The renderer captures the active source, including its selected decoder, along
+with graph and monitor EQ state. After rerenders that snapshot. Reconstruction
+fails explicitly if the captured source, decoder or graph cannot be reproduced.
 
 The sender batches adjacent render events into packets of at most 4096 frames
 and 32 KiB of sample data, aligned to whole native-channel frames. A media-step

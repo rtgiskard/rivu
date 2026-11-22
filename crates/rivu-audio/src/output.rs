@@ -846,7 +846,7 @@ impl Output {
         self.heard_frames() == self.submitted
     }
 
-    fn heard_frames(&self) -> u64 {
+    pub(super) fn heard_frames(&self) -> u64 {
         self.final_heard_frames
             .unwrap_or_else(|| self.shared.pcm.heard_frame.load(Ordering::Acquire))
     }
@@ -854,6 +854,7 @@ impl Output {
     pub(super) fn heard(&self) -> f64 {
         self.heard_frames() as f64 / self.rate as f64
     }
+    #[cfg(test)]
     pub(super) fn position(&self) -> f64 {
         // The source cursor advances only as scheduled PCM becomes audible.
         self.heard()

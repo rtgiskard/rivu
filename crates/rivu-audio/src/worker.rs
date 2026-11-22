@@ -679,7 +679,6 @@ impl Worker {
                     PlaybackOptions {
                         path: opening.path,
                         range: opening.range,
-                        decoder_hint: opening.decoder_hint,
                         generation,
                         metadata: opening.metadata,
                         start: opening.start,

@@ -329,6 +329,9 @@ Ordinary audio plays to actual decoder EOF; an estimated metadata duration is
 not a playback cutoff. An explicit CUE subtrack end remains a hard playback bound.
 A rescan does not replace an already loaded CUE source or bounds. Seeking uses
 the loaded range; the next explicit playback start adopts catalog changes.
+The playback cursor and output recovery follow confirmed PCM on the source
+timeline. They skip timestamp gaps, while listening statistics count only
+audio that reached the device.
 
 Seek targets must be finite, non-negative, and representable on the source
 timeline. Invalid targets report an error without stopping playback, including

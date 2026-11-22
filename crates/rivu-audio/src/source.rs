@@ -3140,6 +3140,31 @@ pub(super) mod tests {
         }
     }
 
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn active_render_pins_auto_fallback_decoder() {
+        let file = opus_file_with_mapping(true);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, true).unwrap();
+        assert!(source.uses_ffmpeg());
+        let snapshot = crate::AudioRenderSnapshot::active(
+            &source,
+            file.path().to_owned(),
+            None,
+            rivu_format::config::VisualizationSignal::Before,
+            Arc::default(),
+        );
+        let expected = decode_remaining(&mut source);
+        assert!(!expected.is_empty());
+        let cancelled = AtomicBool::new(false);
+        let rendered = crate::render::collect_stream(&snapshot, 2, true, &cancelled).unwrap();
+        assert_eq!(rendered.samples, expected);
+        assert_eq!(rendered.source_identity, Some(source.identity()));
+
+        let error = crate::render::collect_stream(&snapshot, 2, false, &cancelled).unwrap_err();
+        assert!(format!("{error:#}").contains("FFmpeg extension is disabled"));
+    }
+
     #[test]
     fn completed_duration_requires_uninterrupted_origin_traversal() {
         let file = opus_file();
