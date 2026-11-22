@@ -178,40 +178,46 @@ pub(super) async fn ensure_service(
     let mut child = command
         .spawn()
         .context("Starting independent Rivu service")?;
-    let ready = async {
-        let mut backoff = Duration::from_millis(10);
-        let ready = loop {
-            match probe(data_dir, deadline).await {
-                Ok(instance) => break Ok(instance),
-                Err(error) if rivu_client::is_no_instance(&error) => {
-                    // A competing starter may have won ownership; its Hello,
-                    // not the child PID or exit code, is authoritative.
-                    if let Some(status) = child.try_status().context("Observing service startup")? {
-                        break Err(error).with_context(|| {
-                            format!("Rivu service exited before readiness ({status})")
-                        });
-                    }
-                    if Instant::now() >= deadline {
-                        break Err(error).context("Waiting for service Hello readiness timed out");
-                    }
-                }
-                Err(error) => break Err(error),
-            }
-            async_io::Timer::at((Instant::now() + backoff).min(deadline)).await;
-            backoff = (backoff * 2).min(Duration::from_millis(500));
-        };
-        if ready.is_err() {
-            // Releasing the listener can precede the child's final error print.
-            // Preserve that diagnostic without extending the startup budget or
-            // killing a service which may still finish after our deadline.
-            let _ = timeout_at(deadline, child.status()).await;
-        }
-        ready
+    let ready = wait_for_service(data_dir, deadline, || child.try_status()).await;
+    if ready.is_err() {
+        // Releasing the listener can precede the child's final error print.
+        // Preserve that diagnostic within the existing startup budget.
+        let _ = timeout_at(deadline, child.status()).await;
     }
-    .await;
     // async-process reaps dropped children without killing them or tying their
     // lifetime to a frontend-owned waiter thread.
     ready.with_context(|| diagnostics.failure_context())
+}
+
+async fn wait_for_service(
+    data_dir: &Path,
+    deadline: Instant,
+    mut child_status: impl FnMut() -> std::io::Result<Option<std::process::ExitStatus>>,
+) -> Result<u32> {
+    let mut backoff = Duration::from_millis(10);
+    loop {
+        match probe(data_dir, deadline).await {
+            Err(error) if rivu_client::is_no_instance(&error) => {
+                if let Some(status) = child_status().context("Observing service startup")? {
+                    // A competing owner can bind after the refused connection
+                    // and before the child exits. Use a fresh Hello result.
+                    return match probe(data_dir, deadline).await {
+                        Err(error) if rivu_client::is_no_instance(&error) => Err(error)
+                            .with_context(|| {
+                                format!("Rivu service exited before readiness ({status})")
+                            }),
+                        result => result,
+                    };
+                }
+                if Instant::now() >= deadline {
+                    return Err(error).context("Waiting for service Hello readiness timed out");
+                }
+            }
+            result => return result,
+        }
+        async_io::Timer::at((Instant::now() + backoff).min(deadline)).await;
+        backoff = (backoff * 2).min(Duration::from_millis(500));
+    }
 }
 
 #[cfg(test)]

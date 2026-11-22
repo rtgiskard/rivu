@@ -141,8 +141,10 @@ sequenceDiagram
 
 Connection and Hello share one 30-second deadline; absent-listener retries back
 off from 10 ms to at most 500 ms. A bound listener receives one waiting Hello.
-A live child or bound socket alone is not readiness. An existing Core keeps its
-configuration even if the new frontend supplies another config path.
+A live child or bound socket alone is insufficient. If the child exits after
+a refused connection, a final probe checks for a competing Core within the same
+deadline. An existing Core keeps its configuration even if the new frontend
+supplies another config path.
 
 Automatically started Core processes detach from the terminal session and use
 at most 64 KiB of anonymous startup diagnostic storage. Successful initialization

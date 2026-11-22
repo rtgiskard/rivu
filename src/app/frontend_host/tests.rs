@@ -153,6 +153,38 @@ fn probe_rejects_invalid_handshakes_without_losing_the_protocol_error() {
 }
 
 #[test]
+fn child_exit_after_refused_probe_checks_competing_core() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let directory = socket_test_directory();
+    let address = rivu_protocol::wire::address(directory.path()).unwrap();
+    let (bound, listener) = async_channel::bounded(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let instance = async_io::block_on(future::or(
+        super::wait_for_service(directory.path(), deadline, || {
+            // Bind only after the first connection was refused, immediately
+            // before the launcher learns its own child lost the race.
+            let socket = async_io::Async::new(UnixListener::bind_addr(&address)?)?;
+            bound.try_send(socket).unwrap();
+            Ok(Some(std::process::ExitStatus::from_raw(1 << 8)))
+        }),
+        async {
+            let listener = listener.recv().await.unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_request_frame(&mut stream, &mut bytes::BytesMut::new())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(request, WireRequest::Hello(_)));
+            stream.write_all(&hello_frame(42)).await.unwrap();
+            future::pending().await
+        },
+    ))
+    .unwrap();
+    assert_eq!(instance, 42);
+}
+
+#[test]
 fn cancelling_startup_closes_pending_hello_but_preserves_the_existing_owner() {
     if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
         return;
