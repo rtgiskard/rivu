@@ -23,7 +23,7 @@ use super::{
         owned_artwork_source,
     },
     components::{
-        search::{SearchScope, new_search, set_search_counts},
+        search::{SearchScope, new_search},
         track::{TrackText, track_list_row},
     },
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
@@ -385,7 +385,9 @@ impl AlbumBrowser {
         let now = cx.background_executor().now();
         let change = self.model.sync(visible, revisions, page_size, now);
         let data_changed = change.data.any();
-        self.apply_data_change(change.data, now, cx);
+        if data_changed || change.demand {
+            self.apply_data_change(change.data, now, cx);
+        }
         self.schedule_refresh(cx);
         if change.visibility && !visible {
             self.loading_text.clear();
@@ -414,7 +416,7 @@ impl AlbumBrowser {
     }
 
     fn apply_data_change(&mut self, change: DataChange, now: Instant, cx: &mut App) {
-        self.clear_stale_counts(change, now, cx);
+        self.update_search_counts(now, cx);
         if (self.model.selected().is_none() && change.albums)
             || (self.model.selected().is_some() && change.tracks)
         {
@@ -422,15 +424,25 @@ impl AlbumBrowser {
         }
     }
 
-    /// Counts stay with retained rows and disappear only with them.
-    fn clear_stale_counts(&mut self, change: DataChange, now: Instant, cx: &mut App) {
-        if change.albums && self.model.albums().display_total(now).is_none() {
-            self.album_search
-                .update(cx, |search, cx| search.clear_counts(cx));
+    /// Match the count's lifetime to the current or retained page presentation.
+    fn update_search_counts(&self, now: Instant, cx: &mut App) {
+        for (search, count) in [
+            (&self.album_search, self.model.albums().display_total(now)),
+            (&self.tracks_search, self.model.tracks().display_total(now)),
+        ] {
+            search.update(cx, |search, cx| match count {
+                Some(count) => {
+                    search.set_count_parts(Some(count), None, |_, _| count.to_string().into(), cx)
+                }
+                None => search.clear_counts(cx),
+            });
         }
-        if change.tracks && self.model.tracks().display_total(now).is_none() {
-            self.tracks_search
-                .update(cx, |search, cx| search.clear_counts(cx));
+    }
+
+    fn sync_viewport_count(&self, previous: Option<usize>, now: Instant, cx: &mut Context<Self>) {
+        if self.model.display_total(now) != previous {
+            self.update_search_counts(now, cx);
+            cx.notify();
         }
     }
 
@@ -442,7 +454,7 @@ impl AlbumBrowser {
             |this| this.model.refresh_deadline(),
             |this, now, cx| {
                 let expired = this.model.expire_refresh(now);
-                this.clear_stale_counts(expired, now, cx);
+                this.update_search_counts(now, cx);
                 if expired.albums {
                     this.sync_covers(cx);
                 }
@@ -468,32 +480,23 @@ impl AlbumBrowser {
     }
 
     fn request_next(&mut self, cx: &mut Context<Self>) {
-        let page = self.model.prepare();
-        let count = if page.is_none() {
-            self.model.prepare_missing_count()
-        } else {
-            None
-        };
-        if page.is_none() && count.is_none() {
+        let Some(Request {
+            query,
+            generation,
+            ticket,
+        }) = self.model.prepare()
+        else {
             return;
-        }
-        if let Some(page) = &page {
-            self.loading_text
-                .begin((), page.generation, cx.background_executor().now());
-            self.loading_text
-                .schedule(cx, |this| &mut this.loading_text);
-        }
+        };
+        self.loading_text
+            .begin((), generation, cx.background_executor().now());
+        self.loading_text
+            .schedule(cx, |this| &mut this.loading_text);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let count = if let Some(Request {
-                query,
-                generation,
-                ticket,
-            }) = page
-            {
-                let worker_query = query.clone();
-                let response = super::query::run(
-                handle.clone(),
+            let worker_query = query.clone();
+            let response = super::query::run(
+                handle,
                 cx,
                 move |handle| async move { handle.query_if_current(worker_query, ticket).await },
                 |response, cx| {
@@ -506,7 +509,9 @@ impl AlbumBrowser {
                             this.capture_grid_anchor();
                         }
                         let now = cx.background_executor().now();
-                        let data = this.model.timeout(&query, generation, response, revisions, now);
+                        let data = this
+                            .model
+                            .timeout(&query, generation, response, revisions, now);
                         this.apply_data_change(data, now, cx);
                         this.schedule_refresh(cx);
                         this.sync_covers(cx);
@@ -515,53 +520,24 @@ impl AlbumBrowser {
                 },
             )
             .await;
-                this.update(cx, |this, cx| {
-                    this.loading_text.finish(&(), generation);
-                    this.loading_text
-                        .schedule(cx, |this| &mut this.loading_text);
-                    let revisions = this.snapshots.read().query_revisions(None);
-                    if this.model.albums_need_refresh(revisions) {
-                        this.capture_grid_anchor();
-                    }
-                    let now = cx.background_executor().now();
-                    let completion = this.model.complete_page(
-                        &query,
-                        generation,
-                        response,
-                        revisions,
-                        this.i18n.text("gl-album-response"),
-                        now,
-                    );
-                    let published = completion.published;
-                    this.apply_completion(completion, now, cx);
-                    if published != Published::None {
-                        this.model.prepare_count(&query, generation)
-                    } else {
-                        None
-                    }
-                })
-                .ok()
-                .flatten()
-            } else {
-                count
-            };
-            if let Some(count) = count {
-                let count_query = count.query.clone();
-                let ticket = count.ticket.clone();
-                // No page feedback is attached to the auxiliary query's deadline.
-                // query_if_current still drains its physical reply after timeout.
-                let response = handle.query_if_current(count_query, ticket).await;
-                let _ = this.update(cx, |this, cx| {
-                    let revisions = this.snapshots.read().query_revisions(None);
-                    if this.model.albums_need_refresh(revisions) {
-                        this.capture_grid_anchor();
-                    }
-                    let now = cx.background_executor().now();
-                    let completion = this.model.complete_count(&count, response, revisions, now);
-                    this.apply_completion(completion, now, cx);
-                });
-            }
             let _ = this.update(cx, |this, cx| {
+                this.loading_text.finish(&(), generation);
+                this.loading_text
+                    .schedule(cx, |this| &mut this.loading_text);
+                let revisions = this.snapshots.read().query_revisions(None);
+                if this.model.albums_need_refresh(revisions) {
+                    this.capture_grid_anchor();
+                }
+                let now = cx.background_executor().now();
+                let completion = this.model.complete_page(
+                    &query,
+                    generation,
+                    response,
+                    revisions,
+                    this.i18n.text("gl-album-response"),
+                    now,
+                );
+                this.apply_completion(completion, now, cx);
                 this.model.retire_worker();
                 this.request_next(cx);
             });
@@ -581,16 +557,8 @@ impl AlbumBrowser {
         // Failure or rejection may also withdraw retained cards and their cover demand.
         let albums_changed = completion.data.albums
             || (completion.changed && completion.published != Published::Tracks);
-        self.apply_data_change(completion.data, now, cx);
-        if let Some((matches, total)) = completion.counts {
-            let search = match completion.published {
-                Published::Albums => &self.album_search,
-                Published::Tracks => &self.tracks_search,
-                Published::None => unreachable!(),
-            };
-            search.update(cx, |search, cx| {
-                set_search_counts(search, matches, total, &self.i18n, cx)
-            });
+        if changed {
+            self.apply_data_change(completion.data, now, cx);
         }
         self.schedule_refresh(cx);
         if albums_changed {
@@ -604,7 +572,9 @@ impl AlbumBrowser {
     }
 
     pub(super) fn retry(&mut self, cx: &mut Context<Self>) {
-        self.model.retry(cx.background_executor().now());
+        let now = cx.background_executor().now();
+        self.model.retry(now);
+        self.update_search_counts(now, cx);
         self.schedule_refresh(cx);
         self.request_next(cx);
         cx.notify();
@@ -766,7 +736,10 @@ impl AlbumBrowser {
         let changed = self.demand != (start..end);
         self.demand = start..end;
         // Updating demand while a request is pending still records the latest viewport.
+        let now = cx.background_executor().now();
+        let previous = self.model.display_total(now);
         self.model.demand_albums(self.demand.clone());
+        self.sync_viewport_count(previous, now, cx);
         if changed {
             self.sync_covers(cx);
         }
@@ -1106,7 +1079,6 @@ impl Render for AlbumBrowser {
         self.scroll_views.borrow_mut().begin_panel(self.panel_id);
         let theme = rivu_ui::theme::palette(cx);
         let now = cx.background_executor().now();
-        let total = self.model.display_total(now);
         let header;
         if let Some(key) = self.model.selected() {
             let play_key = key.clone();
@@ -1198,6 +1170,7 @@ impl Render for AlbumBrowser {
                 );
             header = rivu_ui::panel_heading_row(heading, actions);
         } else {
+            let total = self.model.display_total(now);
             let heading = rivu_ui::list_panel_header(
                 theme,
                 self.tr("shell-panel-albums"),
@@ -1257,7 +1230,7 @@ impl Render for AlbumBrowser {
                 column()
                     .child(caption(
                         theme,
-                        self.tr(if self.model.tracks_query().is_some() && total != Some(0) {
+                        self.tr(if self.model.tracks_query().is_some() {
                             "gl-album-tracks-no-matches"
                         } else {
                             "gl-album-no-tracks"
@@ -1398,7 +1371,10 @@ impl Render for AlbumBrowser {
                     }),
                 )
                 .on_viewport_deferred(track_demand_owner, move |this, range, cx| {
+                    let now = cx.background_executor().now();
+                    let previous = this.model.display_total(now);
                     if this.model.demand_tracks(range, generation) {
+                        this.sync_viewport_count(previous, now, cx);
                         this.request_next(cx);
                     }
                 })
@@ -1413,7 +1389,7 @@ impl Render for AlbumBrowser {
             column()
                 .child(caption(
                     theme,
-                    if self.model.query().is_some() && total != Some(0) {
+                    if self.model.query().is_some() {
                         self.tr("gl-albums-no-matches")
                     } else {
                         self.tr("gl-albums-empty")

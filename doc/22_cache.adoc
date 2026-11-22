@@ -122,8 +122,8 @@ changes retire member rows for demand-driven reload while preserving selection,
 counts, geometry, and known-empty results. Statistics and bitrate changes do
 not retire album cards. No reverse track-to-view index is required. See
 link:21_ipc.adoc#query-results-and-pagination[IPC query stamps].
-Fresh unfiltered pages reuse valid album and member totals rather than requesting
-those totals again.
+Each listing displays the current page query's count: all entries when unfiltered,
+or matching entries during search. No separate unfiltered count is read for search.
 
 Whole-album ID collection accepts each successful page against the album token
 and current collection intent. Core still validates the full `AlbumTracks`
@@ -205,13 +205,10 @@ authoritative query stamp, changed demand, or explicit retry permits another rea
 physical retirement still owns the execution slot. Genuine query failures remain
 visible through the feature's normal error handling.
 
-Album Browser publishes rows before querying an uncached unfiltered search total.
-Missing totals have their own demand: after an obsolete count physically retires,
-a known-empty filtered result can fetch its total without reloading empty payload.
-A page timeout cannot suppress counts after that page's physical worker retires.
-An auxiliary failure leaves rows usable and the counter unavailable, without
-automatic retry; its physical slot follows the same retirement rule. Explicit
-retry preserves valid pages, but obsolete authority requires fresh page reads.
+Album Browser gets the current listing's count from its page response, including
+for empty results. The album grid and member list share one physical page worker
+slot. Counts can stay visible with retained rows during refresh; retry preserves
+valid pages, but obsolete authority requires fresh page reads.
 
 [cols="1,3",options="header"]
 |===
@@ -330,7 +327,7 @@ The album grid retains cover leases only while their cards remain displayable.
 Fresh pages preserve unchanged artwork; changed sources replace their covers.
 Scrolling sheds retained offscreen pages, and query changes, page failures,
 rejected authority, and the 200 ms deadline release obsolete presentation and
-image leases. Page and count completions also reconcile cover demand.
+image leases. Page completions also reconcile cover demand.
 
 Page-size changes clear boundary-dependent pages, failures, and reservations, not
 totals, geometry, or identity selections. Hiding and logical cancellation preserve

@@ -175,7 +175,9 @@ An empty field folds on losing focus. A nonempty field stays visible; Clear sear
 restores the complete list without closing it. From list focus, Esc first clears
 the query, then folds an empty field; editors, popups, and composition take precedence.
 
-The open field shows matches / total; unavailable totals do not hide loaded results.
+The open field usually shows matches / total; unavailable totals do not hide
+loaded results. Albums and album track lists show just the matching count
+while searching, including zero, and the full count when search is cleared.
 No matches is distinct from an empty collection. Search changes the view, not
 saved contents or playback order.
 
@@ -260,6 +262,8 @@ Search matches album titles or member artists across the library. An artist matc
 keeps the complete album, including other artists' tracks. The sort icon switches
 between title and artist order. Search and sort changes return to the top; Back,
 resizing, hiding, playback, and refreshes preserve browsing position where possible.
+The Albums header follows the same rule: it shows matching albums during search
+and the total number of albums otherwise.
 Each Albums panel keeps independent browsing state. Both views load while scrolling;
 failed loads offer Retry without replacing other rows.
 
