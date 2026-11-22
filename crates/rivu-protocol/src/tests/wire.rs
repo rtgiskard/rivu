@@ -1670,7 +1670,6 @@ fn album_queries_and_commands_round_trip_exact_keys() {
     }
     for command in [
         Command::PlayAlbum { key: key.clone() },
-        Command::EnqueueAlbum { key: key.clone() },
         Command::SetAlbumFavorite {
             key: key.clone(),
             revision: u64::MAX,

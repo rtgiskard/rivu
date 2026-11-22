@@ -1486,6 +1486,8 @@ fn playlist_lifecycles_only_invalidate_member_facts_for_committed_members() {
 
 #[test]
 fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
+    use rivu_protocol::model::{CollectionDestination, CollectionSource};
+
     let (directory, mut core) = fixture();
     let records = (0..MAX_QUERY_ROWS + 3)
         .map(|number| ScanRecord {
@@ -1524,8 +1526,14 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         directory: directory.path().into(),
         title: "Large".into(),
     };
-    core.command(Command::EnqueueAlbum { key: key.clone() })
-        .unwrap();
+    core.command(Command::TransferCollection {
+        source: CollectionSource::Album {
+            key: key.clone(),
+            revision: core.state.library.album_revision,
+        },
+        destination: CollectionDestination::Queue { insertion: None },
+    })
+    .unwrap();
     assert_eq!(core.state.queue.total, MAX_QUERY_ROWS + 8);
     let first = core.store.album_tracks_page(&key, None, 0, 1).unwrap().rows[0].id;
     core.command(Command::CreatePlaylist {
@@ -1537,7 +1545,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         revision: core.state.library.album_revision,
     };
     core.command(Command::TransferCollection {
-        source: source.clone(),
+        source,
         destination: rivu_protocol::model::CollectionDestination::Playlist {
             playlist_id: 1,
             revision: core.state.library.playlist_entry_revisions[&1],
@@ -1552,12 +1560,6 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
             .total,
         MAX_QUERY_ROWS + 3
     );
-    core.command(Command::TransferCollection {
-        source,
-        destination: rivu_protocol::model::CollectionDestination::Queue { insertion: None },
-    })
-    .unwrap();
-    assert_eq!(core.state.queue.total, 2 * (MAX_QUERY_ROWS + 3) + 5);
     write_pcm(&core.track(first).unwrap().path);
     let _commands = recording_audio(&mut core);
     core.command(Command::PlayAlbum { key }).unwrap();
@@ -1583,7 +1585,13 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         };
         for command in [
             Command::PlayAlbum { key: key.clone() },
-            Command::EnqueueAlbum { key: key.clone() },
+            Command::TransferCollection {
+                source: CollectionSource::Album {
+                    key: key.clone(),
+                    revision: core.state.library.album_revision,
+                },
+                destination: CollectionDestination::Queue { insertion: None },
+            },
         ] {
             assert!(core.command(command).is_err());
             assert_eq!(core.store.queue_ids().unwrap(), queue);
@@ -2685,8 +2693,8 @@ fn clear_and_dedup_commits_recover_without_replaying_mutation() {
 }
 
 #[test]
-fn collection_and_album_enqueue_failures_distinguish_commits_without_replaying_writes() {
-    for entry in ["album", "album_transfer", "playlist_transfer"] {
+fn collection_enqueue_failures_distinguish_commits_without_replaying_writes() {
+    for entry in ["album_transfer", "playlist_transfer"] {
         for committed in [false, true] {
             let (directory, mut core) = fixture();
             core.edit_track(1, None, None, Some("Queued album".into()), None, None)
@@ -2700,7 +2708,6 @@ fn collection_and_album_enqueue_failures_distinguish_commits_without_replaying_w
                 title: "Queued album".into(),
             };
             let command = match entry {
-                "album" => Command::EnqueueAlbum { key },
                 "album_transfer" => Command::TransferCollection {
                     source: CollectionSource::Album {
                         key,

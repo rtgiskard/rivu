@@ -18,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 54;
+pub const PROTOCOL_VERSION: u8 = 55;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -486,9 +486,6 @@ pub enum WireCommand {
         expected_revision: u64,
     },
     PlayAlbum {
-        key: crate::model::AlbumKey,
-    },
-    EnqueueAlbum {
         key: crate::model::AlbumKey,
     },
     ToggleFavorite {
@@ -1159,7 +1156,6 @@ impl From<Command> for WireCommand {
                 expected_revision,
             },
             Command::PlayAlbum { key } => Self::PlayAlbum { key },
-            Command::EnqueueAlbum { key } => Self::EnqueueAlbum { key },
             Command::OptimizeDatabase => Self::OptimizeDatabase,
             Command::SetPlayCount {
                 track_id,
@@ -1507,7 +1503,6 @@ impl TryFrom<WireCommand> for Command {
                 expected_revision,
             },
             WireCommand::PlayAlbum { key } => Self::PlayAlbum { key },
-            WireCommand::EnqueueAlbum { key } => Self::EnqueueAlbum { key },
             WireCommand::ShowWindow => bail!("ShowWindow is an application request"),
             WireCommand::OptimizeDatabase => Self::OptimizeDatabase,
             WireCommand::SetPlayCount {

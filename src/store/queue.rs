@@ -910,14 +910,14 @@ mod tests {
         assert!(store.replace_queue_from_playlist(playlist).is_err());
         assert_eq!(store.queue_ids()?, ids);
         assert_eq!(store.queue_state()?, before);
-        assert!(store.queue_album(&album, true).is_err());
+        assert!(store.replace_queue_with_album(&album).is_err());
         assert_eq!(store.queue_ids()?, ids);
         assert_eq!(store.queue_state()?, before);
 
         store
             .conn
             .execute_batch("DROP TRIGGER reject_replacement_insert;")?;
-        store.queue_album(&album, true)?;
+        store.replace_queue_with_album(&album)?;
         assert_eq!(store.queue_state()?.total, 2);
         assert_eq!(store.queue_state()?.current_id, None);
         assert!(

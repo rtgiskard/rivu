@@ -75,21 +75,15 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
         assert_eq!(count.total, total);
         assert!(count.rows.is_empty());
     }
-    store.queue_album(&compilation.key, false).unwrap();
-    store.queue_album(&large, false).unwrap();
-    assert_eq!(store.queue_state().unwrap().total, MAX_QUERY_ROWS + 6);
-    store.queue_album(&large, true).unwrap();
+    store.replace_queue_with_album(&large).unwrap();
     assert_eq!(store.queue_state().unwrap().total, MAX_QUERY_ROWS + 3);
     let before = store.queue_ids().unwrap();
     assert!(
         store
-            .queue_album(
-                &AlbumKey {
-                    directory: "/absent".into(),
-                    title: "Large".into()
-                },
-                true
-            )
+            .replace_queue_with_album(&AlbumKey {
+                directory: "/absent".into(),
+                title: "Large".into()
+            },)
             .is_err()
     );
     assert_eq!(store.queue_ids().unwrap(), before);
@@ -240,11 +234,9 @@ fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_droppi
                 assert_eq!(page.total, 0);
                 assert!(page.rows.is_empty());
             }
-            for replace in [false, true] {
-                assert!(store.queue_album(&key, replace).is_err());
-                assert_eq!(store.queue_page(None, 0, 24).unwrap(), queue);
-                assert_eq!(store.queue_state().unwrap(), state);
-            }
+            assert!(store.replace_queue_with_album(&key).is_err());
+            assert_eq!(store.queue_page(None, 0, 24).unwrap(), queue);
+            assert_eq!(store.queue_state().unwrap(), state);
         }
     }
     assert_eq!(
@@ -301,7 +293,7 @@ fn album_eligibility_transitions_follow_tag_changes_commit_and_rollback() {
         store.album_tracks_page(&stale, None, 0, 24).unwrap().total,
         0
     );
-    assert!(store.queue_album(&stale, true).is_err());
+    assert!(store.replace_queue_with_album(&stale).is_err());
     conn.execute("UPDATE tracks SET album='Changed' WHERE id=1", [])
         .unwrap();
     check(Some("Changed"), "Artist");
@@ -387,7 +379,7 @@ fn album_search_matches_effective_metadata_without_filtering_members() {
             .total,
         2
     );
-    store.queue_album(&album.key, true).unwrap();
+    store.replace_queue_with_album(&album.key).unwrap();
     assert_eq!(store.queue_state().unwrap().total, 2);
     assert_eq!(
         store
@@ -529,7 +521,7 @@ fn album_consumers_preserve_root_unicode_and_direct_parent_boundaries() {
         let empty = store.album_tracks_page(&album.key, None, 0, 0).unwrap();
         assert_eq!(empty.total, expected.len());
         assert!(empty.rows.is_empty());
-        store.queue_album(&album.key, true).unwrap();
+        store.replace_queue_with_album(&album.key).unwrap();
         let queued = store.queue_page(None, 0, 24).unwrap();
         assert_eq!(queued.total, expected.len());
         assert_eq!(

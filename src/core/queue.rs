@@ -120,7 +120,7 @@ impl Core {
     pub(in crate::core) fn play_album(&mut self, key: &AlbumKey) -> Result<()> {
         ensure!(self.store.album_has_tracks(key)?, "Album is empty");
         self.stop()?;
-        self.store.queue_album(key, true)?;
+        self.store.replace_queue_with_album(key)?;
         self.queue_replaced(true)?;
         let first = self.store.queue_id_at(0)?.context("Album is empty")?;
         self.start(first, QueueHistory::Record)

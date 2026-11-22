@@ -185,10 +185,7 @@ impl Core {
                 use rivu_protocol::model::CollectionDestination;
                 match &source {
                     CollectionSource::Album { revision, .. } => {
-                        ensure!(
-                            self.state.library.album_revision == *revision,
-                            "Album collection changed"
-                        );
+                        self.require_current_album(*revision)?;
                     }
                     CollectionSource::Playlist {
                         playlist_id,
@@ -229,11 +226,6 @@ impl Core {
                 }
             }
             Command::PlayAlbum { key } => self.play_album(&key)?,
-            Command::EnqueueAlbum { key } => {
-                self.ensure_queue_control_ready()?;
-                self.store.queue_album(&key, false)?;
-                self.queue_mutation_committed(QueueRefresh::Projection)?;
-            }
             Command::Scan { paths, force } => {
                 return self
                     .scan(paths, force)

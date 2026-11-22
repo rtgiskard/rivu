@@ -1,4 +1,7 @@
-use super::{Store, albums::album_filter};
+use super::{
+    Store,
+    albums::{album_filter, insert_album_members},
+};
 use anyhow::{Context, Result, ensure};
 use rivu_format::database::ORDER;
 use rusqlite::params;
@@ -16,6 +19,30 @@ impl Store {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        if let (
+            CollectionSource::Album { key, .. },
+            CollectionDestination::Queue { insertion: None },
+        ) = (source, destination)
+        {
+            let directory = key
+                .directory
+                .to_str()
+                .context("Album directory is not UTF-8")?;
+            let filter = album_filter();
+            let (tail, count): (i64, i64) = tx.query_row(
+                &format!("SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0), COUNT(*) FROM tracks INDEXED BY tracks_album_members WHERE {filter}"),
+                params![directory, key.title],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            ensure!(count > 0, "Album is empty");
+            ensure!(
+                tail >= 0 && tail.checked_add(count).is_some(),
+                "Insertion exceeds database positions"
+            );
+            let inserted = insert_album_members(&tx, key, 0, tail)?;
+            tx.commit()?;
+            return Ok(inserted);
+        }
         tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);")?;
         match source {
             CollectionSource::Album { key, .. } => {

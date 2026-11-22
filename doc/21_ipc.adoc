@@ -1037,10 +1037,9 @@ content and the affected track/playlist metadata scopes, not playlist entry orde
 
 `PlayAlbum { key }` validates nonempty membership before stopping playback,
 replaces the whole queue in member order, and starts its first track.
-`EnqueueAlbum { key }` appends the entire album in that order, preserving current
-playback. Blank or stale keys fail without changing the queue or playback. Both commands
-resolve all current members in the backend independently of page limits; clients
-must not collect paged track IDs to perform album actions.
+Blank or absent album keys fail without changing the queue or playback.
+Appending a whole album uses `TransferCollection`, with a version-pinned album
+source and a queue destination. Neither path collects paged track IDs.
 
 `TransferCollection {source, destination}` copies a version-pinned Album or Playlist
 without client-side page collection. Album sources carry their key and `album`
@@ -1053,11 +1052,10 @@ resolves and inserts members; staleness rejects the whole operation. Every
 occurrence and its order survive, including repeated tracks; later edits to
 either collection are independent.
 
-Album drag gestures capture the source revision when the drag begins, just as
-collection menus retain their opening revision. Hover and final drop reject an
-obsolete source even after the client receives a newer snapshot; neither refreshes
-the gesture to the latest revision. Ordinary album playback/enqueue commands keep
-their execution-time member resolution.
+Album append buttons, menus and drag gestures retain the revision of their
+displayed source. A newer snapshot cannot reauthorize an existing interaction.
+Append resolves only the queue tail at execution time; ordinary `PlayAlbum`
+still resolves the current album membership at execution time.
 
 === Library root identity and configuration
 

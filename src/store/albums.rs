@@ -179,23 +179,36 @@ impl Store {
             .query_row(params![directory, key.title], |row| row.get(0))?)
     }
 
-    pub(crate) fn queue_album(&self, key: &AlbumKey, replace: bool) -> Result<()> {
-        let directory = key
-            .directory
-            .to_str()
-            .context("Album directory is not UTF-8")?;
+    pub(crate) fn replace_queue_with_album(&self, key: &AlbumKey) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let filter = album_filter();
-        ensure!(self.album_has_tracks(key)?, "Album is empty");
-        if replace {
-            tx.execute(
-                "UPDATE rivu_meta SET current_queue_entry_id=NULL WHERE singleton=1",
-                [],
-            )?;
-            super::queue::delete_queue_rows(&tx)?;
-        }
-        tx.execute(&format!("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT 0,id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0)+row_number() OVER (ORDER BY {ORDER})-1 FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER}"), params![directory, key.title])?;
+        tx.execute(
+            "UPDATE rivu_meta SET current_queue_entry_id=NULL WHERE singleton=1",
+            [],
+        )?;
+        super::queue::delete_queue_rows(&tx)?;
+        ensure!(insert_album_members(&tx, key, 0, 0)? != 0, "Album is empty");
         tx.commit()?;
         Ok(())
     }
+}
+
+pub(super) fn insert_album_members(
+    tx: &rusqlite::Transaction<'_>,
+    key: &AlbumKey,
+    playlist_id: i64,
+    start: i64,
+) -> Result<usize> {
+    let directory = key
+        .directory
+        .to_str()
+        .context("Album directory is not UTF-8")?;
+    Ok(tx.execute(
+        &format!(
+            "INSERT INTO playlist_entries(playlist_id,track_id,position)
+            SELECT ?3,id,?4+(row_number() OVER (ORDER BY {ORDER})-1)
+            FROM tracks INDEXED BY tracks_album_members WHERE {} ORDER BY {ORDER}",
+            album_filter()
+        ),
+        params![directory, key.title, playlist_id, start],
+    )?)
 }

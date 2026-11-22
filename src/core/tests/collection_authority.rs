@@ -200,6 +200,7 @@ fn core_source_changes_reject_collection_transfers_without_destination_changes()
         let target = core.store.playlist_entries_page(2, None, 0, 20).unwrap();
         let target_revision = core.state.library.playlist_entry_revisions[&2];
         for destination in [
+            CollectionDestination::Queue { insertion: None },
             CollectionDestination::Queue {
                 insertion: Some(CollectionInsertion {
                     index: 1,

@@ -733,9 +733,6 @@ pub enum Command {
     PlayAlbum {
         key: AlbumKey,
     },
-    EnqueueAlbum {
-        key: AlbumKey,
-    },
     OptimizeDatabase,
     SetPlayCount {
         track_id: i64,

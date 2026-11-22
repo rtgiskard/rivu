@@ -65,6 +65,7 @@ pub(super) struct AlbumModel {
     worker_pending: bool,
     page_timed_out: bool,
     selected: Option<AlbumKey>,
+    selected_revision: u64,
     albums: PagedRows<AlbumSummary>,
     tracks: PagedRows<LibraryRow>,
     query: Option<String>,
@@ -84,6 +85,7 @@ impl Default for AlbumModel {
             worker_pending: false,
             page_timed_out: false,
             selected: None,
+            selected_revision: 0,
             albums: PagedRows::default(),
             tracks: PagedRows::default(),
             query: None,
@@ -99,6 +101,12 @@ impl AlbumModel {
     }
     pub fn selected(&self) -> Option<&AlbumKey> {
         self.selected.as_ref()
+    }
+    pub fn album_revision(&self) -> u64 {
+        self.revisions.album
+    }
+    pub fn selected_revision(&self) -> u64 {
+        self.selected_revision
     }
     pub fn albums(&self) -> &PagedRows<AlbumSummary> {
         &self.albums
@@ -192,6 +200,7 @@ impl AlbumModel {
             self.tracks_key = selected.clone();
             self.tracks_query = None;
             self.tracks.clear();
+            self.selected_revision = self.revisions.album;
         }
         self.selected = selected;
         self.cancel();
@@ -381,6 +390,7 @@ impl AlbumModel {
             }
             Ok(ViewResponse::AlbumTracks(page)) if matches!(query, Query::AlbumTracks { .. }) => {
                 self.tracks.accept(page);
+                self.selected_revision = current_revisions.album;
                 completion.published = Published::Tracks;
             }
             Err(error) => {
@@ -1242,6 +1252,27 @@ mod tests {
         assert!(model.prepare().is_none());
         model.retire_worker();
         assert!(model.prepare().is_some());
+    }
+
+    #[test]
+    fn detail_actions_keep_the_previous_membership_until_fresh_delivery() {
+        let now = Instant::now();
+        let mut model = AlbumModel::default();
+        let old = QueryRevisions {
+            album: 1,
+            ..Default::default()
+        };
+        model.sync(true, old, 2, now);
+        model.select(Some(key("A")), now);
+        let initial = model.prepare().unwrap();
+        finish(&mut model, initial, 2, now);
+
+        let current = QueryRevisions { album: 2, ..old };
+        model.sync(true, current, 2, now);
+        assert_eq!(model.selected_revision(), old.album);
+        let refreshed = model.prepare().unwrap();
+        finish(&mut model, refreshed, 1, now);
+        assert_eq!(model.selected_revision(), current.album);
     }
 
     #[test]

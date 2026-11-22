@@ -13,7 +13,10 @@ use gpui::{prelude::*, *};
 use crate::frontend::FrontendHandle;
 use rivu_presentation::track::track_title;
 use rivu_protocol::{
-    model::{AlbumKey, AlbumSort, ArtworkSource, Command, PlaybackStatus},
+    model::{
+        AlbumKey, AlbumSort, ArtworkSource, CollectionDestination, CollectionSource, Command,
+        PlaybackStatus,
+    },
     response::QueryRevisions,
 };
 
@@ -642,6 +645,16 @@ impl AlbumBrowser {
         cx.notify();
     }
 
+    fn append_album(&mut self, key: AlbumKey, revision: u64, cx: &mut Context<Self>) {
+        self.send(
+            Command::TransferCollection {
+                source: CollectionSource::Album { key, revision },
+                destination: CollectionDestination::Queue { insertion: None },
+            },
+            cx,
+        );
+    }
+
     fn open(&mut self, key: AlbumKey, cx: &mut Context<Self>) {
         self.capture_grid_anchor();
         let now = cx.background_executor().now();
@@ -852,7 +865,7 @@ impl AlbumBrowser {
         let enqueue_key = key.clone();
         let menu_key = key.clone();
         let drag_key = key.clone();
-        let drag_snapshots = self.snapshots.clone();
+        let revision = self.model.album_revision();
         let hover_key = key.clone();
         let corner_radius = self.grid_layout.artwork_size * 0.04;
         let default_artwork = self.default_artwork.clone();
@@ -925,12 +938,7 @@ impl AlbumBrowser {
                             this.dismissed_actions = Some(enqueue_key.clone());
                             cx.notify();
                             window.blur(cx);
-                            this.send(
-                                Command::EnqueueAlbum {
-                                    key: enqueue_key.as_ref().clone(),
-                                },
-                                cx,
-                            )
+                            this.append_album(enqueue_key.as_ref().clone(), revision, cx);
                         },
                     )
                     .into_div(),
@@ -953,18 +961,18 @@ impl AlbumBrowser {
                         }
                     }))
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        if event.click_count() == 2 {
+                        if event.click_count() == 2 && revision == this.model.album_revision() {
                             this.open(key.as_ref().clone(), cx);
                         }
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.listener(move |_, event: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
                             cx.emit(ContentMenuRequest {
                                 source: TrackSource::Album {
                                     key: menu_key.as_ref().clone(),
-                                    revision: this.snapshots.read().library.album_revision,
+                                    revision,
                                 },
                                 position: event.position,
                                 play: Some(Command::PlayAlbum {
@@ -976,7 +984,7 @@ impl AlbumBrowser {
                     .on_drag(ContentDrag::pending(), move |drag, _, window, cx| {
                         drag.initialize(TrackSource::Album {
                             key: drag_key.as_ref().clone(),
-                            revision: drag_snapshots.read().library.album_revision,
+                            revision,
                         });
                         rivu_ui::begin_list_drag(window, cx);
                         cx.new(|_| rivu_ui::ListDragPreview {
@@ -1081,6 +1089,7 @@ impl Render for AlbumBrowser {
         let now = cx.background_executor().now();
         let header;
         if let Some(key) = self.model.selected() {
+            let revision = self.model.selected_revision();
             let play_key = key.clone();
             let enqueue_key = key.clone();
             let menu_key = key.clone();
@@ -1105,12 +1114,12 @@ impl Render for AlbumBrowser {
                         .id("album-selected-title")
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.listener(move |_, event: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
                                 cx.emit(ContentMenuRequest {
                                     source: TrackSource::Album {
                                         key: menu_key.clone(),
-                                        revision: this.snapshots.read().library.album_revision,
+                                        revision,
                                     },
                                     position: event.position,
                                     play: Some(Command::PlayAlbum {
@@ -1153,18 +1162,14 @@ impl Render for AlbumBrowser {
                 )
                 .child(
                     IconButton::new("album-add-all", "󰐕", self.tr("gl-enqueue-album"))
+                        .enabled(revision == self.model.album_revision())
                         .surface(crate::gui::appearance::material::surface(cx))
                         .build(
                             IconButtonStyle::Surface,
                             IconButtonDensity::Regular,
                             cx,
                             move |this, _, cx| {
-                                this.send(
-                                    Command::EnqueueAlbum {
-                                        key: enqueue_key.clone(),
-                                    },
-                                    cx,
-                                )
+                                this.append_album(enqueue_key.clone(), revision, cx);
                             },
                         ),
                 );
