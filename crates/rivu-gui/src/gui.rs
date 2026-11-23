@@ -14,6 +14,7 @@ mod layout;
 mod library;
 mod list_interaction;
 mod metadata;
+mod occurrence_selection;
 mod paged;
 mod playback;
 mod playlists;

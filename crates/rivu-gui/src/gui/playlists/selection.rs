@@ -3,7 +3,7 @@
 //! Metadata-only changes retry pending navigation without invalidating occurrence identities.
 //! The feature owns selection jobs; the window arbitrates newest manual intent.
 use super::{PlaylistEvent, PlaylistSelectionRequest, Playlists};
-use crate::gui::coordination::manual_actions::ManualIntentId;
+use crate::gui::{coordination::manual_actions::ManualIntentId, occurrence_selection};
 use gpui::Context;
 pub(in crate::gui) use rivu_protocol::model::PlaylistEntryLocationRow as EntryIdentity;
 use rivu_protocol::{
@@ -340,17 +340,18 @@ impl EntrySelection {
         if !self.ready() {
             return Vec::new();
         }
-        let mut rows: Vec<_> = self.selected.values().copied().collect();
-        rows.sort_unstable_by_key(|row| row.position);
-        rows
+        occurrence_selection::ordered_by_position(self.selected.values().copied(), |row| {
+            row.position
+        })
     }
     pub(in crate::gui) fn ordered_ids(&self) -> Vec<i64> {
         if !self.ready() {
             return Vec::new();
         }
-        let mut ids: Vec<_> = self.selected.keys().copied().collect();
-        ids.sort_unstable_by_key(|id| self.selected[id].position);
-        ids
+        occurrence_selection::ordered_by_position(self.selected.values(), |row| row.position)
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
     }
     fn retire(&mut self) {
         self.cancel();
@@ -377,17 +378,16 @@ impl EntrySelection {
         self.generation == generation
     }
     pub(in crate::gui) fn reconcile(&mut self, rows: Vec<EntryIdentity>) {
-        self.active = self
-            .active
-            .and_then(|old| rows.iter().find(|row| row.id == old.id).copied());
-        self.anchor = self
-            .anchor
-            .and_then(|old| rows.iter().find(|row| row.id == old.id).copied());
-        self.selected = rows
-            .into_iter()
-            .filter(|row| self.selected.contains_key(&row.id))
-            .map(|row| (row.id, row))
-            .collect();
+        let restored = occurrence_selection::reconcile(
+            rows,
+            self.active,
+            self.anchor,
+            &self.selected,
+            |row| row.id,
+        );
+        self.active = restored.active;
+        self.anchor = restored.anchor;
+        self.selected = restored.selected;
         self.reclaim_selection_capacity(self.selected.len());
         self.busy = false;
         self.error = None;

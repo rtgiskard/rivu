@@ -1,4 +1,4 @@
-use crate::gui::{coordination::manual_actions::ManualIntentId, paged};
+use crate::gui::{coordination::manual_actions::ManualIntentId, occurrence_selection, paged};
 pub(in crate::gui) use rivu_protocol::model::QueueIdentity;
 use rivu_protocol::query_tracking::{QuerySubmission, QueryTracker};
 use rivu_protocol::{
@@ -204,9 +204,9 @@ impl QueueBrowser {
         if !self.ready() {
             return Vec::new();
         }
-        let mut rows: Vec<_> = self.selected.values().copied().collect();
-        rows.sort_unstable_by_key(|row| row.position);
-        rows
+        occurrence_selection::ordered_by_position(self.selected.values().copied(), |row| {
+            row.position
+        })
     }
     /// A row whose occurrence position is authoritative for the current page
     /// projection: loaded, or retained across payload-only refreshes.
@@ -240,9 +240,10 @@ impl QueueBrowser {
         if !self.ready() {
             return Vec::new();
         }
-        let mut ids: Vec<_> = self.selected.keys().copied().collect();
-        ids.sort_unstable_by_key(|id| self.selected[id].position);
-        ids
+        occurrence_selection::ordered_by_position(self.selected.values(), |row| row.position)
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
     }
     pub(super) fn active(&self) -> Option<QueueIdentity> {
         self.active
@@ -641,17 +642,16 @@ impl QueueBrowser {
         ))
     }
     pub(super) fn reconcile(&mut self, rows: Vec<QueueIdentity>) {
-        self.active = self
-            .active
-            .and_then(|old| rows.iter().find(|row| row.id == old.id).copied());
-        self.anchor = self
-            .anchor
-            .and_then(|anchor| rows.iter().find(|row| row.id == anchor.id).copied());
-        self.selected = rows
-            .into_iter()
-            .filter(|row| self.selected.contains_key(&row.id))
-            .map(|row| (row.id, row))
-            .collect();
+        let restored = occurrence_selection::reconcile(
+            rows,
+            self.active,
+            self.anchor,
+            &self.selected,
+            |row| row.id,
+        );
+        self.active = restored.active;
+        self.anchor = restored.anchor;
+        self.selected = restored.selected;
         self.reclaim_selection_capacity(self.selected.len());
         self.busy = false;
         self.positions_stale = false;

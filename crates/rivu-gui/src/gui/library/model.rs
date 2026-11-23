@@ -959,7 +959,7 @@ impl LibraryBrowser {
             .collect::<Vec<_>>();
         if ids.len() > 1 {
             let indices = self.tree.first_indices();
-            ids.sort_unstable_by_key(|id| {
+            ids.sort_by_cached_key(|id| {
                 (
                     indices
                         .get(&LibraryNode::Track(*id))
