@@ -734,8 +734,9 @@ impl Core {
                         }
                     );
                     use std::io::Read;
-                    let file = rivu_utils::regular_file::open_regular_file(&path)?;
-                    ensure!(file.metadata()?.len() <= 65536, "Preset exceeds 64 KiB");
+                    let (file, metadata) =
+                        rivu_utils::regular_file::open_regular_file_with_metadata(&path)?;
+                    ensure!(metadata.len() <= 65536, "Preset exceeds 64 KiB");
                     let mut bytes = Vec::new();
                     file.take(65537).read_to_end(&mut bytes)?;
                     ensure!(bytes.len() <= 65536, "Preset exceeds 64 KiB");

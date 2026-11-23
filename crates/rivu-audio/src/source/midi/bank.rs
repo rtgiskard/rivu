@@ -75,11 +75,10 @@ fn load_soundfont() -> Result<Arc<SoundFont>> {
         },
         |path| Some(PathBuf::from(path)),
     ).context("No General MIDI SoundFont found; install a GM .sf2 or set RIVU_MIDI_SOUNDFONT and restart Rivu")?;
-    let file = rivu_utils::regular_file::open_regular_file(&path)
+    let (file, metadata) = rivu_utils::regular_file::open_regular_file_with_metadata(&path)
         .with_context(|| format!("Opening MIDI SoundFont {}", path.display()))?;
-    let len = file.metadata()?.len();
     let mut reader = BufReader::new(file);
-    validate_bank_chunks(&mut reader, len)
+    validate_bank_chunks(&mut reader, metadata.len())
         .with_context(|| format!("Validating MIDI SoundFont {}", path.display()))?;
     reader.rewind()?;
     let bank = SoundFont::new(&mut reader)

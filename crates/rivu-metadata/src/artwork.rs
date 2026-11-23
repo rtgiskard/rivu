@@ -517,10 +517,9 @@ impl ArtworkManager {
         });
         let mut bytes = Vec::new();
         for (_, candidate) in candidates {
-            let Ok(file) = rivu_utils::regular_file::open_regular_file(&candidate) else {
-                continue;
-            };
-            let Ok(metadata) = file.metadata() else {
+            let Ok((file, metadata)) =
+                rivu_utils::regular_file::open_regular_file_with_metadata(&candidate)
+            else {
                 continue;
             };
             if metadata.len() > limit as u64 {

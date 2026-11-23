@@ -1182,8 +1182,8 @@ fn check_config_size(bytes: u64) -> io::Result<()> {
 /// descriptor metadata and up to limit + 1 bytes: a growing file cannot bypass
 /// admission or cause an unbounded read. Parsing is left to [`from_toml`].
 pub fn read_toml(path: &Path) -> io::Result<String> {
-    let file = rivu_utils::regular_file::open_regular_file(path)?;
-    check_config_size(file.metadata()?.len())?;
+    let (file, metadata) = rivu_utils::regular_file::open_regular_file_with_metadata(path)?;
+    check_config_size(metadata.len())?;
     let mut bytes = Vec::new();
     file.take((MAX_CONFIG_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
