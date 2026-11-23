@@ -152,17 +152,17 @@ impl SharedPcmWindow {
     /// Open the authenticated owner-provided memfd path without write access.
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).context("Opening PCM window")?;
-        let metadata = file.metadata().context("Inspecting PCM window")?;
-        ensure!(metadata.is_file(), "PCM window is not a regular file");
         // Validate seals before length/mmap: a sealed file cannot shrink between
         // these checks and the first mapped load (which could otherwise SIGBUS).
         let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+        let metadata = file.metadata().context("Inspecting PCM window")?;
+        ensure!(metadata.is_file(), "PCM window is not a regular file");
         ensure!(
             seals >= 0 && seals & REQUIRED_SEALS == REQUIRED_SEALS,
             "PCM window is not sealed"
         );
         ensure!(
-            file.metadata()?.len() == size_of::<Storage>() as u64,
+            metadata.len() == size_of::<Storage>() as u64,
             "Invalid PCM window file length"
         );
         let window = Self::map(file, false)?;
