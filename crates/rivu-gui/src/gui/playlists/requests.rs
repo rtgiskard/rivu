@@ -596,18 +596,9 @@ impl PlaylistModel {
         page_size: usize,
         revisions: QueryRevisions,
     ) -> ViewRequest {
-        let kind = if entries {
-            ViewRequestKind::Entries
-        } else {
-            ViewRequestKind::Summaries
-        };
-        if entries && self.playlists.entries().playlist_id.is_none() {
-            return self.playlist_request(kind);
-        }
-        let Some(offset) = self.playlists.demand_page(entries, range, page_size) else {
-            return self.playlist_request(kind);
-        };
-        self.prepare_playlist_page(entries, offset, page_size, false, revisions)
+        self.request_playlist_page(entries, page_size, revisions, |browser| {
+            browser.demand_page(entries, range, page_size)
+        })
     }
 
     fn retry_playlist_page(
@@ -615,6 +606,18 @@ impl PlaylistModel {
         entries: bool,
         page_size: usize,
         revisions: QueryRevisions,
+    ) -> ViewRequest {
+        self.request_playlist_page(entries, page_size, revisions, |browser| {
+            browser.retry_page(entries, page_size)
+        })
+    }
+
+    fn request_playlist_page(
+        &mut self,
+        entries: bool,
+        page_size: usize,
+        revisions: QueryRevisions,
+        offset: impl FnOnce(&mut PlaylistBrowser) -> Option<usize>,
     ) -> ViewRequest {
         let kind = if entries {
             ViewRequestKind::Entries
@@ -624,7 +627,7 @@ impl PlaylistModel {
         if entries && self.playlists.entries().playlist_id.is_none() {
             return self.playlist_request(kind);
         }
-        let Some(offset) = self.playlists.retry_page(entries, page_size) else {
+        let Some(offset) = offset(&mut self.playlists) else {
             return self.playlist_request(kind);
         };
         self.prepare_playlist_page(entries, offset, page_size, false, revisions)
