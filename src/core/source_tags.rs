@@ -56,29 +56,6 @@ impl Drop for SourceTagTask {
     }
 }
 
-#[cfg(test)]
-pub(super) fn track_tags(track: &Track) -> TagValues {
-    TagValues {
-        title: track.title.clone(),
-        artist: track.artist.clone(),
-        album: track.album.clone(),
-        release_date: track.release_date.clone(),
-        track_number: track.track_number,
-        disc_number: track.disc_number,
-        replaygain_track_gain: track.replaygain_track_gain,
-    }
-}
-
-fn tags_match(track: &Track, tags: &TagValues) -> bool {
-    track.title == tags.title
-        && track.artist == tags.artist
-        && track.album == tags.album
-        && track.release_date == tags.release_date
-        && track.track_number == tags.track_number
-        && track.disc_number == tags.disc_number
-        && track.replaygain_track_gain == tags.replaygain_track_gain
-}
-
 fn source_values(tags: rivu_metadata::Tags) -> TagValues {
     TagValues {
         title: tags.title.unwrap_or_default(),
@@ -121,7 +98,7 @@ impl Core {
         );
         if let Some((_, expected)) = &save {
             ensure!(
-                tags_match(&track, expected),
+                track.tag_view() == expected.as_view(),
                 "Database tags changed; reload the details before saving"
             );
         }
@@ -200,7 +177,7 @@ impl Core {
             "ReplayGain must be finite"
         );
         ensure!(
-            tags_match(stored, expected),
+            stored.tag_view() == expected.as_view(),
             "Database tags changed; reload the details before synchronizing"
         );
         // Reject a busy live metadata update before persisting tags or saved source facts.

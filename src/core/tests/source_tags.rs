@@ -62,11 +62,11 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
     core.command(Command::SyncTrackTags {
         track_id: 1,
         tags: loaded.clone(),
-        expected: Box::new(source_tags::track_tags(&before)),
+        expected: Box::new(before.tag_view().into_owned()),
     })
     .unwrap();
     let after = core.track(1).unwrap();
-    assert_eq!(&source_tags::track_tags(&after), loaded);
+    assert_eq!(after.tag_view(), loaded.as_view());
     assert_eq!(after.play_count, before.play_count);
     assert_eq!(after.favorite, before.favorite);
     assert_eq!(after.decoder_hint, before.decoder_hint);
@@ -77,7 +77,7 @@ fn explicit_file_load_does_not_persist_and_bulk_sync_keeps_application_state() {
 fn bulk_sync_rejects_nonfinite_replaygain_without_changing_any_field() {
     let (_directory, mut core) = fixture();
     let before = core.track(1).unwrap();
-    let expected = source_tags::track_tags(&before);
+    let expected = before.tag_view().into_owned();
     for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let mut tags = expected.clone();
         tags.title = "Must not persist".into();
@@ -99,7 +99,7 @@ fn bulk_sync_preflights_live_replaygain_before_committing() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
     let before = core.track(1).unwrap();
-    let expected = source_tags::track_tags(&before);
+    let expected = before.tag_view().into_owned();
     let revisions = core.state.query_revisions();
     let generation = core.transport.generation;
     let mut tags = expected.clone();
@@ -139,7 +139,7 @@ fn bulk_sync_preflights_live_replaygain_before_committing() {
 #[test]
 fn stale_bulk_database_baseline_does_not_overwrite_a_concurrent_field_edit() {
     let (_directory, mut core) = fixture();
-    let before = source_tags::track_tags(&core.track(1).unwrap());
+    let before = core.track(1).unwrap().tag_view().into_owned();
     core.edit_track(1, Some("Concurrent title".into()), None, None, None, None)
         .unwrap();
     let mut requested = before.clone();
@@ -174,7 +174,7 @@ fn file_save_commits_verified_dates_and_numbers_without_backups() {
     core.command(Command::SaveSourceTags {
         track_id: 1,
         tags: requested.clone(),
-        expected: Box::new(source_tags::track_tags(&before)),
+        expected: Box::new(before.tag_view().into_owned()),
     })
     .unwrap();
     let ack = finish(&mut core);
@@ -190,7 +190,7 @@ fn file_save_commits_verified_dates_and_numbers_without_backups() {
             .and_then(|source| source.tags.as_ref()),
         Some(&requested)
     );
-    assert_eq!(source_tags::track_tags(&core.track(1).unwrap()), requested);
+    assert_eq!(core.track(1).unwrap().tag_view(), requested.as_view());
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     let (hash, size, modified): (Vec<u8>, i64, i64) = connection
         .query_row(
@@ -243,7 +243,7 @@ fn file_save_updates_shared_cue_source_but_not_equal_content_at_another_path() {
     core.state.queue.current_id = core.store.queued_track(2).unwrap();
     core.state.current_track = Some(Arc::new(segment.clone()));
     wav(&before.path);
-    let expected = source_tags::track_tags(&before);
+    let expected = before.tag_view().into_owned();
     let mut tags = expected.clone();
     tags.title = "New source title".into();
     core.command(Command::SaveSourceTags {
@@ -258,10 +258,7 @@ fn file_save_updates_shared_cue_source_but_not_equal_content_at_another_path() {
     assert_ne!(updated.fingerprint, segment.fingerprint);
     assert_eq!(updated.fingerprint, core.track(1).unwrap().fingerprint);
     assert_eq!(updated.cue, segment.cue);
-    assert_eq!(
-        source_tags::track_tags(&updated),
-        source_tags::track_tags(&segment)
-    );
+    assert_eq!(updated.tag_view(), segment.tag_view());
     assert_eq!(core.state.current_track(), Some(&updated));
     // A warm copy must not hide an accidental write to the other path.
     core.store.invalidate_caches();
@@ -285,7 +282,7 @@ fn saving_unchanged_database_tags_refreshes_stopped_source_identity() {
     wav(&before.path);
     core.state.queue.current_id = core.store.queued_track(1).unwrap();
     core.state.current_track = Some(Arc::new(before.clone()));
-    let tags = source_tags::track_tags(&before);
+    let tags = before.tag_view().into_owned();
     let revision = core.state.library.revision;
     core.command(Command::SaveSourceTags {
         track_id: 1,
@@ -296,7 +293,7 @@ fn saving_unchanged_database_tags_refreshes_stopped_source_identity() {
     let ack = finish(&mut core);
     assert!(ack.is_success(), "{:?}", ack.error());
     let stored = core.track(1).unwrap();
-    assert_eq!(source_tags::track_tags(&stored), tags);
+    assert_eq!(stored.tag_view(), tags.as_view());
     let bytes = std::fs::read(&before.path).unwrap();
     let fingerprint = blake3::hash(&bytes).to_hex().to_string();
     assert_eq!(stored.fingerprint.as_deref(), Some(fingerprint.as_str()));
@@ -311,12 +308,12 @@ fn saving_unchanged_database_tags_refreshes_stopped_source_identity() {
 fn failed_file_write_does_not_commit_displayed_values_to_database() {
     let (_directory, mut core) = fixture();
     let before = core.track(1).unwrap();
-    let mut requested = source_tags::track_tags(&before);
+    let mut requested = before.tag_view().into_owned();
     requested.title = "Not saved".into();
     core.command(Command::SaveSourceTags {
         track_id: 1,
         tags: requested,
-        expected: Box::new(source_tags::track_tags(&before)),
+        expected: Box::new(before.tag_view().into_owned()),
     })
     .unwrap();
     let ack = finish(&mut core);
@@ -345,7 +342,7 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
                  WHEN OLD.id=1 BEGIN SELECT RAISE(ABORT,'reject database sync'); END;"
             ))
             .unwrap();
-        let expected = source_tags::track_tags(&before);
+        let expected = before.tag_view().into_owned();
         let tags = TagValues {
             title: "Verified file title".into(),
             artist: "Verified artist".into(),
@@ -397,7 +394,7 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
         let saved = std::fs::read(&before.path).unwrap();
         let metadata = std::fs::metadata(&before.path).unwrap();
         let persisted = core.track(1).unwrap();
-        assert_eq!(source_tags::track_tags(&persisted), expected);
+        assert_eq!(persisted.tag_view(), expected.as_view());
         let fingerprint = blake3::hash(&saved).to_hex().to_string();
         assert_eq!(
             persisted.fingerprint.as_deref(),
@@ -452,12 +449,12 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
             assert_eq!(core.track(1).unwrap(), persisted);
             assert_eq!(core.track(2).unwrap(), other);
         }
-        let mut other_tags = source_tags::track_tags(&other);
+        let mut other_tags = other.tag_view().into_owned();
         other_tags.title = "Ordinary database-only edit".into();
         core.command(Command::SyncTrackTags {
             track_id: 2,
             tags: other_tags.clone(),
-            expected: Box::new(source_tags::track_tags(&other)),
+            expected: Box::new(other.tag_view().into_owned()),
         })
         .unwrap();
 
@@ -475,9 +472,9 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
             Some(&tags)
         );
         let recovered = core.track(1).unwrap();
-        assert_eq!(source_tags::track_tags(&recovered), tags);
+        assert_eq!(recovered.tag_view(), tags.as_view());
         assert_eq!(recovered.fingerprint.as_deref(), Some(fingerprint.as_str()));
-        assert_eq!(source_tags::track_tags(&core.track(2).unwrap()), other_tags);
+        assert_eq!(core.track(2).unwrap().tag_view(), other_tags.as_view());
         assert_eq!(std::fs::read(&before.path).unwrap(), saved);
         assert_eq!(
             std::fs::metadata(&before.path).unwrap().ino(),
@@ -512,7 +509,7 @@ fn postcommit_refresh_failure_is_not_a_retryable_database_failure() {
         core.state.current_track = Some(Arc::new(before.clone()));
         // The out-of-range queue ID fails projection refresh, not either track write.
         core.state.queue.current_id = Some(u64::MAX);
-        let expected = source_tags::track_tags(&before);
+        let expected = before.tag_view().into_owned();
         let mut tags = expected.clone();
         tags.title = "Committed before refresh".into();
         core.command(Command::SaveSourceTags {
@@ -561,7 +558,7 @@ fn postcommit_refresh_failure_is_not_a_retryable_database_failure() {
                 .unwrap()
                 .contains("File and database saved; refresh failed")
         );
-        assert_eq!(source_tags::track_tags(&core.track(1).unwrap()), tags);
+        assert_eq!(core.track(1).unwrap().tag_view(), tags.as_view());
         assert!(core.pending_written_source.is_none());
         assert!(core.shared.read().system.source_tag_recovery.is_none());
         assert!(core.projections.current_track);

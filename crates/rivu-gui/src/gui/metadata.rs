@@ -755,9 +755,10 @@ impl Metadata {
                     // The database read and the projection refresh can succeed independently.
                     // Compare only tags: Core can retain the active decoder's source facts.
                     ViewResponse::Track(Some(track))
-                        if self.state.current_track().is_some_and(|projected| {
-                            source::same_track_tags(projected, &track)
-                        }) =>
+                        if self
+                            .state
+                            .current_track()
+                            .is_some_and(|projected| projected.tag_view() == track.tag_view()) =>
                     {
                         // An unchanged projection may already match restored database tags.
                         // Confirm only the original block; never install query data here.

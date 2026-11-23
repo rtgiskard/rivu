@@ -65,38 +65,6 @@ fn field_bit(field: Field) -> u8 {
     }
 }
 
-pub(super) fn database_tags(track: &Track) -> TagValues {
-    TagValues {
-        title: track.title.clone(),
-        artist: track.artist.clone(),
-        album: track.album.clone(),
-        release_date: track.release_date.clone(),
-        track_number: track.track_number,
-        disc_number: track.disc_number,
-        replaygain_track_gain: track.replaygain_track_gain,
-    }
-}
-
-pub(super) fn track_has_tags(track: &Track, tags: &TagValues) -> bool {
-    track.title == tags.title
-        && track.artist == tags.artist
-        && track.album == tags.album
-        && track.release_date == tags.release_date
-        && track.track_number == tags.track_number
-        && track.disc_number == tags.disc_number
-        && track.replaygain_track_gain == tags.replaygain_track_gain
-}
-
-pub(super) fn same_track_tags(previous: &Track, next: &Track) -> bool {
-    previous.title == next.title
-        && previous.artist == next.artist
-        && previous.album == next.album
-        && previous.release_date == next.release_date
-        && previous.track_number == next.track_number
-        && previous.disc_number == next.disc_number
-        && previous.replaygain_track_gain == next.replaygain_track_gain
-}
-
 impl SourceTags {
     pub fn busy(&self) -> bool {
         self.pending.is_some()

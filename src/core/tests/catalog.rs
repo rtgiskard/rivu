@@ -2183,7 +2183,7 @@ fn scan_entry_points_reject_an_active_source_tag_save() {
     write_pcm_frames(&track.path, 150);
     let playlist = directory.path().join("mix.m3u");
     std::fs::write(&playlist, "1.wav\n").unwrap();
-    let expected = source_tags::track_tags(&track);
+    let expected = track.tag_view().into_owned();
     let mut tags = expected.clone();
     tags.title = "Saved title".into();
     core.command(Command::SaveSourceTags {

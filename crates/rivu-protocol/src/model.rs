@@ -12,7 +12,7 @@ pub use audio_output::*;
 pub use rivu_format::config::{Config, ConfigSettings};
 
 use rivu_format::decoder_hint::DecoderHint;
-use rivu_format::tags::TagValues;
+use rivu_format::tags::{TagValues, TagValuesRef};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -106,6 +106,21 @@ pub struct Track {
     pub play_count: u64,
     pub last_played: Option<i64>,
 }
+
+impl Track {
+    pub fn tag_view(&self) -> TagValuesRef<'_> {
+        TagValuesRef {
+            title: &self.title,
+            artist: &self.artist,
+            album: &self.album,
+            release_date: self.release_date.as_deref(),
+            track_number: self.track_number,
+            disc_number: self.disc_number,
+            replaygain_track_gain: self.replaygain_track_gain,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LibraryRow {
     pub id: i64,

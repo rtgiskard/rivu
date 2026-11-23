@@ -2,9 +2,7 @@
 //! Unsubmitted inline text belongs to the view, never to selection arbitration.
 //! Epochs reject late reads and acknowledgements after leaving and reopening a track.
 
-use super::source::{
-    SourceAction, SourceTags, SourceToken, database_tags, same_track_tags, track_has_tags,
-};
+use super::source::{SourceAction, SourceTags, SourceToken};
 use rivu_format::decoder_hint::DecoderHint;
 use rivu_format::tags::TagValues;
 use rivu_presentation::refresh::RefreshDeadline;
@@ -247,7 +245,7 @@ impl MetadataSession {
 
     fn advance_database_serial(&mut self, next: Option<&Track>) {
         let unchanged = match (self.source_track(), next) {
-            (Some(previous), Some(next)) => same_track_tags(previous, next),
+            (Some(previous), Some(next)) => previous.tag_view() == next.tag_view(),
             (None, None) => true,
             _ => false,
         };
@@ -286,7 +284,7 @@ impl MetadataSession {
             },
             SourceAction::Sync | SourceAction::Save => {
                 let tags = self.source.values(track);
-                let expected = Box::new(database_tags(track));
+                let expected = Box::new(track.tag_view().into_owned());
                 match action {
                     SourceAction::Sync => Command::SyncTrackTags {
                         track_id,
@@ -312,7 +310,7 @@ impl MetadataSession {
             return;
         }
         if let MetadataAvailability::Present(track) = &mut self.availability {
-            if track_has_tags(track, tags) {
+            if track.tag_view() == tags.as_view() {
                 return;
             }
             self.database_serial = self.database_serial.wrapping_add(1);
@@ -428,8 +426,9 @@ impl MetadataSession {
             return false;
         };
         // A later successful write may supersede the one we were waiting for.
-        let waiting = !track_has_tags(playback, tags);
-        self.playback_tag_commit = waiting.then(|| (track_id, database_tags(playback)));
+        let playback_tags = playback.tag_view();
+        let waiting = playback_tags != tags.as_view();
+        self.playback_tag_commit = waiting.then(|| (track_id, playback_tags.into_owned()));
         if waiting {
             self.playback_tag_commit_serial = self.playback_tag_commit_serial.wrapping_add(1);
         }
@@ -447,7 +446,7 @@ impl MetadataSession {
             && self
                 .playback_tag_commit
                 .as_ref()
-                .is_some_and(|(id, stale)| *id == track.id && track_has_tags(track, stale))
+                .is_some_and(|(id, stale)| *id == track.id && track.tag_view() == stale.as_view())
         {
             self.playback_tag_commit = None;
             return true;
@@ -460,7 +459,7 @@ impl MetadataSession {
             .playback_tag_commit
             .as_ref()
             .is_some_and(|(id, stale)| {
-                track.is_none_or(|track| track.id != *id || !track_has_tags(track, stale))
+                track.is_none_or(|track| track.id != *id || track.tag_view() != stale.as_view())
             })
         {
             self.playback_tag_commit = None;
@@ -623,7 +622,11 @@ mod tests {
         let mut session = loaded();
         let start = Instant::now();
         let (save, _) = session.begin_save(&SavedValue::PlayCount(7)).unwrap();
-        let staged = database_tags(session.display_track_at(Instant::now()).unwrap());
+        let staged = session
+            .display_track_at(Instant::now())
+            .unwrap()
+            .tag_view()
+            .into_owned();
         session.source.stage(staged.clone());
         session.invalidate_at(start);
         let deadline = session.deadline();

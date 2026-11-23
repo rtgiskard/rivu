@@ -528,9 +528,15 @@ fn source_ack(ok: bool, file_saved: bool) -> crate::frontend::CommandDelivery {
 
 #[test]
 fn bulk_source_commands_include_seven_staged_values_and_database_expectation() {
-    use source::{SourceAction, database_tags};
+    use source::SourceAction;
     let mut session = MetadataSession::default();
     let mut original = track(1, "database title");
+    original.artist = "database artist".into();
+    original.album = "database album".into();
+    original.release_date = Some("2020".into());
+    original.track_number = Some(11);
+    original.disc_number = Some(3);
+    original.replaygain_track_gain = Some(-2.0);
     original.play_count = 42;
     original.favorite = true;
     original.decoder_hint = DecoderHint::Native;
@@ -556,7 +562,18 @@ fn bulk_source_commands_include_seven_staged_values_and_database_expectation() {
             } => {
                 assert_eq!(track_id, 1);
                 assert_eq!(tags, file_tags());
-                assert_eq!(*expected, database_tags(&original));
+                assert_eq!(
+                    *expected,
+                    rivu_format::tags::TagValues {
+                        title: "database title".into(),
+                        artist: "database artist".into(),
+                        album: "database album".into(),
+                        release_date: Some("2020".into()),
+                        track_number: Some(11),
+                        disc_number: Some(3),
+                        replaygain_track_gain: Some(-2.0),
+                    }
+                );
                 assert_ne!(*expected, tags);
             }
             other => panic!("unexpected tag command: {other:?}"),
@@ -881,15 +898,15 @@ fn projected_save_survives_selection_changes_before_or_after_ack(cx: &mut TestAp
                 Some(&other)
             );
             assert_eq!(
-                this.metadata.source.values(&other),
-                source::database_tags(&other)
+                this.metadata.source.values(&other).as_view(),
+                other.tag_view()
             );
             assert!(this.source_status().is_none());
             assert!(this.metadata.source.recovery(2).is_none());
             let (sync, command) = this.metadata.begin_source(SourceAction::Sync).unwrap();
             assert!(
                 matches!(command, Command::SyncTrackTags { track_id: 2, tags, .. }
-                    if tags == source::database_tags(&other))
+                    if tags.as_view() == other.tag_view())
             );
             assert_eq!(this.metadata.source.finish(sync), Some(true));
 
@@ -939,12 +956,11 @@ fn projected_save_survives_selection_changes_before_or_after_ack(cx: &mut TestAp
                 assert!(this.source_status().is_none());
             } else {
                 assert_eq!(
-                    source::database_tags(
-                        this.metadata
-                            .display_track_at(cx.background_executor().now())
-                            .unwrap()
-                    ),
-                    file_tags()
+                    this.metadata
+                        .display_track_at(cx.background_executor().now())
+                        .unwrap()
+                        .tag_view(),
+                    file_tags().as_view()
                 );
                 assert_eq!(
                     this.metadata.source.status,
@@ -1021,7 +1037,7 @@ fn source_save_acknowledges_all_tags_without_touching_user_state(cx: &mut TestAp
             .metadata
             .display_track_at(cx.background_executor().now())
             .unwrap();
-        assert_eq!(source::database_tags(saved), file_tags());
+        assert_eq!(saved.tag_view(), file_tags().as_view());
         assert!(saved.favorite);
         assert_eq!(saved.play_count, 37);
         assert_eq!(saved.decoder_hint, DecoderHint::Native);
@@ -1039,7 +1055,7 @@ fn committed_save_with_projection_warning_waits_for_playback_tags(cx: &mut TestA
     metadata.update(cx, |this, cx| {
         let mut refreshed = track(1, "saved title");
         refreshed.album = "saved album".into();
-        let committed = source::database_tags(&refreshed);
+        let committed = refreshed.tag_view().into_owned();
         this.metadata.source.stage(committed.clone());
         let (save, _) = this.metadata.begin_source(SourceAction::Save).unwrap();
         let warning = "File and database saved; refresh failed";
@@ -1377,7 +1393,7 @@ fn old_playback_reload_cannot_confirm_a_newer_tag_block(cx: &mut TestAppContext)
         let projected = Arc::clone(this.state.current_track.as_ref().unwrap());
         this.metadata.observe_tag_commit(
             1,
-            &source::database_tags(&track(1, "first commit")),
+            &track(1, "first commit").tag_view().into_owned(),
             true,
             Some(&projected),
         );
@@ -1394,7 +1410,7 @@ fn old_playback_reload_cannot_confirm_a_newer_tag_block(cx: &mut TestAppContext)
         // A newer write can block the same baseline under the same editor identity.
         this.metadata.observe_tag_commit(
             1,
-            &source::database_tags(&track(1, "newer commit")),
+            &track(1, "newer commit").tag_view().into_owned(),
             true,
             Some(&projected),
         );
@@ -1427,7 +1443,7 @@ fn playback_reload_can_confirm_restored_tags_without_a_new_snapshot(cx: &mut Tes
         let committed = track(projected.id, "saved title");
         assert!(this.metadata.observe_tag_commit(
             track_id,
-            &source::database_tags(&committed),
+            &committed.tag_view().into_owned(),
             true,
             Some(&projected),
         ));
@@ -1462,7 +1478,7 @@ fn playback_reload_can_confirm_restored_tags_without_a_new_snapshot(cx: &mut Tes
             .begin_source(source::SourceAction::Save)
             .unwrap();
         assert!(matches!(command, Command::SaveSourceTags { expected, .. }
-                if *expected == source::database_tags(&projected)));
+                if expected.as_view() == projected.tag_view()));
     });
 }
 
