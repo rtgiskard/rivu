@@ -615,7 +615,8 @@ impl WaveformPlot {
             source: Rc::new(Source::from_frame(frame).expect("test frame has a source")),
             decoder_hint: frame.decoder_hint,
         };
-        self.columns_for_frame(panel_id, width, frame, identity, mapping)
+        self.columns_for_frame(panel_id, width, frame, identity, mapping);
+        &self.columns[&panel_id].data.values
     }
 
     fn columns_for_frame(
@@ -625,7 +626,7 @@ impl WaveformPlot {
         frame: &WaveformFrame,
         identity: DisplayIdentity,
         mapping: WaveformMapping,
-    ) -> &[WaveformColumn] {
+    ) {
         let left_peaks = if frame.left_peaks.is_empty() {
             &frame.peaks
         } else {
@@ -658,7 +659,7 @@ impl WaveformPlot {
             .get(&panel_id)
             .is_some_and(|columns| columns.key == key)
         {
-            return &self.columns[&panel_id].data.values;
+            return;
         }
         if let Some(data) = self
             .columns
@@ -667,7 +668,7 @@ impl WaveformPlot {
             .map(|columns| Rc::clone(&columns.data))
         {
             self.columns.insert(panel_id, Columns { key, data });
-            return &self.columns[&panel_id].data.values;
+            return;
         }
         let previous = self
             .columns
@@ -752,7 +753,6 @@ impl WaveformPlot {
             })
         };
         self.columns.insert(panel_id, Columns { key, data });
-        &self.columns[&panel_id].data.values
     }
 }
 
