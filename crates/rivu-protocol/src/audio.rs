@@ -12,10 +12,7 @@ use serde::{
     de::{DeserializeOwned, DeserializeSeed, EnumAccess, SeqAccess, VariantAccess, Visitor},
 };
 use std::{
-    os::{
-        linux::net::SocketAddrExt,
-        unix::net::{SocketAddr, UnixStream},
-    },
+    os::unix::net::{SocketAddr, UnixStream},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -278,13 +275,7 @@ impl<'de> DeserializeSeed<'de> for SamplesSeed<'_> {
 }
 
 pub fn address(data_dir: &Path) -> Result<SocketAddr> {
-    let base = crate::wire::address(data_dir)?;
-    let mut name = base
-        .as_abstract_name()
-        .context("Expected abstract data directory address")?
-        .to_vec();
-    name.extend_from_slice(b".audio.v1");
-    Ok(SocketAddr::from_abstract_name(name)?)
+    crate::wire::service_address(data_dir, b".audio.v1")
 }
 pub async fn connect(data_dir: &Path) -> Result<Async<UnixStream>> {
     crate::wire::endpoint::connect_address(&address(data_dir)?).await

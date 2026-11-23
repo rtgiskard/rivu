@@ -72,11 +72,7 @@ pub struct PcmPosition {
 
 use anyhow::{Context, Result, ensure};
 use futures_lite::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use std::{
-    os::{linux::net::SocketAddrExt, unix::net::SocketAddr},
-    path::Path,
-    time::Duration,
-};
+use std::{os::unix::net::SocketAddr, path::Path, time::Duration};
 pub const DEADLINE: Duration = Duration::from_secs(5);
 pub const MAGIC: &[u8; 8] = b"RIVUPCM6";
 pub const REQUEST_SIZE: usize = 16;
@@ -164,13 +160,7 @@ impl Welcome {
     }
 }
 pub fn address(data_dir: &Path) -> Result<SocketAddr> {
-    let base = crate::wire::address(data_dir)?;
-    let mut name = base
-        .as_abstract_name()
-        .context("PCM requires an abstract command socket")?
-        .to_vec();
-    name.extend_from_slice(b".pcm.v6");
-    Ok(SocketAddr::from_abstract_name(name)?)
+    crate::wire::service_address(data_dir, b".pcm.v6")
 }
 fn word(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes.try_into().unwrap())

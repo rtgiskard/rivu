@@ -1,5 +1,5 @@
 pub(crate) mod endpoint;
-pub use endpoint::{address, connect, verify_peer};
+pub use endpoint::{address, connect, service_address, verify_peer};
 #[macro_use]
 mod config_fields;
 mod config_patch;

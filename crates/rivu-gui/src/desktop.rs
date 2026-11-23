@@ -120,13 +120,7 @@ impl DesktopControl {
 }
 
 fn address(data_dir: &Path) -> Result<SocketAddr> {
-    let core = rivu_protocol::wire::address(data_dir)?;
-    let mut name = core
-        .as_abstract_name()
-        .context("Core IPC address must be abstract")?
-        .to_vec();
-    name.extend_from_slice(b".desktop");
-    Ok(SocketAddr::from_abstract_name(name)?)
+    rivu_protocol::wire::service_address(data_dir, b".desktop")
 }
 /// What the desktop activation exchange established.
 #[derive(Debug, PartialEq, Eq)]

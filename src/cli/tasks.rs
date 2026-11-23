@@ -357,26 +357,17 @@ pub(super) fn wait_relocation(
     else {
         bail!("IPC returned an unexpected task outcome");
     };
-    emit_relocation(
-        i18n,
-        instance,
-        &task,
-        json,
-        task.phase == RelocationPhase::Completed,
-    )?;
-    match task.phase {
-        RelocationPhase::Completed => Ok(()),
-        _ => bail!(
-            "{}",
-            task.error
-                .as_deref()
-                .unwrap_or(if task.phase == RelocationPhase::Cancelled {
-                    "Relocation cancelled"
-                } else {
-                    "Relocation failed"
-                })
-        ),
-    }
+    let completed = task.phase == RelocationPhase::Completed;
+    emit_relocation(i18n, instance, &task, json, completed)?;
+    finish_task(
+        completed,
+        task.error.as_deref(),
+        if task.phase == RelocationPhase::Cancelled {
+            "Relocation cancelled"
+        } else {
+            "Relocation failed"
+        },
+    )
 }
 
 pub(super) fn wait_processing(
@@ -390,26 +381,24 @@ pub(super) fn wait_processing(
     else {
         bail!("IPC returned an unexpected task outcome");
     };
-    emit_processing(
-        i18n,
-        instance,
-        &task,
-        json,
-        task.phase == ProcessingPhase::Complete,
-    )?;
-    match task.phase {
-        ProcessingPhase::Complete => Ok(()),
-        _ => bail!(
-            "{}",
-            task.error
-                .as_deref()
-                .unwrap_or(if task.phase == ProcessingPhase::Cancelled {
-                    "Processing cancelled"
-                } else {
-                    "Processing failed"
-                })
-        ),
+    let completed = task.phase == ProcessingPhase::Complete;
+    emit_processing(i18n, instance, &task, json, completed)?;
+    finish_task(
+        completed,
+        task.error.as_deref(),
+        if task.phase == ProcessingPhase::Cancelled {
+            "Processing cancelled"
+        } else {
+            "Processing failed"
+        },
+    )
+}
+
+fn finish_task(completed: bool, error: Option<&str>, fallback: &str) -> Result<()> {
+    if !completed {
+        bail!("{}", error.unwrap_or(fallback));
     }
+    Ok(())
 }
 
 #[cfg(test)]

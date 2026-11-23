@@ -15,6 +15,18 @@ pub fn address(data_dir: &Path) -> Result<std::os::unix::net::SocketAddr> {
     rivu_format::ownership::data_directory_address(data_dir)
 }
 
+/// Derive a service address from the Core directory identity and a protocol suffix.
+pub fn service_address(data_dir: &Path, suffix: &[u8]) -> Result<std::os::unix::net::SocketAddr> {
+    let base = address(data_dir)?;
+    let name = base
+        .as_abstract_name()
+        .context("Core IPC address must be abstract")?;
+    let mut service = Vec::with_capacity(name.len() + suffix.len());
+    service.extend_from_slice(name);
+    service.extend_from_slice(suffix);
+    Ok(std::os::unix::net::SocketAddr::from_abstract_name(service)?)
+}
+
 pub fn verify_peer(stream: &impl AsFd) -> Result<()> {
     let mut peer = std::mem::MaybeUninit::<libc::ucred>::uninit();
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
