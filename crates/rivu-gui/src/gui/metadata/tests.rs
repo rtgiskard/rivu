@@ -2092,9 +2092,8 @@ fn cached_relocation_is_delivered_while_old_artwork_is_in_flight(cx: &mut TestAp
         );
         assert!(
             this.artwork_loader
-                .finish(&rivu_metadata::artwork::ArtworkIdentity::new(
-                    crate::artwork_source(&latest)
-                ))
+                .finish(crate::artwork_source(&latest))
+                .is_some()
         );
         this.set_visible(false, cx);
     });

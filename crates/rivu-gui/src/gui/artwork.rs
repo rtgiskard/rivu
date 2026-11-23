@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkIdentity, Source};
+use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager, Source};
 use rivu_protocol::model::ArtworkSource as OwnedArtworkSource;
 
 use gpui::{
@@ -18,6 +18,7 @@ use gpui::{
 };
 
 mod ambient;
+pub(in crate::gui) mod cover_cache;
 mod decode;
 
 #[cfg(test)]
@@ -1187,6 +1188,12 @@ pub(super) fn owned_artwork_source(source: &OwnedArtworkSource) -> Source<'_> {
     }
 }
 
+pub(super) struct ArtworkDemand {
+    pub(super) artwork: Option<LoadedArtwork>,
+    pub(super) resolved: bool,
+    pub(super) load: Option<OwnedArtworkSource>,
+}
+
 /// One physical executor load; the consumer owns the latest demand.
 #[derive(Default)]
 pub(super) struct ArtworkLoader {
@@ -1195,6 +1202,34 @@ pub(super) struct ArtworkLoader {
 }
 
 impl ArtworkLoader {
+    pub(super) fn resolve(
+        &mut self,
+        manager: &ArtworkManager,
+        source: Option<Source<'_>>,
+    ) -> ArtworkDemand {
+        self.retain_negative(source);
+        let Some(source) = source else {
+            return ArtworkDemand {
+                artwork: None,
+                resolved: true,
+                load: None,
+            };
+        };
+        if let Some(artwork) = manager.cached_result(source) {
+            self.negative = artwork.is_none().then(|| ArtworkIdentity::new(source));
+            return ArtworkDemand {
+                artwork,
+                resolved: true,
+                load: None,
+            };
+        }
+        ArtworkDemand {
+            artwork: None,
+            resolved: false,
+            load: self.prepare(source),
+        }
+    }
+
     /// A visible consumer owns its completed miss independently of cache eviction.
     /// This is demand state, not a lease on a shared cache entry.
     pub(super) fn retain_negative(&mut self, source: Option<Source<'_>>) {
@@ -1211,6 +1246,7 @@ impl ArtworkLoader {
         self.negative = (!positive).then_some(identity);
     }
 
+    /// Reserve a worker for a source already checked by the caller.
     pub(super) fn prepare(&mut self, source: Source<'_>) -> Option<OwnedArtworkSource> {
         if self.active.is_some()
             || self
@@ -1228,12 +1264,8 @@ impl ArtworkLoader {
         })
     }
 
-    pub(super) fn finish(&mut self, identity: &ArtworkIdentity) -> bool {
-        if self.active.as_ref() != Some(identity) {
-            return false;
-        }
-        self.active = None;
-        true
+    pub(super) fn finish(&mut self, source: Source<'_>) -> Option<ArtworkIdentity> {
+        self.active.take_if(|identity| identity.matches(source))
     }
 }
 
@@ -1492,27 +1524,37 @@ impl DefaultArtwork {
 
     /// A real source owns the surface while loading. Missing or terminally
     /// failed sources use the shared SVG with the same atmosphere processing.
+    pub(super) fn background_pixels(
+        &self,
+        source: Option<&ArtworkSource>,
+        ambient: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        if let Some(source) = source {
+            let result = if ambient {
+                source.load_ambient(window, cx)
+            } else {
+                source.load_static(window, cx)
+            };
+            if !matches!(result, Some(Err(_))) {
+                return result;
+            }
+        }
+        if ambient {
+            self.cache.update(cx, |cache, cx| {
+                cache.load(DefaultArtworkKey::Atmosphere, window, cx)
+            })
+        } else {
+            let viewport = window.viewport_size();
+            self.ready(viewport.width.max(viewport.height), window, cx)
+        }
+    }
+
     pub(super) fn background_image(&self, source: Option<ArtworkSource>, ambient: bool) -> Img {
         let fallback = self.clone();
         img(move |window: &mut Window, cx: &mut App| {
-            if let Some(source) = &source {
-                let result = if ambient {
-                    source.load_ambient(window, cx)
-                } else {
-                    source.load_static(window, cx)
-                };
-                if !matches!(result, Some(Err(_))) {
-                    return result;
-                }
-            }
-            if ambient {
-                fallback.cache.update(cx, |cache, cx| {
-                    cache.load(DefaultArtworkKey::Atmosphere, window, cx)
-                })
-            } else {
-                let viewport = window.viewport_size();
-                fallback.ready(viewport.width.max(viewport.height), window, cx)
-            }
+            fallback.background_pixels(source.as_ref(), ambient, window, cx)
         })
     }
 
@@ -4500,16 +4542,19 @@ mod tests {
         assert!(loader.prepare(crate::artwork_source(&first)).is_some());
         assert!(loader.prepare(crate::artwork_source(&skipped)).is_none());
         assert!(loader.prepare(crate::artwork_source(&latest)).is_none());
-        assert!(!loader.finish(&replacement));
+        assert!(loader.finish(crate::artwork_source(&latest)).is_none());
         assert!(loader.prepare(crate::artwork_source(&latest)).is_none());
-        assert!(loader.finish(&active));
+        assert_eq!(loader.finish(crate::artwork_source(&first)), Some(active));
         assert_eq!(
             loader.prepare(crate::artwork_source(&latest)).unwrap().path,
             latest.path
         );
-        assert!(!loader.finish(&active));
+        assert!(loader.finish(crate::artwork_source(&first)).is_none());
         assert!(loader.prepare(crate::artwork_source(&first)).is_none());
-        assert!(loader.finish(&replacement));
+        assert_eq!(
+            loader.finish(crate::artwork_source(&latest)),
+            Some(replacement)
+        );
         assert!(loader.active.is_none());
     }
 
@@ -4531,14 +4576,14 @@ mod tests {
             // Hiding clears demand, never the still-running physical slot.
             loader.retain_negative(None);
             assert!(loader.prepare(crate::artwork_source(&original)).is_none());
-            assert!(loader.finish(&ArtworkIdentity::new(crate::artwork_source(&next))));
+            assert!(loader.finish(crate::artwork_source(&next)).is_some());
             assert!(loader.prepare(crate::artwork_source(&original)).is_some());
         }
         let mut loader = ArtworkLoader::default();
         loader.remember_result(identity.clone(), false);
         loader.retain_negative(None);
         assert!(loader.prepare(crate::artwork_source(&original)).is_some());
-        assert!(loader.finish(&identity));
+        assert!(loader.finish(crate::artwork_source(&original)).is_some());
         loader.remember_result(identity.clone(), false);
         loader.remember_result(identity, true);
         assert!(loader.prepare(crate::artwork_source(&original)).is_some());

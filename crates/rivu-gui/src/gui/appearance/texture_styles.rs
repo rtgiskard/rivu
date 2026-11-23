@@ -1,7 +1,8 @@
 //! Session material layers. Every decoration precedes semantic content.
 //! Artwork is shared; T through Z use a procedural canvas and never sample a cover.
+use crate::gui::artwork::cover_cache::CoverBlurFrame;
 use crate::gui::shell::panels::PanelKind;
-use std::{f32::consts::TAU, time::Duration};
+use std::{f32::consts::TAU, sync::Arc, time::Duration};
 
 use gpui::{prelude::*, *};
 use rivu_format::palette::Palette;
@@ -11,8 +12,9 @@ use rivu_format::config::{MaterialParameters, MaterialPreset};
 
 /// One accepted artwork transition, consumed as a coherent set of source views.
 pub(in crate::gui) struct ArtworkBlend {
-    pub previous: Option<Img>,
-    pub current: Option<Img>,
+    pub previous: Option<Arc<RenderImage>>,
+    pub current: Option<Arc<RenderImage>>,
+    pub cover_blur: Option<CoverBlurFrame>,
     pub weight: f32,
 }
 
@@ -233,7 +235,7 @@ fn cycle(seconds: f32, speed: f32) -> Duration {
 }
 
 /// All fields compose on one source sample; material selection never selects a shader mode.
-fn effects(settings: MaterialParameters, phase: f32) -> ImageEffects {
+fn effects(settings: MaterialParameters) -> ImageEffects {
     let feather = settings.feather.clamp(0., 1.);
     ImageEffects {
         linear_fade_start: if feather > 0. {
@@ -252,7 +254,7 @@ fn effects(settings: MaterialParameters, phase: f32) -> ImageEffects {
         blur_radius: settings.cover_blur.clamp(0., 24.),
         wave_amplitude: settings.wave.clamp(0., 16.),
         wave_frequency: 3.5,
-        wave_phase: phase * TAU,
+        wave_phase: 0.,
         grain: settings.grain.clamp(0., 1.),
         grain_scale: 1.25,
         posterize_levels: if settings.color_steps >= 2. {
@@ -263,28 +265,113 @@ fn effects(settings: MaterialParameters, phase: f32) -> ImageEffects {
     }
 }
 
+fn effects_after_preblur(mut effects: ImageEffects) -> ImageEffects {
+    effects.blur_radius = 0.;
+    if effects.wave_amplitude == 0.
+        && effects.linear_fade_end <= effects.linear_fade_start
+        && effects.radial_fade_end <= effects.radial_fade_start
+        && effects.grain == 0.
+        && effects.posterize_levels < 2.
+    {
+        // Keep premultiplied bilinear sampling on a blur-only material. This
+        // feather activates the effects sampler entirely outside the sprite UVs.
+        effects.linear_fade_start = 2.;
+        effects.linear_fade_end = 3.;
+    }
+    effects
+}
+
+#[derive(IntoElement)]
+struct CoverSprite {
+    image: Arc<RenderImage>,
+    blur_frame: Option<CoverBlurFrame>,
+    effects: ImageEffects,
+    transformation: Option<Transformation>,
+}
+
+impl RenderOnce for CoverSprite {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let effects = self.effects;
+        canvas(
+            move |bounds, _, _| {
+                if bounds.size.width <= Pixels::ZERO || bounds.size.height <= Pixels::ZERO {
+                    return None;
+                }
+                let fitted = ObjectFit::Cover.get_bounds(bounds, self.image.size(0));
+                let preblur = self.blur_frame.and_then(|frame| {
+                    frame.lookup(
+                        &self.image,
+                        fitted.size,
+                        effects.blur_radius,
+                        effects.wave_amplitude != 0.,
+                    )
+                });
+                Some((self.image, fitted, preblur))
+            },
+            move |bounds, prepared, window, _| {
+                let Some((image, fitted, preblur)) = prepared else {
+                    return;
+                };
+                if let Some(preblur) = preblur {
+                    match window.paint_image_preblurred(
+                        bounds,
+                        fitted,
+                        Default::default(),
+                        image.clone(),
+                        0,
+                        preblur,
+                        false,
+                        self.transformation,
+                        effects_after_preblur(effects),
+                    ) {
+                        Ok(()) => return,
+                        Err(error) => tracing::warn!(%error, "using live material cover blur"),
+                    }
+                }
+                if let Err(error) = window.paint_image_with_effects(
+                    bounds,
+                    fitted,
+                    Default::default(),
+                    image,
+                    0,
+                    false,
+                    self.transformation,
+                    effects,
+                ) {
+                    tracing::error!(%error, "painting material cover");
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+}
+
 fn image_layer(
-    image: Img,
+    image: Arc<RenderImage>,
+    blur_frame: Option<CoverBlurFrame>,
     material: MaterialPreset,
     settings: MaterialParameters,
     motion: bool,
     animation_id: &'static str,
 ) -> Div {
-    let mut image = image
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .object_fit(ObjectFit::Cover)
-        .with_effects(effects(settings, 0.));
-    if material == MaterialPreset::Water {
-        image = image.with_transformation(Transformation::scale(size(1., -1.)));
-    }
+    let image = CoverSprite {
+        image,
+        blur_frame,
+        effects: effects(settings),
+        transformation: (material == MaterialPreset::Water)
+            .then(|| Transformation::scale(size(1., -1.))),
+    };
     if motion && settings.speed > 0. && settings.wave > 0. {
         layer().child(image.with_animation(
             animation_id,
             Animation::new(cycle(10., settings.speed)).repeat_synced(),
-            move |image, phase| image.with_effects(effects(settings, phase)),
+            move |mut image, phase| {
+                image.effects.wave_phase = phase * TAU;
+                image
+            },
         ))
     } else {
         layer().child(image)
@@ -302,7 +389,10 @@ fn artwork(
     let (previous_alpha, current_alpha) =
         images.opacities(opacity, settings.transition_seconds > 0.);
     let ArtworkBlend {
-        previous, current, ..
+        previous,
+        current,
+        cover_blur,
+        ..
     } = images;
     let mut result = layer();
     if previous_alpha > 0.
@@ -311,6 +401,7 @@ fn artwork(
         result = result.child(
             image_layer(
                 previous,
+                cover_blur.clone(),
                 material,
                 settings,
                 motion,
@@ -327,6 +418,7 @@ fn artwork(
         result = result.child(
             image_layer(
                 current,
+                cover_blur,
                 material,
                 settings,
                 motion,
@@ -621,21 +713,68 @@ pub(in crate::gui) fn list_fade(content: impl IntoElement, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::ArtworkBlend;
-    use gpui::img;
+    use super::{ArtworkBlend, effects_after_preblur};
+    use gpui::{ImageEffects, RenderImage};
+    use std::sync::Arc;
+
+    #[test]
+    fn preblur_preserves_alpha_sampling_and_composed_effects() {
+        let blur_only = ImageEffects {
+            blur_radius: 12.,
+            ..Default::default()
+        };
+        let prepared = effects_after_preblur(blur_only);
+        assert_eq!(prepared.blur_radius, 0.);
+        assert!(prepared.linear_fade_start > 1.);
+        assert!(prepared.linear_fade_end > prepared.linear_fade_start);
+
+        for material in [
+            ImageEffects {
+                wave_amplitude: 2.,
+                wave_phase: 0.75,
+                ..blur_only
+            },
+            ImageEffects {
+                linear_fade_end: 0.8,
+                ..blur_only
+            },
+            ImageEffects {
+                radial_fade_end: 0.8,
+                ..blur_only
+            },
+            ImageEffects {
+                grain: 0.1,
+                ..blur_only
+            },
+            ImageEffects {
+                posterize_levels: 3.,
+                ..blur_only
+            },
+        ] {
+            assert_eq!(
+                effects_after_preblur(material),
+                ImageEffects {
+                    blur_radius: 0.,
+                    ..material
+                }
+            );
+        }
+    }
 
     #[test]
     fn artwork_keeps_previous_visible_until_target_decode_then_dissolves() {
+        let source = Arc::new(RenderImage::new(Vec::new()));
         let mut images = ArtworkBlend {
-            previous: Some(img("previous.png")),
+            previous: Some(source.clone()),
             current: None,
             weight: 0.,
+            cover_blur: None,
         };
         let opacity = 0.58;
         assert_eq!(images.opacities(opacity, true), (opacity, 0.));
         assert_eq!(images.opacities(opacity, false), (0., 0.));
 
-        images.current = Some(img("current.png"));
+        images.current = Some(source);
         assert_eq!(images.opacities(opacity, true), (opacity, 0.));
         for weight in [0.25, 0.5, 0.75, 1.] {
             images.weight = weight;

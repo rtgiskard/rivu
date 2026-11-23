@@ -35,7 +35,7 @@ not invalid memory access, stale source identity, unbounded retention or audio s
 == Pinned renderer maintenance
 
 `Cargo.toml` overrides `gpui`, `gpui_wgpu`, `gpui_linux` and `gpui_platform`
-with the same commit `9ca5724d4b87f2e021e04e84c619db5559d58a67` from
+with the same commit `b2aaa27abd6438f3229c4201ef50822ef4b11d83` from
 https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. `Cargo.lock` records that exact
 revision. These crates are maintained
 together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
@@ -92,7 +92,7 @@ Check out the exact revision pinned by Rivu before running its commands:
 ----
 git clone https://github.com/rtgiskard/gpui-wgpu
 cd gpui-wgpu
-git checkout 9ca5724d4b87f2e021e04e84c619db5559d58a67
+git checkout b2aaa27abd6438f3229c4201ef50822ef4b11d83
 make test
 ----
 
@@ -155,9 +155,9 @@ bottom-to-top palette coordinates retain their initial behavior. Palette samples
 are straight-alpha sRGB values, interpolated in sRGB numerical space.
 
 The interface and retirement contracts are tied to the coordinated `Cargo.toml`
-patches at `9ca5724d4b87f2e021e04e84c619db5559d58a67`:
-https://github.com/rtgiskard/gpui-wgpu/blob/9ca5724d4b87f2e021e04e84c619db5559d58a67/crates/gpui/src/gpu.rs[`gpui::gpu`] and
-https://github.com/rtgiskard/gpui-wgpu/blob/9ca5724d4b87f2e021e04e84c619db5559d58a67/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
+patches at `b2aaa27abd6438f3229c4201ef50822ef4b11d83`:
+https://github.com/rtgiskard/gpui-wgpu/blob/b2aaa27abd6438f3229c4201ef50822ef4b11d83/crates/gpui/src/gpu.rs[`gpui::gpu`] and
+https://github.com/rtgiskard/gpui-wgpu/blob/b2aaa27abd6438f3229c4201ef50822ef4b11d83/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
 Update all four patch revisions together and check these contracts; historical timings do
 not transfer automatically. Handles own CPU content, not device allocations or
 window identity: each window independently uploads and budgets shared content.
@@ -332,8 +332,10 @@ Source-image effects and scene-filter semantics are described in
 link:24_layout.adoc[Layout and materials]. Their implementation belongs to the
 paired external renderer patch, not Rivu's material controls.
 
-All effect taps clamp to the source atlas tile. Nonzero cover blur uses fixed 9-by-9
-Gaussian sampling with alpha-correct texel interpolation; it can perform up to
+Preblurred material covers reuse atlas tiles. WGPU derives a tile with two
+separable passes through an `Rgba16Float` intermediate where supported, and
+uses a direct 9-by-9 pass on other WGPU devices. The live shader used for
+over-budget covers performs alpha-correct interpolation with up to
 324 texel reads per covered fragment. Exact centers and collapsed axes skip
 zero-weight bilinear taps. Active feather, grain and color-level effects also use
 alpha-correct interpolation for fractional source alpha, while ordinary no-effect
@@ -345,12 +347,12 @@ selects the sampling center, source blur samples around it, then quantization
 precedes grain. Feathering masks the resulting image. These effects reuse decoded
 artwork; they do not create per-frame bitmaps or form a reorderable chain.
 
-Backdrop frost uses two separable Gaussian passes over captured scene content.
-Each pass combines adjacent discrete Gaussian taps with one weighted linear
-texture fetch, retaining the three-sigma footprint and clamped edges. For radius
-`r = ceil(3 * sigma)`, the fetch bound drops from `2r + 1` to `r + 1` per fragment
-per pass, without another target or downsampling. Floating-point accumulation
-and hardware interpolation can differ within the renderer's 8-bit tolerance.
+Backdrop frost filters the captured scene at full resolution below eight
+physical pixels of sigma, combining adjacent Gaussian taps with linear
+sampling. For broader filters it box-downsamples 4-by-4 cells, adjusts the
+Gaussian variance for the prefilter, and upsamples into the panel's native
+clip with its requested opacity. Guard cells preserve clamped viewport edges.
+Very small viewports use the full-resolution path when the grid cannot fit.
 Backdrop sigma is capped at 32 physical pixels: the material frame resolves the
 effective logical sigma as `min(requested, 32 / physical_scale)` without changing
 the stored preset when the output scale changes.
@@ -358,9 +360,9 @@ the stored preset when the output scale changes.
 Frames without backdrop blur draw their
 root directly into the output, retaining only one viewport target per active
 group depth and requiring no final root-copy pass. Frames containing backdrop
-blur additionally retain an offscreen root and shared scratch target; nested
-blur needs no separate backdrop-capture target. The target-byte budget charges
-these renderer-owned targets, not the output. Per-window storage and fade-depth
+blur additionally retain an offscreen root, shared scratch target and a grid
+target sized to `ceil(viewport / 4) + 2` on each axis. Nested blurs reuse these
+targets. Their total storage counts toward the target-byte budget. Per-window storage and fade-depth
 settings are defined in link:01_config.adoc#_appearance_and_library_display[Appearance and library display].
 
 Filter validation and procedural-water counts share one allocation-free scene

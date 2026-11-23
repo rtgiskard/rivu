@@ -41,6 +41,7 @@ impl Render for WindowView {
             window,
             cx,
         );
+        let cover_blur = material_frame.cover_blur.clone();
         let layouts = self.workspace.layouts.clone();
         let layout_view = layouts
             .current()
@@ -219,6 +220,9 @@ impl Render for WindowView {
                         });
                         paint_presentation
                             .update(cx, |presentation, cx| presentation.finish_paint(cx));
+                        if let Some(cover_blur) = cover_blur {
+                            cover_blur.finish_prepaint(window);
+                        }
                         paint_artwork_images.release_retired(window);
                     },
                 )

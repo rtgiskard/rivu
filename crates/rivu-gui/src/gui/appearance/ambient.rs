@@ -1,11 +1,12 @@
 //! One atmosphere consumer, independent of whether an artwork panel is present.
 use super::material::MaterialAppearance;
 use crate::gui::artwork::{
-    ArtworkImageRegistry, ArtworkLoader, ArtworkSource, ArtworkView, owned_artwork_source,
+    ArtworkImageRegistry, ArtworkLoader, ArtworkSource, ArtworkView, cover_cache::CoverBlurCache,
+    owned_artwork_source,
 };
 use gpui::{App, Context, RenderImage, Window};
 use rivu_format::config::MaterialPreset;
-use rivu_metadata::artwork::{Artwork, ArtworkIdentity, ArtworkManager};
+use rivu_metadata::artwork::{Artwork, ArtworkManager};
 use rivu_protocol::model::Track;
 use std::{
     sync::Arc,
@@ -17,6 +18,7 @@ pub(in crate::gui) struct Atmosphere {
     loader: ArtworkLoader,
     view: ArtworkView,
     previous: ArtworkView,
+    pub(super) cover_blur: CoverBlurCache,
     material: Option<MaterialPreset>,
     transition_enabled: bool,
     transition_started: Option<Instant>,
@@ -31,6 +33,7 @@ impl Atmosphere {
             manager,
             loader: ArtworkLoader::default(),
             view: ArtworkView::new(images.clone()),
+            cover_blur: CoverBlurCache::default(),
             previous: ArtworkView::new(images),
             material: None,
             transition_enabled: false,
@@ -92,32 +95,16 @@ impl Atmosphere {
     }
 
     fn prepare(&mut self, cx: &mut Context<Self>) {
-        self.loader.retain_negative(
-            self.track
-                .as_ref()
-                .filter(|_| self.enabled)
-                .map(crate::artwork_source),
-        );
         if !self.enabled {
+            self.loader.retain_negative(None);
             return;
         }
-        let cached = self
-            .track
-            .as_ref()
-            .and_then(|track| self.manager.cached_result(crate::artwork_source(track)));
-        if let Some(result) = &cached
-            && let Some(track) = &self.track
-        {
-            self.loader.remember_result(
-                ArtworkIdentity::new(crate::artwork_source(track)),
-                result.is_some(),
-            );
-        }
-        let resolved = self.track.is_none() || cached.is_some();
-        self.apply_target(cached.flatten(), resolved, cx);
-        if let Some(track) = self.track.as_ref().filter(|_| !resolved)
-            && let Some(source) = self.loader.prepare(crate::artwork_source(track))
-        {
+        let demand = self.loader.resolve(
+            &self.manager,
+            self.track.as_ref().map(crate::artwork_source),
+        );
+        self.apply_target(demand.artwork, demand.resolved, cx);
+        if let Some(source) = demand.load {
             self.start(source, cx);
         }
     }
@@ -142,18 +129,20 @@ impl Atmosphere {
     }
 
     fn start(&mut self, source: rivu_protocol::model::ArtworkSource, cx: &mut Context<Self>) {
-        let identity = ArtworkIdentity::new(owned_artwork_source(&source));
         let manager = Arc::clone(&self.manager);
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let artwork = cx
+            let (source, artwork) = cx
                 .background_executor()
-                .spawn(async move { manager.load(owned_artwork_source(&source)) })
+                .spawn(async move {
+                    let artwork = manager.load(owned_artwork_source(&source));
+                    (source, artwork)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !this.loader.finish(&identity) {
+                let Some(identity) = this.loader.finish(owned_artwork_source(&source)) else {
                     return;
-                }
+                };
                 if this.enabled
                     && this.generation == generation
                     && this
@@ -239,6 +228,7 @@ impl Atmosphere {
 
     pub(in crate::gui) fn release(&mut self, window: &mut Window, cx: &mut App) {
         self.enabled = false;
+        self.cover_blur.clear(window);
         self.loader.retain_negative(None);
         self.generation = self.generation.wrapping_add(1);
         self.transition_started = None;

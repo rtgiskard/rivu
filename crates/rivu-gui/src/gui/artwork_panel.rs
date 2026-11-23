@@ -1,4 +1,4 @@
-use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager};
+use rivu_metadata::artwork::{Artwork as LoadedArtwork, ArtworkManager};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use gpui::{
@@ -328,56 +328,40 @@ impl ArtworkRuntime {
     }
 
     fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
-        self.loader.retain_negative(
-            self.track
-                .as_ref()
-                .filter(|_| self.visible)
-                .map(crate::artwork_source),
-        );
         if !self.visible {
             // The physical load retires normally; hidden panels own no demand.
+            self.loader.retain_negative(None);
             return;
         }
-        let cached = self
-            .track
-            .as_ref()
-            .and_then(|track| self.manager.cached_result(crate::artwork_source(track)));
-        if let Some(result) = &cached
-            && let Some(track) = &self.track
-        {
-            self.loader.remember_result(
-                ArtworkIdentity::new(crate::artwork_source(track)),
-                result.is_some(),
-            );
-        }
-        let cold = cached.is_none();
-        self.replace_artwork(cached.flatten(), cx);
-        if let Some(track) = self.track.as_ref().filter(|_| cold)
-            && let Some(source) = self.loader.prepare(crate::artwork_source(track))
-        {
+        let demand = self.loader.resolve(
+            &self.manager,
+            self.track.as_ref().map(crate::artwork_source),
+        );
+        self.replace_artwork(demand.artwork, cx);
+        if let Some(source) = demand.load {
             self.start_artwork(source, cx);
         }
     }
 
     fn start_artwork(&mut self, source: ArtworkSource, cx: &mut Context<Self>) {
-        let identity = ArtworkIdentity::new(owned_artwork_source(&source));
         let manager = Arc::clone(&self.manager);
         cx.spawn(async move |this, cx| {
-            let (path, loaded) = cx
+            let (source, loaded) = cx
                 .background_executor()
                 .spawn(async move {
                     let loaded = manager.load(owned_artwork_source(&source));
-                    (source.path, loaded)
+                    (source, loaded)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !this.loader.finish(&identity) {
+                let Some(identity) = this.loader.finish(owned_artwork_source(&source)) else {
                     return;
-                }
+                };
                 if this.visible
-                    && this.track.as_ref().is_some_and(|track| {
-                        identity.matches(crate::artwork_source(track)) && track.path == path
-                    })
+                    && this
+                        .track
+                        .as_ref()
+                        .is_some_and(|track| identity.matches(crate::artwork_source(track)))
                 {
                     this.loader.remember_result(identity, loaded.is_some());
                     this.replace_artwork(loaded, cx);
@@ -923,7 +907,7 @@ mod tests {
             assert!(!owner.view.replace(Some(new), cx));
             assert_eq!(owner.instances[&2].rotation.angle, 0.75);
             assert!(
-                !ArtworkIdentity::new(crate::artwork_source(&original))
+                !rivu_metadata::artwork::ArtworkIdentity::new(crate::artwork_source(&original))
                     .matches(crate::artwork_source(owner.track.as_ref().unwrap()))
             );
         });

@@ -794,7 +794,6 @@ impl AlbumBrowser {
             cx.notify();
         }
         if let Some(track) = next {
-            let identity = ArtworkIdentity::new(owned_artwork_source(&track));
             let manager = Arc::clone(&self.manager);
             cx.spawn(async move |this, cx| {
                 let (track, loaded) = cx
@@ -807,7 +806,7 @@ impl AlbumBrowser {
                 let _ = this.update(cx, |this, cx| {
                     // The worker result remains leased through direct delivery.
                     // Hidden/obsolete demand can warm the shared cache only.
-                    if !this.loader.finish(&identity)
+                    if this.loader.finish(owned_artwork_source(&track)).is_none()
                         || !this.model.visible()
                         || this.model.selected().is_some()
                     {
@@ -1581,7 +1580,7 @@ mod tests {
             assert!(loader.prepare(owned_artwork_source(&active)).is_none());
             let loaded = manager.load(owned_artwork_source(&active));
             assert_eq!(loaded.is_some(), positive);
-            assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&active))));
+            assert!(loader.finish(owned_artwork_source(&active)).is_some());
             cx.update(|cx| {
                 let source = |index| model.albums().get(index).map(|album| &album.representative);
                 assert_eq!(
@@ -1814,7 +1813,7 @@ mod tests {
         let external = manager.load(owned_artwork_source(&sources[1])).unwrap();
         assert!(manager.load(owned_artwork_source(&sources[2])).is_none());
         let completed = manager.load(owned_artwork_source(&active)).unwrap();
-        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&active))));
+        assert!(loader.finish(owned_artwork_source(&active)).is_some());
         cx.update(|cx| {
             covers.complete(&active, Some(&completed), |index| sources.get(index), cx);
             let (next, changed) =
@@ -1914,7 +1913,7 @@ mod tests {
                 manager.cached_result(owned_artwork_source(source)),
                 Some(None)
             );
-            assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
+            assert!(loader.finish(owned_artwork_source(&next)).is_some());
             cx.update(|cx| {
                 covers.complete(&next, completed.as_ref(), |index| sources.get(index), cx);
             });
@@ -2008,7 +2007,7 @@ mod tests {
             ArtworkIdentity::new(owned_artwork_source(&first)).matches(owned_artwork_source(&next))
         );
         let completed = manager.load(owned_artwork_source(&next)).unwrap();
-        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
+        assert!(loader.finish(owned_artwork_source(&next)).is_some());
         cx.update(|cx| {
             assert!(covers.complete(&next, Some(&completed), |index| sources.get(index), cx));
             assert!(covers.views[&0].view.has_artwork());
@@ -2027,7 +2026,7 @@ mod tests {
                 .matches(owned_artwork_source(&next))
         );
         let completed = manager.load(owned_artwork_source(&next));
-        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
+        assert!(loader.finish(owned_artwork_source(&next)).is_some());
         cx.update(|cx| {
             covers.complete(&next, completed.as_ref(), |index| sources.get(index), cx);
         });
@@ -2095,7 +2094,7 @@ mod tests {
         );
         let negative = manager.load(owned_artwork_source(&active));
         assert!(negative.is_none());
-        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&active))));
+        assert!(loader.finish(owned_artwork_source(&active)).is_some());
         cx.update(|cx| {
             assert!(!covers.complete(&active, negative.as_ref(), latest, cx));
             assert!(covers.views[&2].negative.is_none());
@@ -2109,7 +2108,7 @@ mod tests {
                 .matches(owned_artwork_source(&next))
         );
         let completed = manager.load(owned_artwork_source(&next)).unwrap();
-        assert!(loader.finish(&ArtworkIdentity::new(owned_artwork_source(&next))));
+        assert!(loader.finish(owned_artwork_source(&next)).is_some());
         cx.update(|cx| {
             assert!(covers.complete(&next, Some(&completed), latest, cx));
             assert!(covers.views[&2].view.has_artwork());

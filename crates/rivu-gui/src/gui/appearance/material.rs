@@ -1,4 +1,5 @@
 //! Persisted material preferences with immediate preview; semantic theme colors stay independent.
+use crate::gui::artwork::cover_cache::CoverBlurFrame;
 use crate::gui::shell::panels::PanelKind;
 use gpui::{prelude::*, *};
 use rivu_format::config::material::MaterialParameter;
@@ -849,6 +850,8 @@ pub(in crate::gui) struct MaterialFrame {
     previous: Option<std::sync::Arc<RenderImage>>,
     current: Option<std::sync::Arc<RenderImage>>,
     weight: f32,
+    texture_fallback: Option<std::sync::Arc<RenderImage>>,
+    pub(in crate::gui) cover_blur: Option<CoverBlurFrame>,
     surface: Option<crate::gui::artwork::ArtworkSource>,
     fallback: Option<crate::gui::artwork::DefaultArtwork>,
 }
@@ -863,6 +866,7 @@ impl MaterialFrame {
         let session = MaterialSession::current(cx);
         let settings = session.settings;
         let Some(material) = MaterialPreset::current(cx) else {
+            atmosphere.read(cx).cover_blur.clear(window);
             return Self {
                 material: None,
                 settings,
@@ -870,6 +874,8 @@ impl MaterialFrame {
                 previous: None,
                 current: None,
                 weight: 1.,
+                texture_fallback: None,
+                cover_blur: None,
                 surface: None,
                 fallback: None,
             };
@@ -888,6 +894,30 @@ impl MaterialFrame {
                 (None, None, 1., atmosphere.source())
             }
         });
+        let fallback = (session.default_artwork_fallback
+            && (material.spec().artwork_root || material.spec().artwork_playback))
+            .then(|| default_artwork.read(cx).clone());
+        let image_material = material.spec().family == CompositionFamily::Image;
+        let texture_fallback = if image_material && previous.is_none() && current.is_none() {
+            fallback.as_ref().and_then(|fallback| {
+                fallback
+                    .background_pixels(surface.as_ref(), false, window, cx)?
+                    .ok()
+            })
+        } else {
+            None
+        };
+        let cache = &atmosphere.read(cx).cover_blur;
+        let cover_blur = if image_material
+            && settings.cover_blur > 0.
+            && window.is_visible()
+            && (previous.is_some() || current.is_some() || texture_fallback.is_some())
+        {
+            Some(cache.begin(window))
+        } else {
+            cache.clear(window);
+            None
+        };
         Self {
             material: Some(material),
             settings,
@@ -896,30 +926,25 @@ impl MaterialFrame {
             current,
             weight,
             surface,
-            fallback: (session.default_artwork_fallback
-                && (material.spec().artwork_root || material.spec().artwork_playback))
-                .then(|| default_artwork.read(cx).clone()),
+            texture_fallback,
+            cover_blur,
+            fallback,
         }
     }
 
     fn images(&self, enabled: bool) -> super::texture_styles::ArtworkBlend {
         super::texture_styles::ArtworkBlend {
-            previous: enabled
-                .then(|| self.previous.as_ref().map(|source| img(source.clone())))
-                .flatten(),
+            previous: if enabled { self.previous.clone() } else { None },
             current: if enabled {
                 self.current
                     .as_ref()
-                    .map(|source| img(source.clone()))
-                    .or_else(|| {
-                        if self.previous.is_none() {
-                            self.fallback.as_ref().map(|fallback| {
-                                fallback.background_image(self.surface.clone(), false)
-                            })
-                        } else {
-                            None
-                        }
-                    })
+                    .or(self.texture_fallback.as_ref())
+                    .cloned()
+            } else {
+                None
+            },
+            cover_blur: if enabled {
+                self.cover_blur.clone()
             } else {
                 None
             },
@@ -1231,6 +1256,8 @@ mod tests {
             previous: None,
             current: None,
             weight: 1.,
+            texture_fallback: None,
+            cover_blur: None,
             surface: None,
             fallback: None,
         };

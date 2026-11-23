@@ -602,6 +602,18 @@ the last window drops transient editors, not saved preferences; reopening cannot
 revive the old modal focus owner.
 
 Source-image effects transform shared decoded artwork, not painted controls.
+For positive cover blur, GPUI derives an atlas tile from the first source frame
+at paint time and reuses it on redraw. The fitted image size determines
+the filter radius in source texels, so the root and a smaller playback panel
+can request different variants. Wave displacement uses reflected edges. Motion,
+fades and cover transitions still compose at draw time.
+
+Each window admits up to eight active variants within 48 MiB of derivative
+pixels, with a 16 MiB limit per variant. Over-budget draws use the live shader.
+When a variant becomes obsolete, the window invalidates that source's atlas
+entries. Other visible variants of the same source are derived again during
+paint. GPUI keeps tiles needed for scene replay until they can be reclaimed.
+
 Backdrop capture and subtree isolation are separate scene operations because
 their inputs and painter-order boundaries differ from source-image sampling.
 

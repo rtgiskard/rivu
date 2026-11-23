@@ -18,7 +18,7 @@
 
 === Frontends and rendering
 
-- GPUI — Apache-2.0. https://github.com/rtgiskard/gpui-wgpu/blob/9ca5724d4b87f2e021e04e84c619db5559d58a67/LICENSE-APACHE[License]
+- GPUI — Apache-2.0. https://github.com/rtgiskard/gpui-wgpu/blob/b2aaa27abd6438f3229c4201ef50822ef4b11d83/LICENSE-APACHE[License]
 - wgpu — MIT OR Apache-2.0. https://github.com/gfx-rs/wgpu/tree/cddb2f5d80dc0009b2ef6767635140cacf90a007[Source and licenses]
 - Ratatui and Crossterm — MIT. https://crates.io/crates/ratatui/0.30.2[Ratatui], https://crates.io/crates/crossterm/0.29.0[Crossterm]
 
