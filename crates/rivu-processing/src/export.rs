@@ -151,17 +151,13 @@ impl ExportWriter<'_> {
         );
         for input in samples.chunks(8192 * self.channels) {
             check_cancel(self.cancel)?;
-            let samples = if self.eq.is_none() && !self.reorder {
-                input
-            } else {
-                self.block.clear();
-                self.block.extend_from_slice(input);
-                if let Some(eq) = &mut self.eq {
-                    eq.process(&mut self.block)?;
-                }
+            let samples = if let Some(eq) = &mut self.eq {
+                let block = &mut self.block[..input.len()];
+                block.copy_from_slice(input);
+                eq.process(block)?;
                 // EQ channel targets refer to source order; reorder only afterwards.
                 if self.reorder {
-                    for frame in self.block.chunks_exact_mut(self.channels) {
+                    for frame in block.chunks_exact_mut(self.channels) {
                         let mut sorted = [0.0_f32; 32];
                         for (out, &index) in sorted.iter_mut().zip(&self.order[..self.channels]) {
                             *out = frame[index];
@@ -169,7 +165,21 @@ impl ExportWriter<'_> {
                         frame.copy_from_slice(&sorted[..self.channels]);
                     }
                 }
-                &self.block
+                block
+            } else if self.reorder {
+                let block = &mut self.block[..input.len()];
+                let order = &self.order[..self.channels];
+                for (source, target) in input
+                    .chunks_exact(self.channels)
+                    .zip(block.chunks_exact_mut(self.channels))
+                {
+                    for (sample, &index) in target.iter_mut().zip(order) {
+                        *sample = source[index];
+                    }
+                }
+                block
+            } else {
+                input
             };
             if let Some(converter) = &mut self.converter {
                 self.sink.write(converter.convert(samples)?)?;
@@ -311,7 +321,7 @@ pub(super) fn prepare_streaming_encoded_export(
         reorder,
         eq,
         converter,
-        block: Vec::with_capacity(capacity),
+        block: vec![0.0; capacity],
         failed: false,
     };
     produce(&mut writer)?;
