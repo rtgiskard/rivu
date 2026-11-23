@@ -664,28 +664,31 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn open_cached_image(path: &Path) -> io::Result<fs::File> {
+fn open_cached_image(path: &Path, expected: &fs::Metadata) -> io::Result<fs::File> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
-    if !file.metadata()?.is_file() {
+    let opened = file.metadata()?;
+    if !opened.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Artwork cache entry is not a regular file",
         ));
     }
-    Ok(file)
-}
-
-fn same_image(path: &Path, file: &fs::File, expected: &fs::Metadata) -> io::Result<bool> {
     let current = fs::symlink_metadata(path)?;
-    let opened = file.metadata()?;
-    Ok(current.is_file()
-        && current.dev() == opened.dev()
-        && current.ino() == opened.ino()
-        && current.dev() == expected.dev()
-        && current.ino() == expected.ino())
+    if !current.is_file()
+        || current.dev() != opened.dev()
+        || current.ino() != opened.ino()
+        || current.dev() != expected.dev()
+        || current.ino() != expected.ino()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Artwork cache entry changed during acquisition",
+        ));
+    }
+    Ok(file)
 }
 
 fn write_image(path: &Path, data: &[u8], max_image_bytes: usize) -> io::Result<Arc<ArtworkFile>> {
@@ -727,13 +730,7 @@ fn reuse_image(path: &Path, data: &[u8], max_image_bytes: usize) -> io::Result<A
     if !metadata.is_file() || metadata.len() != data.len() as u64 {
         return Err(mismatch());
     }
-    let file = open_cached_image(path)?;
-    if !same_image(path, &file, &metadata)? {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "Artwork cache entry changed during acquisition",
-        ));
-    }
+    let file = open_cached_image(path, &metadata)?;
     // Stream at most the expected length plus one byte, including if the file
     // grows after metadata. Comparison uses fixed stack space, not a second image.
     let mut reader = (&file).take(data.len() as u64 + 1);
