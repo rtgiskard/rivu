@@ -409,7 +409,6 @@ fn run_model(
         let mut input_frame = if dry { input.frames() } else { 0 };
         let mut end_sent = false;
         let channels = usize::from(input.channels());
-        let mut samples = vec![0.0f32; if dry { 0 } else { 8192 * channels }];
         let mut decoded = Vec::with_capacity(if dry { 0 } else { MAX_FRAME / 4 });
         let mut builders = [None, None, None];
         let mut frames = [0u64; 3];
@@ -476,16 +475,22 @@ fn run_model(
                             frame(&mut outgoing, INPUT_END, &[])?;
                             end_sent = true;
                         } else {
-                            let count = input.read_frames(input_frame, &mut samples);
-                            ensure!(count > 0, "Truncated retained neural input");
+                            let count = (input.frames() - input_frame).min(8192) as usize;
                             outgoing.clear();
                             outgoing.push(INPUT);
                             outgoing
                                 .extend_from_slice(&((count * channels * 4) as u32).to_le_bytes());
-                            for sample in &samples[..count * channels] {
-                                outgoing.extend_from_slice(&sample.to_le_bytes());
+                            let end = input_frame + count as u64;
+                            while input_frame < end {
+                                let block = input.frame_block(input_frame);
+                                let frames =
+                                    (block.len() / channels).min((end - input_frame) as usize);
+                                ensure!(frames > 0, "Truncated retained neural input");
+                                for sample in &block[..frames * channels] {
+                                    outgoing.extend_from_slice(&sample.to_le_bytes());
+                                }
+                                input_frame += frames as u64;
                             }
-                            input_frame += count as u64;
                         }
                         sent = 0;
                     }
