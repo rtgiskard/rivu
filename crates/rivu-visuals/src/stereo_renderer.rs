@@ -1,5 +1,5 @@
 //! Fixed-scale, analysis-backed stereo plots. GPU field storage is independent of panel size.
-use crate::{VisualLabels, VisualParameters};
+use crate::{VisualLabels, VisualParameters, palette::mix_rgb};
 use gpui::{
     AnyElement, App, Bounds, GpuFieldParams, GpuLimits, GpuPalette, GpuSchema, GpuSource, GpuState,
     GpuValueMapping, Hsla, Pixels, Point, SharedString, TextAlign, Window, canvas, div, fill,
@@ -537,7 +537,7 @@ impl StereoState {
         );
         window.paint_quad(fill(
             plot,
-            rgb(mix_color(self.background, self.primary, 0.035)),
+            rgb(mix_rgb(self.background, self.primary, 0.035)),
         ));
         if let Some(gpu) = &self.gpu
             && let Err(error) = window.paint_gpu(plot, GpuSource::Dynamic(Arc::clone(gpu)))
@@ -798,15 +798,6 @@ fn frequency_label(hz: f32) -> String {
     }
 }
 
-fn mix_color(first: u32, second: u32, fraction: f32) -> u32 {
-    let channel = |shift: u32| {
-        let first = ((first >> shift) & 0xff) as f32;
-        let second = ((second >> shift) & 0xff) as f32;
-        (first + (second - first) * fraction.clamp(0.0, 1.0)).round() as u32
-    };
-    (channel(16) << 16) | (channel(8) << 8) | channel(0)
-}
-
 fn field_dimensions(style: AudioVisualizerStyle) -> (u32, u32) {
     if style == AudioVisualizerStyle::StereoDensity {
         (DENSITY_SIDE as u32, DENSITY_SIDE as u32)
@@ -864,7 +855,7 @@ fn field_colors(
         let strength = index as f32 / (FIELD_COLOR_COUNT - 1) as f32;
         let interval = stops.windows(2).find(|pair| strength <= pair[1].0).unwrap();
         let t = (strength - interval[0].0) / (interval[1].0 - interval[0].0);
-        let color = mix_color(interval[0].1, interval[1].1, t);
+        let color = mix_rgb(interval[0].1, interval[1].1, t);
         [
             color as u8,
             (color >> 8) as u8,

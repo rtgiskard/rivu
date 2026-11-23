@@ -1,6 +1,7 @@
 //! Renders radial bars and rings with shared, bounded analysis state.
 use crate::VisualLabels;
 use crate::VisualParameters;
+use crate::palette::mix_rgb;
 
 use gpui::{
     AnyElement, App, Bounds, PathBuilder, Rgba, TextAlign, Window, canvas, div, point, prelude::*,
@@ -688,11 +689,7 @@ fn paint_rings(bounds: Bounds<gpui::Pixels>, data: &RadialState, window: &mut Wi
             accent_radius,
             0.0,
             TWO_PI,
-            mix_color(
-                data.secondary_color,
-                data.primary_color,
-                (bass * 0.5).clamp(0.0, 1.0),
-            ),
+            mix_rgb(data.secondary_color, data.primary_color, bass * 0.5),
             glow,
             opacity * energy,
         );
@@ -724,7 +721,7 @@ fn paint_rings(bounds: Bounds<gpui::Pixels>, data: &RadialState, window: &mut Wi
         8,
         rotation + high_mid * 3.0,
         px(1.5 + high_mid * 2.0),
-        rgb(mix_color(data.primary_color, data.secondary_color, 0.5))
+        rgb(mix_rgb(data.primary_color, data.secondary_color, 0.5))
             .alpha(opacity * (0.4 + high_mid * 0.6)),
     );
     paint_segmented_ring(
@@ -752,10 +749,10 @@ fn paint_rings(bounds: Bounds<gpui::Pixels>, data: &RadialState, window: &mut Wi
         0.0,
         TWO_PI,
         px(2.0 + bass * 2.0),
-        rgb(mix_color(
+        rgb(mix_rgb(
             data.secondary_color,
             data.primary_color,
-            (bass * 0.5).clamp(0.0, 1.0),
+            bass * 0.5,
         ))
         .alpha(opacity),
     );
@@ -918,21 +915,11 @@ fn fancy_bar_color(data: &RadialState, value: f32) -> u32 {
             (value - 0.5) * 2.0,
         )
     };
-    mix_color(from, to, fraction)
+    mix_rgb(from, to, fraction)
 }
 
 fn scale_color(color: u32, scale: f32) -> u32 {
     let channel = |shift: u32| (((color >> shift) & 0xff) as f32 * scale).round() as u32;
-    (channel(16) << 16) | (channel(8) << 8) | channel(0)
-}
-
-fn mix_color(first: u32, second: u32, fraction: f32) -> u32 {
-    let t = fraction.clamp(0.0, 1.0);
-    let channel = |shift: u32| {
-        let a = ((first >> shift) & 0xff) as f32;
-        let b = ((second >> shift) & 0xff) as f32;
-        (a + (b - a) * t).round() as u32
-    };
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 

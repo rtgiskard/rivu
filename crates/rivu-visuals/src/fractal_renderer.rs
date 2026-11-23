@@ -1,5 +1,5 @@
 //! Shared generative light views with accepted targets and display-clocked simulation.
-use super::{fractal_beams, fractal_flow};
+use super::{fractal_beams, fractal_flow, palette::mix_rgb};
 use crate::VisualLabels;
 use crate::VisualParameters;
 use gpui::{
@@ -445,9 +445,9 @@ impl FractalState {
             let colors: [[f32; 4]; 27] = std::array::from_fn(|index| {
                 let pass = index / 9;
                 let group = index % 9;
-                let mut color = blend(self.colors[0], self.colors[1], (group / 3) as f32 * 0.5);
+                let mut color = mix_rgb(self.colors[0], self.colors[1], (group / 3) as f32 * 0.5);
                 if self.style != AudioVisualizerStyle::FractalFlow && pass == 2 {
-                    color = blend(color, 0xffffff, [0.0, 0.28, 0.62][group % 3]);
+                    color = mix_rgb(color, 0xffffff, [0.0, 0.28, 0.62][group % 3]);
                 }
                 let alpha = [0.045 * self.bloom, 0.15 * self.bloom, 0.9][pass]
                     * ((group % 3) as f32 + 0.5)
@@ -669,15 +669,6 @@ fn response(rms: f32, db_range: f32, sensitivity: f32) -> f32 {
 fn smooth(value: f32, target: f32, dt: f32) -> f32 {
     let tau = if target > value { 0.06 } else { 0.25 };
     target + (value - target) * (-dt / tau).exp()
-}
-
-fn blend(from: u32, to: u32, t: f32) -> u32 {
-    let channel = |shift: u32| {
-        let a = ((from >> shift) & 0xff) as f32;
-        let b = ((to >> shift) & 0xff) as f32;
-        (a + (b - a) * t).round() as u32
-    };
-    (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 #[cfg(test)]

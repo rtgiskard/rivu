@@ -1,4 +1,4 @@
-//! Shared color lookup and lazy GPU palettes for Spectrum, Spectrogram and Waveform.
+//! Shared color interpolation, lookup, and lazy GPU palettes for visualizations.
 mod matplotlib;
 
 use gpui::GpuPalette;
@@ -22,6 +22,16 @@ pub(super) const DEADBEEF_STOPS: &[(f32, [u8; 3])] = &[
 
 pub(super) const PALETTE_LUT_SIZE: usize = 1024;
 pub(super) const MAX_PALETTE_COLORS: usize = PALETTE_LUT_SIZE;
+
+pub(super) fn mix_rgb(from: u32, to: u32, fraction: f32) -> u32 {
+    let fraction = fraction.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let from = ((from >> shift) & 0xff) as f32;
+        let to = ((to >> shift) & 0xff) as f32;
+        (from + (to - from) * fraction).round() as u32
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
 
 pub(super) struct PaletteLut {
     pub(super) palette: VisualizationPalette,
