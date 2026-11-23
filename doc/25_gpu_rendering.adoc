@@ -35,7 +35,7 @@ not invalid memory access, stale source identity, unbounded retention or audio s
 == Pinned renderer maintenance
 
 `Cargo.toml` overrides `gpui`, `gpui_wgpu`, `gpui_linux` and `gpui_platform`
-with the same commit `b2aaa27abd6438f3229c4201ef50822ef4b11d83` from
+with the same commit `20e94ceca3f3be0a71b3834cf319a4a239d316cf` from
 https://github.com/rtgiskard/gpui-wgpu[`gpui-wgpu`]. `Cargo.lock` records that exact
 revision. These crates are maintained
 together outside Rivu, under the upstream Apache-2.0 license. Their baseline is
@@ -92,7 +92,7 @@ Check out the exact revision pinned by Rivu before running its commands:
 ----
 git clone https://github.com/rtgiskard/gpui-wgpu
 cd gpui-wgpu
-git checkout b2aaa27abd6438f3229c4201ef50822ef4b11d83
+git checkout 20e94ceca3f3be0a71b3834cf319a4a239d316cf
 make test
 ----
 
@@ -155,9 +155,9 @@ bottom-to-top palette coordinates retain their initial behavior. Palette samples
 are straight-alpha sRGB values, interpolated in sRGB numerical space.
 
 The interface and retirement contracts are tied to the coordinated `Cargo.toml`
-patches at `b2aaa27abd6438f3229c4201ef50822ef4b11d83`:
-https://github.com/rtgiskard/gpui-wgpu/blob/b2aaa27abd6438f3229c4201ef50822ef4b11d83/crates/gpui/src/gpu.rs[`gpui::gpu`] and
-https://github.com/rtgiskard/gpui-wgpu/blob/b2aaa27abd6438f3229c4201ef50822ef4b11d83/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
+patches at `20e94ceca3f3be0a71b3834cf319a4a239d316cf`:
+https://github.com/rtgiskard/gpui-wgpu/blob/20e94ceca3f3be0a71b3834cf319a4a239d316cf/crates/gpui/src/gpu.rs[`gpui::gpu`] and
+https://github.com/rtgiskard/gpui-wgpu/blob/20e94ceca3f3be0a71b3834cf319a4a239d316cf/crates/gpui_wgpu/src/gpu_material.rs[`gpu_material`].
 Update all four patch revisions together and check these contracts; historical timings do
 not transfer automatically. Handles own CPU content, not device allocations or
 window identity: each window independently uploads and budgets shared content.
@@ -360,10 +360,11 @@ the stored preset when the output scale changes.
 Frames without backdrop blur draw their
 root directly into the output, retaining only one viewport target per active
 group depth and requiring no final root-copy pass. Frames containing backdrop
-blur additionally retain an offscreen root, shared scratch target and a grid
-target sized to `ceil(viewport / 4) + 2` on each axis. Nested blurs reuse these
-targets. Their total storage counts toward the target-byte budget. Per-window storage and fade-depth
-settings are defined in link:01_config.adoc#_appearance_and_library_display[Appearance and library display].
+blur additionally retain an offscreen root and a shared scratch target. If any
+blur uses the downsampled path, the frame also needs one shared grid target sized
+to `ceil(viewport / 4) + 2` on each axis. The target-byte budget counts the sizes
+of the required targets. Per-window storage and fade-depth settings are defined
+in link:01_config.adoc#_appearance_and_library_display[Appearance and library display].
 
 Filter validation and procedural-water counts share one allocation-free scene
 preflight before filter or water resources are established. Scenes with neither

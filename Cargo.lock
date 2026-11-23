@@ -2308,7 +2308,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=b2aaa27abd6438f3229c4201ef50822ef4b11d83#b2aaa27abd6438f3229c4201ef50822ef4b11d83"
+source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=20e94ceca3f3be0a71b3834cf319a4a239d316cf#20e94ceca3f3be0a71b3834cf319a4a239d316cf"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2413,7 +2413,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=b2aaa27abd6438f3229c4201ef50822ef4b11d83#b2aaa27abd6438f3229c4201ef50822ef4b11d83"
+source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=20e94ceca3f3be0a71b3834cf319a4a239d316cf#20e94ceca3f3be0a71b3834cf319a4a239d316cf"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2503,7 +2503,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=b2aaa27abd6438f3229c4201ef50822ef4b11d83#b2aaa27abd6438f3229c4201ef50822ef4b11d83"
+source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=20e94ceca3f3be0a71b3834cf319a4a239d316cf#20e94ceca3f3be0a71b3834cf319a4a239d316cf"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2565,7 +2565,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=b2aaa27abd6438f3229c4201ef50822ef4b11d83#b2aaa27abd6438f3229c4201ef50822ef4b11d83"
+source = "git+https://github.com/rtgiskard/gpui-wgpu?rev=20e94ceca3f3be0a71b3834cf319a4a239d316cf#20e94ceca3f3be0a71b3834cf319a4a239d316cf"
 dependencies = [
  "anyhow",
  "bytemuck",
