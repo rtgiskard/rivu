@@ -71,7 +71,7 @@ impl Store {
         ))?;
         let mut rows =
             statement.query(params![query, limit.min(MAX_QUERY_ROWS) as i64, sql_offset])?;
-        let mut summaries = Vec::new();
+        let mut summaries = Vec::with_capacity(limit.min(MAX_QUERY_ROWS).min(total - offset));
         while let Some(row) = rows.next()? {
             let key = AlbumKey {
                 directory: row.get::<_, String>(0)?.into(),
@@ -127,8 +127,9 @@ impl Store {
                 "SELECT COALESCE((SELECT track_count FROM albums WHERE directory=?1 AND title=?2),0)",
             )?.query_row(params![directory, key.title], |row| row.get::<_, i64>(0))? as usize
         };
+        let empty = limit == 0 || offset >= total;
         let offset = i64::try_from(offset)?;
-        if limit == 0 {
+        if empty {
             return Ok(Page {
                 total,
                 rows: Vec::new(),

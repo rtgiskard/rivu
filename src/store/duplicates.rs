@@ -198,6 +198,12 @@ impl Store {
             .query_row([fingerprint.as_bytes().as_slice()], |row| {
                 row.get::<_, i64>(0)
             })? as usize;
+        if limit == 0 || offset >= total {
+            return Ok(Page {
+                total,
+                rows: Vec::new(),
+            });
+        }
         let mut query = self.conn.prepare_cached(&format!(
             "SELECT {TRACK_COLUMNS},{DUPLICATE_MEMBER_COLUMNS}
              FROM tracks INDEXED BY tracks_fingerprint
