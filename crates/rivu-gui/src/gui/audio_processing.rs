@@ -3012,26 +3012,36 @@ impl AudioProcessing {
         };
         let actual = self.state.system.processing_audition;
         let selection = self.state.system.processing_selection;
+        use std::fmt::Write as _;
+
         let mut selected_audio_text = format!(
             "{}: {} · {transport}",
             self.tr("processing-workspace-actual-audio"),
             audio_label(actual),
         );
         if self.state.system.config.processing_bypassed {
-            selected_audio_text
-                .push_str(&format!(" · {}", self.tr("processing-workspace-bypassed")));
+            write!(
+                selected_audio_text,
+                " · {}",
+                self.tr("processing-workspace-bypassed")
+            )
+            .unwrap();
         } else if self.state.system.config.equalizer.enabled {
-            selected_audio_text.push_str(&format!(
+            write!(
+                selected_audio_text,
                 " · {}",
                 self.tr("processing-workspace-monitor-on")
-            ));
+            )
+            .unwrap();
         }
         if selection != actual {
-            selected_audio_text.push_str(&format!(
+            write!(
+                selected_audio_text,
                 " · {}: {}",
                 self.tr("processing-workspace-selected-audio"),
                 audio_label(selection),
-            ));
+            )
+            .unwrap();
         }
         let mut audio_details = selected_audio_text.clone();
         for (label, audition) in [
@@ -3039,20 +3049,20 @@ impl AudioProcessing {
             ("processing-workspace-actual-audio", actual),
         ] {
             if let Some(audition) = audition {
-                audio_details.push_str(&format!(
+                write!(
+                    audio_details,
                     "\n{}: {} #{}",
                     self.tr(label),
                     audio_label(Some(audition)),
                     audition.id
-                ));
+                )
+                .unwrap();
                 if let Some(port) = audition.output {
-                    audio_details.push_str(&format!(" · #{}:{}", port.node, port.port));
+                    write!(audio_details, " · #{}:{}", port.node, port.port).unwrap();
                 }
             }
         }
         if let Some(track) = self.state.current_track() {
-            use std::fmt::Write as _;
-
             let (sample_rate, channels) = self
                 .state
                 .playback

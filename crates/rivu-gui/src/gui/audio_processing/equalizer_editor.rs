@@ -566,10 +566,7 @@ impl EqualizerEditor {
     fn take_field_drag(&mut self) -> Option<FieldDrag> {
         let drag = self.field_drag.take();
         if drag.is_some() {
-            self.drag_epoch = self.drag_epoch.wrapping_add(1);
-            self.response_frame_pending = false;
-            self.pointer_count
-                .set(self.pointer_count.get().saturating_sub(1));
+            self.retire_drag_frame();
         }
         drag
     }
@@ -577,12 +574,16 @@ impl EqualizerEditor {
     fn take_drag(&mut self) -> Option<NodeDrag> {
         let drag = self.drag.take();
         if drag.is_some() {
-            self.drag_epoch = self.drag_epoch.wrapping_add(1);
-            self.response_frame_pending = false;
-            self.pointer_count
-                .set(self.pointer_count.get().saturating_sub(1));
+            self.retire_drag_frame();
         }
         drag
+    }
+
+    fn retire_drag_frame(&mut self) {
+        self.drag_epoch = self.drag_epoch.wrapping_add(1);
+        self.response_frame_pending = false;
+        self.pointer_count
+            .set(self.pointer_count.get().saturating_sub(1));
     }
 
     fn retire_node_preview(&mut self, cx: &mut Context<Self>) -> bool {
