@@ -142,27 +142,13 @@ impl PcmControl {
         }
     }
     pub(crate) fn set_signal(&self, signal: VisualizationSignal) {
-        let after = signal == VisualizationSignal::After;
-        if self.signal_after.load(Ordering::Acquire) != after {
-            self.epoch.fetch_add(1, Ordering::AcqRel);
-            self.signal_after.store(after, Ordering::Release);
-            self.epoch.fetch_add(1, Ordering::AcqRel);
-            self.notify();
-        }
+        self.set_epoch_flag(&self.signal_after, signal == VisualizationSignal::After);
     }
     pub(crate) fn set_generation(&self, generation: u64) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
-        self.generation.store(generation, Ordering::Release);
-        self.epoch.fetch_add(1, Ordering::AcqRel);
-        self.notify();
+        self.publish_epoch(|| self.generation.store(generation, Ordering::Release));
     }
     pub(crate) fn set_playback_active(&self, active: bool) {
-        if self.playback_active.load(Ordering::Acquire) != active {
-            self.epoch.fetch_add(1, Ordering::AcqRel);
-            self.playback_active.store(active, Ordering::Release);
-            self.epoch.fetch_add(1, Ordering::AcqRel);
-            self.notify();
-        }
+        self.set_epoch_flag(&self.playback_active, active);
     }
     pub(crate) fn stop(&self) {
         self.set_playback_active(false);
@@ -170,21 +156,28 @@ impl PcmControl {
         self.notify();
     }
     pub(crate) fn set_visualization_enabled(&self, enabled: bool) {
-        if self.visualization_enabled.load(Ordering::Acquire) != enabled {
-            self.epoch.fetch_add(1, Ordering::AcqRel);
-            self.visualization_enabled.store(enabled, Ordering::Release);
-            self.epoch.fetch_add(1, Ordering::AcqRel);
-            self.notify();
-        }
+        self.set_epoch_flag(&self.visualization_enabled, enabled);
     }
     pub(crate) fn reset(&self, sample_rate: u32, layout: &[Channel]) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
-        self.sample_rate.store(sample_rate, Ordering::Release);
-        self.heard_frame.store(0, Ordering::Release);
-        for (slot, channel) in self.layout.iter().zip(layout) {
-            slot.store(channel.standard_index(), Ordering::Release);
+        self.publish_epoch(|| {
+            self.sample_rate.store(sample_rate, Ordering::Release);
+            self.heard_frame.store(0, Ordering::Release);
+            for (slot, channel) in self.layout.iter().zip(layout) {
+                slot.store(channel.standard_index(), Ordering::Release);
+            }
+            self.channels.store(layout.len() as u32, Ordering::Release);
+        });
+    }
+
+    fn set_epoch_flag(&self, flag: &AtomicBool, value: bool) {
+        if flag.load(Ordering::Acquire) != value {
+            self.publish_epoch(|| flag.store(value, Ordering::Release));
         }
-        self.channels.store(layout.len() as u32, Ordering::Release);
+    }
+
+    fn publish_epoch(&self, update: impl FnOnce()) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        update();
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.notify();
     }
