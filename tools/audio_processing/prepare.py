@@ -145,6 +145,7 @@ def reprovision(original, target, manifest):
     old = original.parent
     target.mkdir(mode=0o700)
     try:
+        target_device = target.stat().st_dev
         for name in manifest["files"]:
             if name == "common.py" or name.startswith(("runtime/", "resources/licenses/")):
                 continue
@@ -152,7 +153,7 @@ def reprovision(original, target, manifest):
             destination.parent.mkdir(parents=True, exist_ok=True)
             if name == "registry.json":
                 destination.write_text(json.dumps(relocate(read_json(origin), old, target), indent=2) + "\n")
-            elif origin.stat().st_dev == target.stat().st_dev:
+            elif origin.stat().st_dev == target_device:
                 os.link(origin, destination)
             else:
                 shutil.copyfile(origin, destination)
