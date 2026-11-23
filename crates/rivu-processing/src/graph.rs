@@ -3,6 +3,7 @@ use super::render::{ProgressReporter, check_cancel, validate_output};
 use super::*;
 use anyhow::bail;
 use rivu_dsp::denoise::{DenoiseMode, NoiseProfile, ProfileCollector};
+use rivu_dsp::mix::{DelayLine, write_finite_pcm};
 use rivu_format::config::processing_graph::ValidatedGraph;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -157,8 +158,7 @@ impl std::fmt::Display for EvaluatingNode {
 struct Edge {
     node: usize,
     gain: f64,
-    delay: Vec<f32>,
-    position: usize,
+    delay: DelayLine,
 }
 
 struct Node {
@@ -295,8 +295,7 @@ impl Engine {
                 inputs.push(Edge {
                     node,
                     gain,
-                    delay: Vec::new(),
-                    position: 0,
+                    delay: DelayLine::new(0),
                 });
             }
             frames = 0;
@@ -316,7 +315,7 @@ impl Engine {
                     samples <= 16 * 1024 * 1024,
                     "Graph delay exceeds 64 MiB state bound"
                 );
-                edge.delay = vec![0.0; samples];
+                edge.delay = DelayLine::new(samples);
             }
             if matches!(
                 kind,
@@ -424,33 +423,11 @@ impl Engine {
                         for edge in &mut node.inputs {
                             let input =
                                 &previous[previous[edge.node].output_node].output[..output.len()];
-                            let gain = edge.gain;
-                            if edge.delay.is_empty() {
-                                for (sum, &sample) in sum.iter_mut().zip(input) {
-                                    *sum += f64::from(sample) * gain;
-                                }
-                            } else {
-                                let mut position = edge.position;
-                                for (sum, &sample) in sum.iter_mut().zip(input) {
-                                    let delayed =
-                                        std::mem::replace(&mut edge.delay[position], sample);
-                                    *sum += f64::from(delayed) * gain;
-                                    position += 1;
-                                    if position == edge.delay.len() {
-                                        position = 0;
-                                    }
-                                }
-                                edge.position = position;
-                            }
+                            edge.delay.add(input, sum, edge.gain);
                         }
-                        for (sample, sum) in output.iter_mut().zip(sum) {
-                            // Finite sources and DSP outputs can overflow when
-                            // mixed, including at the f64-to-f32 boundary.
-                            *sample = *sum as f32;
-                            if !sample.is_finite() {
-                                return Err(anyhow::anyhow!("Nonfinite graph output")
-                                    .context(EvaluatingNode(node.id)));
-                            }
+                        if !write_finite_pcm(sum, output) {
+                            return Err(anyhow::anyhow!("Nonfinite graph output")
+                                .context(EvaluatingNode(node.id)));
                         }
                     }
                     let input_frames = input_end.map_or(frames, |end| {

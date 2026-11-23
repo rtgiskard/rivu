@@ -3,3 +3,4 @@
 pub mod channels;
 pub mod denoise;
 pub mod equalizer;
+pub mod mix;

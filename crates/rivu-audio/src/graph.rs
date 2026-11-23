@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::processor::{NativeNodePlan, NativeProcessor};
 use anyhow::{Context, Result, bail, ensure};
 use rivu_dsp::denoise::{BlockDenoiser, DenoiseMode};
+use rivu_dsp::mix::{DelayLine, write_finite_pcm};
 use rivu_format::config::processing_graph::{
     EqImplementation, GraphNodeKind, GraphPort, ProcessingGraph, ValidatedGraph,
 };
@@ -20,39 +21,6 @@ const MAX_GRAPH_CHANNELS: usize = 32;
 const MAX_STATE_BYTES: usize = 64 * 1024 * 1024;
 // Conservative arithmetic-work admission units, not a wall-clock deadline.
 const MAX_WORK_PER_SECOND: u64 = 300_000_000;
-
-struct DelayLine {
-    samples: Vec<f32>,
-    position: usize,
-}
-impl DelayLine {
-    fn new(frames: usize, channels: usize) -> Self {
-        Self {
-            samples: vec![0.0; frames * channels],
-            position: 0,
-        }
-    }
-    fn add(&mut self, input: &[f32], output: &mut [f64], gain: f64) {
-        if self.samples.is_empty() {
-            for (output, input) in output.iter_mut().zip(input) {
-                *output += f64::from(*input) * gain;
-            }
-        } else {
-            for (output, input) in output.iter_mut().zip(input) {
-                *output += f64::from(self.samples[self.position]) * gain;
-                self.samples[self.position] = *input;
-                self.position += 1;
-                if self.position == self.samples.len() {
-                    self.position = 0;
-                }
-            }
-        }
-    }
-    fn reset(&mut self) {
-        self.samples.fill(0.0);
-        self.position = 0;
-    }
-}
 
 struct Input {
     node: usize,
@@ -148,8 +116,7 @@ impl GraphPlan<'_> {
                 .transpose()?;
             for input in &mut planned.inputs {
                 input.delay = DelayLine::new(
-                    planned.input_latency - nodes[input.node].latency,
-                    self.channels,
+                    (planned.input_latency - nodes[input.node].latency) * self.channels,
                 );
             }
             let output_node =
@@ -350,7 +317,7 @@ impl GraphRunner {
                     inputs.push(Input {
                         node: index,
                         gain: 1.0,
-                        delay: DelayLine::new(0, channels),
+                        delay: DelayLine::new(0),
                     });
                 }
                 for (input, gain) in inputs.iter_mut().zip(graph_node.kind.input_gains()) {
@@ -615,13 +582,8 @@ impl GraphRunner {
                             input.gain,
                         );
                     }
-                    // Match offline mixing: preserve every edge in f64 and round
-                    // once at the node output, including delayed contributions.
-                    for (output, sum) in output.iter_mut().zip(sum) {
-                        *output = *sum as f32;
-                    }
                     ensure!(
-                        output.iter().all(|value| value.is_finite()),
+                        write_finite_pcm(sum, output),
                         "graph node {} produced non-finite PCM",
                         node.id
                     );
@@ -911,14 +873,14 @@ mod tests {
     #[test]
     fn delay_lines_keep_wide_contributions_and_reset_history() {
         let tiny = 4.0e-8_f32;
-        let mut delayed = DelayLine::new(1, 1);
+        let mut delayed = DelayLine::new(1);
         let mut sum = [0.0];
         delayed.add(&[tiny], &mut sum, 1.0);
         assert_eq!(sum, [0.0]);
         sum[0] = 1.0;
         delayed.add(&[0.0], &mut sum, 1.0);
         assert_eq!(sum, [1.0 + f64::from(tiny)]);
-        DelayLine::new(0, 1).add(&[tiny], &mut sum, 1.0);
+        DelayLine::new(0).add(&[tiny], &mut sum, 1.0);
         assert_eq!((sum[0] as f32).to_bits(), 1.0_f32.to_bits() + 1);
         delayed.add(&[tiny], &mut [0.0], 1.0);
         delayed.reset();
