@@ -425,30 +425,6 @@ impl Library {
             .schedule(cx, |this| &mut this.loading_text);
     }
 
-    pub(super) fn track_favorite_toggle(
-        &self,
-        id: impl Into<gpui::ElementId>,
-        track_id: i64,
-        favorite: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        crate::gui::components::track::track_favorite_toggle(
-            id,
-            favorite,
-            rivu_ui::IconButtonDensity::Compact,
-            |key| self.tr(key),
-            cx,
-            move |this, _, cx| {
-                this.send(
-                    Command::ToggleFavorite {
-                        track_ids: vec![track_id],
-                    },
-                    cx,
-                )
-            },
-        )
-    }
-
     pub(super) fn choose_library_root(&mut self, cx: &mut Context<Self>) {
         let i18n = Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {

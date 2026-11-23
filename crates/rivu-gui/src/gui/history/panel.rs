@@ -1,9 +1,12 @@
 //! History list rendering; all row closures target the History owner.
 
 use super::{History, HistoryEvent, HistorySort};
-use crate::gui::{appearance::fonts::tabular_numbers, components::search::set_search_counts};
+use crate::gui::{
+    appearance::fonts::tabular_numbers,
+    components::{search::set_search_counts, track::track_favorite_toggle},
+};
 use chrono::{DateTime, Local};
-use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_protocol::model::{Command, PlaybackStatus};
 use rivu_ui::{
     VirtualList, caption, column, hover_actions, list_panel_header, list_row, list_viewport,
@@ -29,30 +32,6 @@ impl History {
                 .to_string(),
             None => self.context.i18n.text("gl-played-none").into(),
         }
-    }
-
-    pub(super) fn track_favorite_toggle(
-        &self,
-        id: impl Into<gpui::ElementId>,
-        track_id: i64,
-        favorite: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<Div> {
-        crate::gui::components::track::track_favorite_toggle(
-            id,
-            favorite,
-            rivu_ui::IconButtonDensity::Compact,
-            |key| self.tr(key),
-            cx,
-            move |this, _, cx| {
-                this.send(
-                    Command::ToggleFavorite {
-                        track_ids: vec![track_id],
-                    },
-                    cx,
-                );
-            },
-        )
     }
 
     fn history_sort_button(
@@ -326,11 +305,13 @@ impl History {
                                                 crate::gui::appearance::material::surface(cx),
                                             )
                                             .child(
-                                                this.track_favorite_toggle(
+                                                track_favorite_toggle(
                                                     ("history-entry-favorite", id as u64),
                                                     id,
                                                     favorite,
+                                                    |key| this.tr(key),
                                                     cx,
+                                                    History::send,
                                                 ),
                                             ),
                                         )

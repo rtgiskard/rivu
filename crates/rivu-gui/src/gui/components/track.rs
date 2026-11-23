@@ -253,20 +253,33 @@ pub(in crate::gui) fn favorite_button(
     .selected_fill(false)
 }
 
-/// Favorite action; the caller owns visibility, commands, and current state.
+/// Compact row action that sends a single-track toggle through its owner.
 pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
     id: impl Into<ElementId>,
+    track_id: i64,
     favorite: bool,
-    density: rivu_ui::IconButtonDensity,
     text: impl Fn(&str) -> SharedString,
     cx: &mut gpui::Context<T>,
-    action: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
+    send: fn(&mut T, rivu_protocol::model::Command, &mut gpui::Context<T>),
 ) -> Stateful<Div> {
     let id = id.into();
     rivu_ui::row_action_region(id.clone()).h_full().child(
         favorite_button(id, favorite, text)
             .surface(crate::gui::appearance::material::surface(cx))
-            .build(rivu_ui::IconButtonStyle::RowAction, density, cx, action),
+            .build(
+                rivu_ui::IconButtonStyle::RowAction,
+                rivu_ui::IconButtonDensity::Compact,
+                cx,
+                move |owner, _, cx| {
+                    send(
+                        owner,
+                        rivu_protocol::model::Command::ToggleFavorite {
+                            track_ids: vec![track_id],
+                        },
+                        cx,
+                    );
+                },
+            ),
     )
 }
 

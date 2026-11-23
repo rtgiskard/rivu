@@ -324,23 +324,20 @@ impl Core {
         favorite: bool,
     ) -> Result<()> {
         let impact = self.store.set_favorite(track_ids, favorite)?;
-        if impact.queue {
-            self.advance_queue_revision();
-        }
-        if impact.changed {
-            self.state.library.count_revision = self.state.library.count_revision.wrapping_add(1);
-            self.state
-                .library
-                .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
-            self.update_history_favorites(track_ids, Some(favorite));
-            self.refresh_affected_queue_tracks(track_ids)
-                .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
-        }
-        Ok(())
+        self.apply_favorite_impact(impact, track_ids, Some(favorite))
     }
 
     pub(in crate::core) fn toggle_favorite(&mut self, track_ids: &[i64]) -> Result<()> {
         let impact = self.store.toggle_favorite(track_ids)?;
+        self.apply_favorite_impact(impact, track_ids, None)
+    }
+
+    fn apply_favorite_impact(
+        &mut self,
+        impact: crate::store::FavoriteImpact,
+        track_ids: &[i64],
+        favorite: Option<bool>,
+    ) -> Result<()> {
         if impact.queue {
             self.advance_queue_revision();
         }
@@ -349,7 +346,7 @@ impl Core {
             self.state
                 .library
                 .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
-            self.update_history_favorites(track_ids, None);
+            self.update_history_favorites(track_ids, favorite);
             self.refresh_affected_queue_tracks(track_ids)
                 .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
         }

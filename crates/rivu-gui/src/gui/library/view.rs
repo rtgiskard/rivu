@@ -1,6 +1,6 @@
 //! Library tree and panel rendering; feature lifecycle remains in the parent.
 use super::*;
-use crate::gui::components::track::{AudioSpecs, audio_specs};
+use crate::gui::components::track::{AudioSpecs, audio_specs, track_favorite_toggle};
 use crate::gui::list_interaction::LibraryDrag;
 use gpui::{AnyElement, Div, Render, div, px, rgb};
 use rivu_format::config::{LibraryColumn, LibraryColumns};
@@ -507,11 +507,13 @@ impl Library {
                                         .when(located, |actions| {
                                             rivu_ui::floating_action_surface(crate::gui::appearance::material::surface(cx), theme.highlight, actions)
                                         })
-                                        .child(this.track_favorite_toggle(
+                                        .child(track_favorite_toggle(
                                             gpui::ElementId::NamedInteger("library-tree-favorite".into(), track_id as u64),
                                             track_id,
                                             favorite,
+                                            |key| this.tr(key),
                                             cx,
+                                            Library::send,
                                         )),
                                     )
                                 },
