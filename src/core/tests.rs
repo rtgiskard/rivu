@@ -522,7 +522,7 @@ fn pending(core: &mut Core, queue_id: u64) {
     core.transport.session = Some(PlaybackSession {
         loaded_track: Arc::clone(core.state.current_track.as_ref().unwrap()),
         source: core
-            .playback_source(core.state.current_track().unwrap())
+            .playback_source(core.state.current_track().unwrap(), None)
             .unwrap(),
         duration: duration.filter(|duration| duration.is_finite() && *duration > 0.0),
         pending_bitrate: None,

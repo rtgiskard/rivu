@@ -525,6 +525,7 @@ impl Core {
     pub(in crate::core) fn playback_source(
         &self,
         track: &Track,
+        track_metadata: Option<std::fs::Metadata>,
     ) -> Result<Option<(crate::store::PlaybackSource, std::fs::Metadata)>> {
         if track.bitrate_bps.is_some() && track.bitrate_exact {
             return Ok(None);
@@ -532,7 +533,8 @@ impl Core {
         let Some(source) = self.store.playback_source(track)? else {
             return Ok(None);
         };
-        let Ok(metadata) = std::fs::metadata(&source.path) else {
+        let metadata = track_metadata.or_else(|| std::fs::metadata(&source.path).ok());
+        let Some(metadata) = metadata else {
             return Ok(None);
         };
         Ok((metadata.is_file()
@@ -627,7 +629,17 @@ impl Core {
         );
         // Retiring Started/Ended bookkeeping can enrich this same track in the store.
         let track = Arc::new(self.track(track.id)?);
-        if check_missing && status != PlaybackStatus::Stopped && !track.path.is_file() {
+        let check_file = check_missing && status != PlaybackStatus::Stopped;
+        let track_metadata = if check_file {
+            std::fs::metadata(&track.path).ok()
+        } else {
+            None
+        };
+        if check_file
+            && !track_metadata
+                .as_ref()
+                .is_some_and(std::fs::Metadata::is_file)
+        {
             let path = track.path.display().to_string();
             let root = self.unavailable_root(&track.path);
             self.accept_loaded_occurrence(
@@ -646,10 +658,12 @@ impl Core {
             bail!("Missing audio file: {path}");
         }
         if status != PlaybackStatus::Stopped {
-            let source = self.playback_source(&track).unwrap_or_else(|error| {
-                tracing::warn!(error = ?error, "playback_bitrate_identity_unavailable");
-                None
-            });
+            let source = self
+                .playback_source(&track, track_metadata)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(error = ?error, "playback_bitrate_identity_unavailable");
+                    None
+                });
             self.engine.send(AudioCommand::Load {
                 path: track.path.clone(),
                 decoder_hint: track.decoder_hint,
