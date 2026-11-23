@@ -570,14 +570,17 @@ impl Store {
 
     pub(crate) fn move_queue_entries(&self, ids: &[u64], index: usize) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
+        let input_len = ids.len();
         let ids = serde_json::to_string(ids)?;
         let selected = tx.prepare("SELECT id,position FROM playlist_entries NOT INDEXED WHERE playlist_id=0 AND id IN (SELECT value FROM json_each(?1)) ORDER BY position")?.query_map([&ids], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        let requested: usize = tx.query_row(
-            "SELECT COUNT(DISTINCT value) FROM json_each(?1)",
-            [&ids],
-            |row| integer(row, 0),
-        )?;
-        ensure!(requested == selected.len(), "Queue entry not found");
+        if selected.len() != input_len {
+            let requested: usize = tx.query_row(
+                "SELECT COUNT(DISTINCT value) FROM json_each(?1)",
+                [&ids],
+                |row| integer(row, 0),
+            )?;
+            ensure!(requested == selected.len(), "Queue entry not found");
+        }
         let total: usize = tx.query_row(
             "SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0",
             [],

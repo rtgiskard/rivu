@@ -2640,6 +2640,13 @@ fn stale_queue_move_indices_are_rejected_without_changing_order() {
         assert_eq!(core.store.queue_ids().unwrap(), order);
         assert_eq!(core.state.queue.structure_revision, revision);
     }
+    core.command(Command::SetPlayCount {
+        track_id: 1,
+        play_count: 7,
+    })
+    .unwrap();
+    assert_eq!(core.state.queue.structure_revision, revision);
+    assert_ne!(core.state.queue.revision, revision);
     core.command(Command::MoveQueueEntries {
         queue_ids: vec![3],
         index: 2,

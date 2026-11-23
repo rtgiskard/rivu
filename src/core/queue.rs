@@ -134,11 +134,9 @@ impl Core {
 
     pub(in crate::core) fn play_album(&mut self, key: &AlbumKey) -> Result<()> {
         ensure!(self.store.album_has_tracks(key)?, "Album is empty");
-        self.stop()?;
-        self.store.replace_queue_with_album(key)?;
-        self.queue_replaced(true)?;
-        let first = self.store.queue_id_at(0)?.context("Album is empty")?;
-        self.start(first, QueueHistory::Record)
+        self.play_replaced_queue("Album is empty", |store| {
+            store.replace_queue_with_album(key)
+        })
     }
 
     pub(in crate::core) fn play_playlist(&mut self, playlist_id: i64) -> Result<()> {
@@ -146,10 +144,20 @@ impl Core {
             self.store.playlist_has_entries(playlist_id)?,
             "Playlist is empty"
         );
+        self.play_replaced_queue("Playlist is empty", |store| {
+            store.replace_queue_from_playlist(playlist_id)
+        })
+    }
+
+    fn play_replaced_queue(
+        &mut self,
+        empty: &'static str,
+        replace: impl FnOnce(&crate::store::Store) -> Result<()>,
+    ) -> Result<()> {
         self.stop()?;
-        self.store.replace_queue_from_playlist(playlist_id)?;
+        replace(&self.store)?;
         self.queue_replaced(true)?;
-        let first = self.store.queue_id_at(0)?.context("Playlist is empty")?;
+        let first = self.store.queue_id_at(0)?.context(empty)?;
         self.start(first, QueueHistory::Record)
     }
 
