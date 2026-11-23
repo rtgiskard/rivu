@@ -477,8 +477,7 @@ fn edit_file_inner(
         .unwrap_or_else(|| Path::new("."))
         .canonicalize()?;
     let target = parent.join(path.file_name().context("Missing metadata file name")?);
-    let mut file = rivu_utils::regular_file::open_regular_file(&target)?;
-    let original = file.metadata()?;
+    let (mut file, original) = rivu_utils::regular_file::open_regular_file_with_metadata(&target)?;
     ensure!(
         !original.permissions().readonly(),
         "Metadata source is read-only"
