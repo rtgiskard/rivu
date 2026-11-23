@@ -273,14 +273,16 @@ async fn capture(
             .map_err(anyhow::Error::msg)?
             .context("Active audio source cannot be reconstructed")?
     } else {
-        let path = track.path.clone();
-        let identity = workers
-            .execute(move || {
-                rivu_audio::source_identity(&rivu_utils::regular_file::open_regular_file(&path)?)
+        let path = track.path;
+        let (path, identity) = workers
+            .execute(move || -> std::io::Result<_> {
+                let (_, metadata) =
+                    rivu_utils::regular_file::open_regular_file_with_metadata(&path)?;
+                Ok((path, rivu_audio::source_identity_from_metadata(&metadata)))
             })
             .await??;
         let mut snapshot = AudioRenderSnapshot::original(
-            track.path.clone(),
+            path,
             track.cue.as_ref().map(|cue| PlaybackRange {
                 start_seconds: cue.start_seconds(),
                 end_seconds: cue.end_seconds(),
