@@ -1430,31 +1430,44 @@ impl Layout {
         true
     }
 
-    pub fn initialize_audio_visualizers(&mut self, defaults: AudioVisualizerOptions) -> bool {
-        fn initialize(node: &mut Node, defaults: AudioVisualizerOptions) -> bool {
+    pub(super) fn initialize_panel_options(
+        &mut self,
+        visualizer: AudioVisualizerOptions,
+        artwork: ArtworkOptions,
+    ) -> bool {
+        fn initialize(
+            node: &mut Node,
+            visualizer: AudioVisualizerOptions,
+            artwork: ArtworkOptions,
+        ) -> bool {
+            let mut changed = false;
             match node {
                 Node::Split { children, .. } => {
-                    let mut changed = false;
                     for child in children {
-                        changed |= initialize(child, defaults);
+                        changed |= initialize(child, visualizer, artwork);
                     }
-                    changed
                 }
                 Node::Tabs { panels, .. } => {
-                    let mut changed = false;
                     for panel in panels {
-                        if panel.kind == "audio_visualizer" && panel.audio_visualizer.is_none() {
-                            panel.audio_visualizer = Some(defaults);
-                            changed = true;
+                        match panel.kind.as_str() {
+                            "audio_visualizer" if panel.audio_visualizer.is_none() => {
+                                panel.audio_visualizer = Some(visualizer);
+                                changed = true;
+                            }
+                            "artwork" if panel.artwork.is_none() => {
+                                panel.artwork = Some(artwork);
+                                changed = true;
+                            }
+                            _ => {}
                         }
                     }
-                    changed
                 }
             }
+            changed
         }
         self.root
             .as_mut()
-            .is_some_and(|root| initialize(root, defaults))
+            .is_some_and(|root| initialize(root, visualizer, artwork))
     }
 
     pub fn audio_visualizer_options(&self, id: u64) -> Option<AudioVisualizerOptions> {
@@ -1480,33 +1493,6 @@ impl Layout {
         };
         panel.audio_visualizer = Some(options);
         true
-    }
-
-    pub fn initialize_artworks(&mut self, default: ArtworkOptions) -> bool {
-        fn initialize(node: &mut Node, default: ArtworkOptions) -> bool {
-            match node {
-                Node::Split { children, .. } => {
-                    let mut changed = false;
-                    for child in children {
-                        changed |= initialize(child, default);
-                    }
-                    changed
-                }
-                Node::Tabs { panels, .. } => {
-                    let mut changed = false;
-                    for panel in panels {
-                        if panel.kind == "artwork" && panel.artwork.is_none() {
-                            panel.artwork = Some(default);
-                            changed = true;
-                        }
-                    }
-                    changed
-                }
-            }
-        }
-        self.root
-            .as_mut()
-            .is_some_and(|root| initialize(root, default))
     }
 
     pub fn artwork_options(&self, id: u64) -> Option<ArtworkOptions> {
@@ -2875,8 +2861,14 @@ mod tests {
         };
         assert!(set.current_mut().set_audio_visualizer_options(first, saved));
         assert!(set.current_mut().set_tab_bar_visible(first, false));
-        assert!(set.current_mut().initialize_audio_visualizers(defaults));
-        assert!(!set.current_mut().initialize_audio_visualizers(saved));
+        let artwork = artwork_options(rivu_format::config::ArtworkStyle::Plain);
+        let cover = set.current_mut().add("artwork", None);
+        assert!(
+            set.current_mut()
+                .initialize_panel_options(defaults, artwork)
+        );
+        assert!(!set.current_mut().initialize_panel_options(saved, artwork));
+        assert_eq!(set.current().artwork_options(cover), Some(artwork));
         assert_eq!(set.current().audio_visualizer_options(first), Some(saved));
         assert_eq!(
             set.current().audio_visualizer_options(second),
@@ -2920,7 +2912,11 @@ mod tests {
             direction: ArtworkDirection::Counterclockwise,
             period_seconds: 7.5,
         };
-        assert!(set.current_mut().initialize_artworks(defaults));
+        let visualizer = AudioVisualizerOptions::from(&rivu_format::config::Config::default());
+        assert!(
+            set.current_mut()
+                .initialize_panel_options(visualizer, defaults)
+        );
         assert!(set.current_mut().set_artwork_options(first, custom));
         assert_eq!(set.current().artwork_options(first), Some(custom));
         assert_eq!(set.current().artwork_options(second), Some(defaults));
@@ -2970,10 +2966,14 @@ mod tests {
             .map(|panel| panel.id)
             .collect();
         let defaults = artwork_options(ArtworkStyle::Vinyl);
-        assert!(set.current_mut().initialize_artworks(defaults));
+        let visualizer = AudioVisualizerOptions::from(&rivu_format::config::Config::default());
+        assert!(
+            set.current_mut()
+                .initialize_panel_options(visualizer, defaults)
+        );
         assert!(
             !set.current_mut()
-                .initialize_artworks(artwork_options(ArtworkStyle::Plain))
+                .initialize_panel_options(visualizer, artwork_options(ArtworkStyle::Plain))
         );
         assert_eq!(set.current().artwork_options(ids[0]), Some(saved));
         assert_eq!(set.current().artwork_options(ids[1]), Some(defaults));

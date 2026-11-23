@@ -198,10 +198,7 @@ fn size_label(bytes: u64) -> String {
 
 impl Settings {
     pub(super) fn schedule_library_stats_expiry(&mut self, cx: &mut Context<Self>) {
-        if self.root_stats.expire(cx.background_executor().now()) {
-            cx.notify();
-        }
-        rivu_ui::refresh::RefreshWake::sync(
+        rivu_ui::refresh::RefreshWake::sync_expiring(
             self,
             cx,
             |this| &mut this.root_stats_wake,

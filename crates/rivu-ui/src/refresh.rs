@@ -11,6 +11,20 @@ pub struct RefreshWake {
 }
 
 impl RefreshWake {
+    /// Expire retained data now, then arm the next wake.
+    pub fn sync_expiring<T: 'static>(
+        owner: &mut T,
+        cx: &mut Context<T>,
+        locate: fn(&mut T) -> &mut Self,
+        next: fn(&T) -> Option<Instant>,
+        expire: fn(&mut T, Instant, &mut Context<T>) -> bool,
+    ) {
+        if expire(owner, cx.background_executor().now(), cx) {
+            cx.notify();
+        }
+        Self::sync(owner, cx, locate, next, expire);
+    }
+
     /// Sync after a model change. The expiry callback must consume all deadlines
     /// through `now`; the next deadline is read again after cleanup.
     pub fn sync<T: 'static>(

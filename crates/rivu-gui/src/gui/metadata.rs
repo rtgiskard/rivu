@@ -659,10 +659,7 @@ impl Metadata {
     }
 
     fn schedule_metadata_expiry(&mut self, cx: &mut Context<Self>) {
-        if self.metadata.expire(cx.background_executor().now()) {
-            cx.notify();
-        }
-        RefreshWake::sync(
+        RefreshWake::sync_expiring(
             self,
             cx,
             |this| &mut this.refresh_wake,

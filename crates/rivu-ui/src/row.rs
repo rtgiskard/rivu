@@ -194,7 +194,11 @@ pub fn list_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
 
 /// Uniform single-line list and option height; borders remain physical layout pixels.
 pub fn single_line_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
-    (window.rem_size() * DROPDOWN_ROW_REMS).max(
+    text_row_height(window, cx, DROPDOWN_ROW_REMS)
+}
+
+fn text_row_height(window: &Window, cx: &gpui::App, minimum_rems: f32) -> gpui::Pixels {
+    (window.rem_size() * minimum_rems).max(
         (gpui::phi().to_pixels(gpui::rems(0.875).into(), window.rem_size())
             * crate::theme::font_size_scale(cx))
         .round()
@@ -204,12 +208,7 @@ pub fn single_line_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
 
 /// Compact tree height follows text, not the size of standalone action buttons.
 pub fn tree_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
-    (window.rem_size() * 1.75).max(
-        (gpui::phi().to_pixels(gpui::rems(0.875).into(), window.rem_size())
-            * crate::theme::font_size_scale(cx))
-        .round()
-            + gpui::px(2.),
-    )
+    text_row_height(window, cx, 1.75)
 }
 
 /// Shared row geometry and idle background; each caller owns its single hover style.

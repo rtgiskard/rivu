@@ -226,8 +226,7 @@ impl Workspace {
     ) -> bool {
         self.layouts
             .current_mut()
-            .initialize_audio_visualizers(visualizer)
-            | self.layouts.current_mut().initialize_artworks(artwork)
+            .initialize_panel_options(visualizer, artwork)
     }
 
     /// Nonstructural edits preserve measurements and scroll; the session writer

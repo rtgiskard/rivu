@@ -912,10 +912,7 @@ impl Duplicates {
     }
 
     fn schedule_duplicate_expiry(&mut self, cx: &mut Context<Self>) {
-        if self.duplicate_review.expire(cx.background_executor().now()) {
-            cx.notify();
-        }
-        RefreshWake::sync(
+        RefreshWake::sync_expiring(
             self,
             cx,
             |this| &mut this.refresh_wake,
