@@ -46,6 +46,14 @@ pub(super) enum Action {
     /// Open the terminal UI, starting an independent Core service if absent.
     #[cfg(feature = "tui")]
     Tui,
+    /// Play one local audio file to completion in this process.
+    PlayFile {
+        #[arg(value_name = "FILE")]
+        path: PathBuf,
+        /// Exact PipeWire device name from `rivu playback devices`.
+        #[arg(long, value_name = "NAME")]
+        device: Option<String>,
+    },
     /// Show playback and library state from the running instance.
     Status,
     /// Inspect or cancel retained background tasks.

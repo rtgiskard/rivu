@@ -3,16 +3,18 @@
 :toclevels: 2
 
 Start a shared instance with `rivu serve`, or open the GUI or TUI, before
-issuing playback commands. See link:00_getting_started.adoc[Getting started]
-for installation, instance selection and data directories.
+issuing commands that control the shared player. Use `rivu play-file` to play a
+local file independently. See link:00_getting_started.adoc[Getting started] for
+installation, instance selection and data directories.
 
 == Command conventions
 
 anchor:cli-command-conventions[]
-Control commands require a running core. `library probe`, `library tags`,
-`playback devices`, and `processing setup` also work without Core (setup contacts
-it only with `--activate`). Use `rivu -h` for concise help, `rivu --help` for startup
-details, or a subcommand's `--help` for arguments.
+Control commands require a running core. `play-file`, `library probe`,
+`library tags`, `playback devices`, and `processing setup` also work without
+Core (`processing setup` contacts it only with `--activate`). Use `rivu -h` for
+concise help, `rivu --help` for startup details, or a subcommand's `--help` for
+arguments.
 
 [cols="1,2",options="header"]
 |===
@@ -78,3 +80,24 @@ rivu playback volume 50
 See also link:02_library.adoc#cli-output[Library result shapes],
 link:21_ipc.adoc#request-failures-and-completion[IPC request outcomes], and
 link:01_config.adoc#logging-and-diagnostics[logging and diagnostics].
+
+[[play-file]]
+== Play a local file once
+
+[source,sh]
+----
+rivu play-file "$HOME/Music/example.flac"
+rivu play-file --device 'PipeWire: your-device-name' "$HOME/Music/example.flac"
+----
+
+The foreground process plays one local audio file once. It exits silently
+with status 0 after the audio finishes playing. A file, decoder, or output
+error goes to stderr and exits with status 1. Press Ctrl+C to stop early.
+
+The command follows the system's default PipeWire sink unless `--device` selects
+an exact name from `rivu playback devices` for this invocation. An unavailable
+device causes playback to fail. The command reads the selected configuration for
+volume, channel mixing, media read buffer, and FFmpeg access.
+It starts its own PipeWire stream and leaves Rivu's library, queue, listening
+history, and application files untouched. A running `rivu serve` continues to
+manage its own playback. PipeWire can mix the two streams when they use the same sink.

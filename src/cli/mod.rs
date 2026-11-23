@@ -1,6 +1,7 @@
 mod args;
 mod library;
 mod output;
+mod play_file;
 mod processing;
 mod processing_setup;
 mod tasks;
@@ -113,6 +114,7 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         OutputMode::Text
     };
     let command = match action {
+        Action::PlayFile { path, device } => return play_file::run(path, device, &config_path),
         Action::Processing(action) => return processing::run(&i18n, &data_dir, action, mode),
         #[cfg(feature = "gui")]
         Action::Gui { paths } => {
