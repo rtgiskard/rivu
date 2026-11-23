@@ -908,20 +908,18 @@ impl Source {
         } else {
             // The runtime peak belongs to the admitted file. Core owns
             // descriptive metadata during playback.
-            let (tags, peak) = match read_playback_tags(&mut file) {
-                Ok(tags) => tags.unwrap_or_default(),
-                Err(error) => {
-                    tracing::warn!(path = %path.display(), error = %error, "Source tags unavailable");
-                    (Tags::default(), None)
-                }
+            let result = if matches!(metadata, SourceMetadata::PlaybackPeak) {
+                rivu_metadata::read_playback_peak(&mut file).map(|peak| (Tags::default(), peak))
+            } else {
+                read_playback_tags(&mut file).map(Option::unwrap_or_default)
             };
+            let (tags, peak) = result.unwrap_or_else(|error| {
+                tracing::warn!(path = %path.display(), error = %error, "Source tags unavailable");
+                (Tags::default(), None)
+            });
             file.rewind()
                 .map_err(source_io_error)
                 .context("Rewinding audio source after metadata")?;
-            let tags = match (metadata, tags) {
-                (SourceMetadata::Descriptive, tags) => tags,
-                _ => Tags::default(),
-            };
             (tags, peak)
         };
         check_cancelled(cancelled)?;

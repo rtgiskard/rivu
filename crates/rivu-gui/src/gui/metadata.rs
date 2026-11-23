@@ -547,12 +547,9 @@ impl Metadata {
         self.source_peak_reading = true;
         // Keep one physical reader until completion, even if selection changes.
         let read = cx.background_executor().spawn(async move {
-            peak.value = std::fs::File::open(&peak.path).ok().and_then(|mut file| {
-                rivu_metadata::read_playback_tags(&mut file)
-                    .ok()
-                    .flatten()
-                    .and_then(|(_, peak)| peak)
-            });
+            peak.value = std::fs::File::open(&peak.path)
+                .ok()
+                .and_then(|mut file| rivu_metadata::read_playback_peak(&mut file).ok().flatten());
             peak
         });
         cx.spawn(async move |this, cx| {

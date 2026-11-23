@@ -129,19 +129,27 @@ pub fn read_tags(file: &mut File) -> Result<Option<Tags>> {
 /// Override only ID3 text explicitly marked Latin-1. Declared Unicode and
 /// non-ID3 tags are never reinterpreted; invalid byte sequences are errors.
 pub fn read_tags_with_encoding(file: &mut File, encoding: TagEncoding) -> Result<Option<Tags>> {
-    Ok(read_tags_and_peak(file, encoding)?.map(|(tags, _)| tags))
+    let mut tags = Tags::default();
+    Ok(read_tags_and_peak(file, encoding, Some(&mut tags))?.map(|_| tags))
 }
 
 /// Read runtime playback peak alongside tags in one pass, without adding it to
 /// the persistent/descriptive Tags model. Unsupported containers return None.
 pub fn read_playback_tags(file: &mut File) -> Result<Option<(Tags, Option<f64>)>> {
-    read_tags_and_peak(file, TagEncoding::Declared)
+    let mut tags = Tags::default();
+    Ok(read_tags_and_peak(file, TagEncoding::Declared, Some(&mut tags))?.map(|peak| (tags, peak)))
+}
+
+/// Read only the runtime peak. Unsupported containers and missing peaks return None.
+pub fn read_playback_peak(file: &mut File) -> Result<Option<f64>> {
+    Ok(read_tags_and_peak(file, TagEncoding::Declared, None)?.flatten())
 }
 
 fn read_tags_and_peak(
     file: &mut File,
     encoding: TagEncoding,
-) -> Result<Option<(Tags, Option<f64>)>> {
+    mut descriptive: Option<&mut Tags>,
+) -> Result<Option<Option<f64>>> {
     configure_lofty(false);
     ensure!(
         file.metadata()?.is_file(),
@@ -151,7 +159,6 @@ fn read_tags_and_peak(
         return Ok(None);
     };
     let parsed = read_with_encoding(file, kind, encoding)?;
-    let mut result = Tags::default();
     let mut peak = None;
     // Primary format wins; other native tags fill only missing fields.
     for tag in parsed.primary_tag().into_iter().chain(
@@ -160,14 +167,19 @@ fn read_tags_and_peak(
             .iter()
             .filter(|t| t.tag_type() != parsed.primary_tag_type()),
     ) {
-        fill_missing(&mut result, tag);
+        if let Some(tags) = descriptive.as_deref_mut() {
+            fill_missing(tags, tag);
+        }
         if peak.is_none() {
             peak = first(tag, ItemKey::ReplayGainTrackPeak)
                 .and_then(|text| text.trim().parse::<f64>().ok())
                 .filter(|peak| peak.is_finite() && *peak > 0.0);
+            if peak.is_some() && descriptive.is_none() {
+                break;
+            }
         }
     }
-    Ok(Some((result, peak)))
+    Ok(Some(peak))
 }
 
 fn read_with_encoding(
