@@ -602,11 +602,7 @@ impl Store {
         if paths.len() == 1 {
             return Ok(vec![self.known_source(&paths[0])?]);
         }
-        let paths = paths
-            .iter()
-            .map(|path| path.to_str().context("Scan source path is not UTF-8"))
-            .collect::<Result<Vec<_>>>()?;
-        let encoded = serde_json::to_string(&paths)?;
+        let encoded = serde_json::to_string(paths).context("Scan source path is not UTF-8")?;
         let mut query = self.conn.prepare_cached(
             "WITH requested AS (
                  SELECT CAST(key AS INTEGER) AS ordinal, value AS path

@@ -684,13 +684,13 @@ async fn discover_directory(
         identity: (metadata.dev(), metadata.ino()),
         entries,
     }];
+    let mut discoveries = Vec::new();
     while !stack.is_empty() {
         cancellation.check()?;
         let token = cancellation.clone();
         let requested_roots = Arc::clone(requested_roots);
-        let (next_stack, discoveries) = workers
+        (stack, discoveries) = workers
             .execute(move || {
-                let mut discoveries = Vec::new();
                 // Count reader exhaustion/errors too, so a deep unwind is bounded.
                 for _ in 0..DIRECTORY_BATCH_SIZE {
                     token.check()?;
@@ -763,9 +763,8 @@ async fn discover_directory(
             })
             .await
             .context("Scan directory batch worker failed")??;
-        stack = next_stack;
         cancellation.check()?;
-        for discovery in discoveries {
+        for discovery in discoveries.drain(..) {
             match discovery {
                 Discovery::Error(path, error) => {
                     traversal_error(root_index, &path, error, files.len(), result, progress);

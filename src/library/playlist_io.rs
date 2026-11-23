@@ -569,7 +569,7 @@ where
             }
             continue;
         }
-        if let Some(cue) = &track.cue {
+        if let Some(cue) = track.cue {
             let bytes = read_input_async(workers, &cue.sheet, MAX_CUE_BYTES, cancellation)
                 .await
                 .with_context(|| format!("Reading export CUE {}", cue.sheet.display()))?;
@@ -595,7 +595,7 @@ where
             }
             write_relative_path(writer, parent, &cue.sheet).await?;
             if sheet.tracks.len() > 1 {
-                cue_run = Some((cue.sheet.clone(), sheet, 1));
+                cue_run = Some((cue.sheet, sheet, 1));
             }
             continue;
         }
