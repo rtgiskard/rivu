@@ -542,15 +542,13 @@ impl ArtworkManager {
         source: Source<'_>,
         limit: usize,
     ) -> Result<Option<Arc<ArtworkFile>>, EmbeddedError> {
-        let mut file = rivu_utils::regular_file::open_regular_file(source.path)
+        let (file, before) = rivu_utils::regular_file::RegularFile::open_with_metadata(source.path)
             .map_err(|_| EmbeddedError::Read)?;
-        let before = file.metadata().map_err(|_| EmbeddedError::Identity)?;
-        let image = crate::read_artwork(file.try_clone().map_err(|_| EmbeddedError::Identity)?, limit, |bytes| {
-            self.image_uri(bytes, limit)
-        }).map_err(|error| {
-            tracing::debug!(path = %source.path.display(), error = %error, "Reading embedded artwork");
-            EmbeddedError::Read
-        })?;
+        let image = crate::read_regular_artwork(&file, limit, |bytes| self.image_uri(bytes, limit))
+            .map_err(|error| {
+                tracing::debug!(path = %source.path.display(), error = %error, "Reading embedded artwork");
+                EmbeddedError::Read
+            })?;
         let Some(image) = image else {
             return Ok(None);
         };
@@ -558,6 +556,7 @@ impl ArtworkManager {
         // Hash the same opened object, then reject writes overlapping parsing/hash.
         // Only cold positive embedded probes pay this full-source read.
         if let Some(expected) = source.fingerprint {
+            let mut file = file.as_file();
             file.rewind().map_err(|_| EmbeddedError::Identity)?;
             let mut hasher = blake3::Hasher::new();
             let mut buffer = [0; 64 * 1024];

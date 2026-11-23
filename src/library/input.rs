@@ -20,12 +20,15 @@ pub(super) async fn read_input_async(
         .execute(move || -> Result<_> {
             admission_cancellation.check()?;
             let (file, metadata) =
-                rivu_utils::regular_file::open_regular_file_with_metadata(&path)?;
+                rivu_utils::regular_file::RegularFile::open_with_metadata(&path)?;
             ensure!(
                 metadata.len() <= limit as u64,
                 "input exceeds {limit} bytes"
             );
-            Ok((file, Vec::with_capacity(metadata.len() as usize)))
+            Ok((
+                file.into_file(),
+                Vec::with_capacity(metadata.len() as usize),
+            ))
         })
         .await
         .context("Playlist input admission worker panicked")??;

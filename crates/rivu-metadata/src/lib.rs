@@ -32,13 +32,14 @@ pub struct Tags {
     pub replaygain_track_gain: Option<f64>,
 }
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use lofty::{
     config::{GlobalOptions, ParseOptions, ParsingMode, apply_global_options},
     file::{FileType, TaggedFileExt},
     probe::Probe,
     tag::{ItemKey, Tag},
 };
+use rivu_utils::regular_file::RegularFile;
 use std::{
     fs::File,
     io::{BufReader, Seek},
@@ -60,7 +61,7 @@ pub(crate) fn options(pictures: bool) -> ParseOptions {
         .implicit_conversions(false)
 }
 
-pub(crate) fn detect(file: &mut File) -> Result<Option<FileType>> {
+pub(crate) fn detect(mut file: &File) -> Result<Option<FileType>> {
     file.rewind()?;
     let probe = Probe::new(file).guess_file_type()?;
     Ok(probe.file_type())
@@ -122,39 +123,38 @@ fn fill_missing(result: &mut Tags, tag: &Tag) {
 
 /// Content-detected descriptive tags; `None` means Lofty does not support this
 /// container, not that tags are absent. Audio properties and pictures are skipped.
-pub fn read_tags(file: &mut File) -> Result<Option<Tags>> {
-    read_tags_with_encoding(file, TagEncoding::Declared)
+/// The encoding override applies only to ID3 text marked Latin-1. Invalid byte
+/// sequences in that text are errors.
+pub fn read_tags(file: &RegularFile, encoding: TagEncoding) -> Result<Option<Tags>> {
+    read_descriptive_tags(file.as_file(), encoding)
 }
 
-/// Override only ID3 text explicitly marked Latin-1. Declared Unicode and
-/// non-ID3 tags are never reinterpreted; invalid byte sequences are errors.
-pub fn read_tags_with_encoding(file: &mut File, encoding: TagEncoding) -> Result<Option<Tags>> {
+fn read_descriptive_tags(file: &File, encoding: TagEncoding) -> Result<Option<Tags>> {
     let mut tags = Tags::default();
     Ok(read_tags_and_peak(file, encoding, Some(&mut tags))?.map(|_| tags))
 }
 
 /// Read runtime playback peak alongside tags in one pass, without adding it to
 /// the persistent/descriptive Tags model. Unsupported containers return None.
-pub fn read_playback_tags(file: &mut File) -> Result<Option<(Tags, Option<f64>)>> {
+pub fn read_playback_tags(file: &RegularFile) -> Result<Option<(Tags, Option<f64>)>> {
     let mut tags = Tags::default();
-    Ok(read_tags_and_peak(file, TagEncoding::Declared, Some(&mut tags))?.map(|peak| (tags, peak)))
+    Ok(
+        read_tags_and_peak(file.as_file(), TagEncoding::Declared, Some(&mut tags))?
+            .map(|peak| (tags, peak)),
+    )
 }
 
 /// Read only the runtime peak. Unsupported containers and missing peaks return None.
-pub fn read_playback_peak(file: &mut File) -> Result<Option<f64>> {
-    Ok(read_tags_and_peak(file, TagEncoding::Declared, None)?.flatten())
+pub fn read_playback_peak(file: &RegularFile) -> Result<Option<f64>> {
+    Ok(read_tags_and_peak(file.as_file(), TagEncoding::Declared, None)?.flatten())
 }
 
 fn read_tags_and_peak(
-    file: &mut File,
+    file: &File,
     encoding: TagEncoding,
     mut descriptive: Option<&mut Tags>,
 ) -> Result<Option<Option<f64>>> {
     configure_lofty(false);
-    ensure!(
-        file.metadata()?.is_file(),
-        "Metadata input is not an ordinary file"
-    );
     let Some(kind) = detect(file)? else {
         return Ok(None);
     };
@@ -183,7 +183,7 @@ fn read_tags_and_peak(
 }
 
 fn read_with_encoding(
-    file: &mut File,
+    mut file: &File,
     kind: FileType,
     encoding: TagEncoding,
 ) -> Result<lofty::file::TaggedFile> {
@@ -270,16 +270,21 @@ fn recover_id3_text(tag: &mut lofty::id3::v2::Id3v2Tag, encoding: TagEncoding) -
 /// first accepted result. Empty pictures and pictures exceeding `limit` after
 /// parsing are skipped. Unsupported containers return no artwork.
 pub fn read_artwork<T>(
-    mut file: File,
+    file: File,
+    limit: usize,
+    select: impl FnMut(&[u8]) -> Option<T>,
+) -> Result<Option<T>> {
+    read_regular_artwork(&RegularFile::from_file(file)?, limit, select)
+}
+
+fn read_regular_artwork<T>(
+    file: &RegularFile,
     limit: usize,
     mut select: impl FnMut(&[u8]) -> Option<T>,
 ) -> Result<Option<T>> {
     configure_lofty(false);
-    ensure!(
-        file.metadata()?.is_file(),
-        "Artwork input is not an ordinary file"
-    );
-    let Some(kind) = detect(&mut file)? else {
+    let mut file = file.as_file();
+    let Some(kind) = detect(file)? else {
         return Ok(None);
     };
     file.rewind()?;

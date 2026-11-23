@@ -35,6 +35,7 @@ use rivu_ui::{
     refresh::RefreshWake,
     row, section_group,
 };
+use rivu_utils::regular_file::RegularFile;
 use session::{
     EditorIdentity, Field, MetadataAvailability, MetadataReadState, MetadataSession, SavedValue,
 };
@@ -547,9 +548,9 @@ impl Metadata {
         self.source_peak_reading = true;
         // Keep one physical reader until completion, even if selection changes.
         let read = cx.background_executor().spawn(async move {
-            peak.value = std::fs::File::open(&peak.path)
+            peak.value = RegularFile::open(&peak.path)
                 .ok()
-                .and_then(|mut file| rivu_metadata::read_playback_peak(&mut file).ok().flatten());
+                .and_then(|file| rivu_metadata::read_playback_peak(&file).ok().flatten());
             peak
         });
         cx.spawn(async move |this, cx| {

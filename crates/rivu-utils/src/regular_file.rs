@@ -1,7 +1,7 @@
 //! Descriptor-based admission for local regular-file readers.
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::{File, Metadata, OpenOptions},
     io,
     os::unix::fs::OpenOptionsExt,
     path::Path,
@@ -17,26 +17,61 @@ pub fn modified_unix_ns(modified: std::time::SystemTime) -> Option<i64> {
     i64::try_from(nanoseconds).ok()
 }
 
+/// An owned descriptor whose opened object has been checked to be a regular file.
+#[derive(Debug)]
+pub struct RegularFile(File);
+
+impl RegularFile {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_metadata(path).map(|(file, _)| file)
+    }
+
+    pub fn open_with_metadata(path: &Path) -> io::Result<(Self, Metadata)> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
+        Self::admit(file)
+    }
+
+    pub fn from_file(file: File) -> io::Result<Self> {
+        Self::admit(file).map(|(file, _)| file)
+    }
+
+    fn admit(file: File) -> io::Result<(Self, Metadata)> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "input is not an ordinary file",
+            ));
+        }
+        Ok((Self(file), metadata))
+    }
+
+    /// Duplicate the descriptor, sharing its file offset.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        self.0.try_clone().map(Self)
+    }
+
+    pub fn as_file(&self) -> &File {
+        &self.0
+    }
+
+    pub fn into_file(self) -> File {
+        self.0
+    }
+}
+
 /// Follow ordinary symlinks, but reject non-regular opened objects. Nonblocking
 /// open ensures a FIFO substituted at the path cannot wait for a writer.
 pub fn open_regular_file(path: &Path) -> io::Result<File> {
-    open_regular_file_with_metadata(path).map(|(file, _)| file)
+    RegularFile::open(path).map(RegularFile::into_file)
 }
 
 /// Return the descriptor and the metadata used to admit it.
-pub fn open_regular_file_with_metadata(path: &Path) -> io::Result<(File, std::fs::Metadata)> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "input is not an ordinary file",
-        ));
-    }
-    Ok((file, metadata))
+pub fn open_regular_file_with_metadata(path: &Path) -> io::Result<(File, Metadata)> {
+    RegularFile::open_with_metadata(path).map(|(file, metadata)| (file.into_file(), metadata))
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ use bank::{BANK, SoundFontLoad};
 use crossbeam_channel::Receiver;
 use midly::{Format, Fps, MetaMessage, MidiMessage, Timing, TrackEventKind};
 use rivu_protocol::audio::SourceIdentity;
+use rivu_utils::regular_file::RegularFile;
 use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
 use std::{
     fs::File,
@@ -137,7 +138,7 @@ impl<R: Read> Read for MidiReader<'_, R> {
 }
 
 impl Sequence {
-    pub(super) fn read(file: File, cancelled: Option<&AtomicBool>) -> Result<Self> {
+    pub(super) fn read(file: RegularFile, cancelled: Option<&AtomicBool>) -> Result<Self> {
         let mut events = Vec::new();
         let (identity, timeline) = read_file(file, Some(&mut events), cancelled)?;
         Ok(Self {
@@ -155,16 +156,25 @@ impl Sequence {
     }
 }
 
-pub(super) fn probe(file: File, path: &Path, cancelled: Option<&AtomicBool>) -> Result<MediaInfo> {
+pub(super) fn probe(
+    file: RegularFile,
+    path: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> Result<MediaInfo> {
     Ok(read_file(file, None, cancelled)?.1.info(path))
 }
 
 fn read_file(
-    mut file: File,
+    file: RegularFile,
     events: Option<&mut Vec<(u64, Event)>>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<(SourceIdentity, Timeline)> {
-    read_checked(&mut file, events, cancelled, super::source_identity)
+    read_checked(
+        &mut file.into_file(),
+        events,
+        cancelled,
+        super::source_identity,
+    )
 }
 
 // Both identity snapshots belong to the admitted descriptor, never its pathname.

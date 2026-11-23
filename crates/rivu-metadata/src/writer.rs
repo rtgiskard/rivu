@@ -487,7 +487,7 @@ fn edit_file_inner(
         "Metadata source changed while opening"
     );
     file.try_lock().context("Locking metadata edit source")?;
-    let kind = detect(&mut file)?.context("Unsupported metadata write format")?;
+    let kind = detect(&file)?.context("Unsupported metadata write format")?;
     let (mut tag, secondary) = read_target(&mut file, kind)?;
     let mut hasher = capture_source.then(blake3::Hasher::new);
     if tag.tag_type() != TagType::Id3v2 && secondary.is_empty() {
@@ -525,8 +525,8 @@ fn edit_file_inner(
     copy_source(&mut file, output.as_file_mut())?;
     write_target(tag, &secondary, output.as_file_mut())
         .context("Writing native metadata to temporary copy")?;
-    let after =
-        crate::read_tags(output.as_file_mut())?.context("Written file lost metadata format")?;
+    let after = crate::read_descriptive_tags(output.as_file(), crate::TagEncoding::Declared)?
+        .context("Written file lost metadata format")?;
     validate_requested(&after, patch)?;
     validate(&target, &file, &original)?;
     let same = same_bytes(&mut file, output.as_file_mut(), hasher.as_mut())?;

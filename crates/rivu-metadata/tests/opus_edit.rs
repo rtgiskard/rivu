@@ -1,4 +1,5 @@
-use rivu_metadata::{TagPatch, edit_file};
+use rivu_metadata::{TagEncoding, TagPatch, edit_file, read_tags};
+use rivu_utils::regular_file::RegularFile;
 
 const SERIAL: u32 = 0x1234_5678;
 
@@ -116,7 +117,7 @@ fn opus_edit_transaction_updates_tags_and_keeps_audio_without_backup() {
     let saved = std::fs::read(&path).unwrap();
     let parsed = pages(&saved);
     assert_eq!(payload(parsed.last().unwrap()), audio);
-    let tags = rivu_metadata::read_tags(&mut std::fs::File::open(path).unwrap())
+    let tags = read_tags(&RegularFile::open(&path).unwrap(), TagEncoding::Declared)
         .unwrap()
         .unwrap();
     assert_eq!(tags.title.as_deref(), Some("Updated"));

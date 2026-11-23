@@ -35,7 +35,8 @@ mod ffmpeg;
 mod ffmpeg {
     use super::{Channel, MediaInfo};
     use anyhow::{Result, bail};
-    use std::{fs::File, path::Path, sync::atomic::AtomicBool};
+    use rivu_utils::regular_file::RegularFile;
+    use std::{path::Path, sync::atomic::AtomicBool};
 
     pub(super) fn availability() -> Result<String> {
         bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
@@ -66,7 +67,7 @@ mod ffmpeg {
         }
     }
 
-    pub(super) fn inspect_wave(_: &Path, _: &File) -> Result<Option<Input>> {
+    pub(super) fn inspect_wave(_: &Path, _: &RegularFile) -> Result<Option<Input>> {
         Ok(None)
     }
 
@@ -75,7 +76,7 @@ mod ffmpeg {
     impl Decoder {
         pub(super) fn from_file(
             _: &Path,
-            _: File,
+            _: RegularFile,
             _: rivu_metadata::Tags,
             _: Option<&AtomicBool>,
         ) -> Result<Self> {
@@ -172,7 +173,7 @@ pub use processor::{NativeNodePlan, NativeProcessor};
 pub use render::{RenderFormat, SourceRenderer};
 use rivu_protocol::audio::{PlaybackRange, SourceIdentity};
 pub use source::{
-    AudioBackend, ProbeResult, probe, probe_details, probe_file, probe_file_details,
+    AudioBackend, ProbeResult, probe, probe_details, probe_file, probe_regular_file_details,
     probe_with_cancel, source_identity, source_identity_from_metadata,
 };
 

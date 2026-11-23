@@ -14,11 +14,9 @@ use super::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_format::decoder_hint::DecoderHint;
-#[cfg(test)]
-use rivu_metadata::read_tags;
-use rivu_metadata::{Tags, read_playback_tags};
+use rivu_metadata::{Tags, read_playback_peak, read_playback_tags};
 use rivu_protocol::audio::SourceIdentity;
-use rivu_utils::regular_file::open_regular_file;
+use rivu_utils::regular_file::RegularFile;
 use std::{
     fs::File,
     io::Seek,
@@ -178,7 +176,7 @@ fn is_source_io_error(error: &std::io::Error) -> bool {
                 | std::io::ErrorKind::PermissionDenied
                 | std::io::ErrorKind::UnexpectedEof
                 | std::io::ErrorKind::InvalidData
-                // open_regular_file rejects non-regular objects with this kind.
+                // Regular-file admission rejects non-regular objects with this kind.
                 | std::io::ErrorKind::InvalidInput
         ),
     }
@@ -259,17 +257,18 @@ pub fn probe_with_cancel(
 
 /// Probe the already opened object without looking up its original path again.
 pub fn probe_file(path: &Path, file: File, ffmpeg_enabled: bool) -> Result<MediaInfo> {
-    probe_file_details(path, file, ffmpeg_enabled).map(|result| result.info)
+    let file = RegularFile::from_file(file).map_err(source_io_error)?;
+    probe_regular_file_details(path, file, ffmpeg_enabled).map(|result| result.info)
 }
 
-/// Probe an opened object and report both metadata and decoder backends.
-pub fn probe_file_details(
+/// Probe an admitted descriptor from byte zero and report both backends.
+pub fn probe_regular_file_details(
     path: &Path,
-    mut file: File,
+    file: RegularFile,
     ffmpeg_enabled: bool,
 ) -> Result<ProbeResult> {
-    crate::source_identity(&file)?;
-    file.rewind()
+    file.as_file()
+        .rewind()
         .context("Rewinding audio source for probing")?;
     probe_open_file(path, file, ffmpeg_enabled, None)
 }
@@ -287,18 +286,18 @@ fn probe_path(
     cancelled: Option<&AtomicBool>,
 ) -> Result<ProbeResult> {
     check_cancelled(cancelled)?;
-    let file = open_regular_file(path).map_err(source_io_error)?;
+    let file = RegularFile::open(path).map_err(source_io_error)?;
     probe_open_file(path, file, ffmpeg_enabled, cancelled)
 }
 
 fn probe_open_file(
     path: &Path,
-    file: File,
+    file: RegularFile,
     ffmpeg_enabled: bool,
     cancelled: Option<&AtomicBool>,
 ) -> Result<ProbeResult> {
     #[cfg(feature = "midi")]
-    if midi::recognizes(&file).map_err(source_io_error)? {
+    if midi::recognizes(file.as_file()).map_err(source_io_error)? {
         return Ok(ProbeResult {
             probe_backend: AudioBackend::Native,
             decoder_backend: AudioBackend::Native,
@@ -547,7 +546,7 @@ pub(super) enum SourceMetadata {
 pub(super) struct FileInput(FileKind);
 
 enum FileKind {
-    Encoded(File),
+    Encoded(RegularFile),
     #[cfg(feature = "midi")]
     Midi(midi::Sequence),
 }
@@ -559,18 +558,18 @@ impl FileInput {
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
-        let file = open_regular_file(path).map_err(source_io_error)?;
+        let file = RegularFile::open(path).map_err(source_io_error)?;
         Self::read_file(file, decoder_hint, cancelled)
     }
 
     fn read_file(
-        file: File,
+        file: RegularFile,
         decoder_hint: DecoderHint,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
         #[cfg(feature = "midi")]
-        if midi::recognizes(&file).map_err(source_io_error)? {
+        if midi::recognizes(file.as_file()).map_err(source_io_error)? {
             check_cancelled(cancelled)?;
             if decoder_hint == DecoderHint::Ffmpeg {
                 return Err(anyhow!("MIDI requires the native synthesizer, not FFmpeg")
@@ -623,7 +622,7 @@ pub(super) struct Source {
     mpeg_packets: bool,
     // Seconds decoded and discarded before a seek target after a decoder reset.
     native_preroll: f64,
-    opening_fallback: Option<(PathBuf, File, SourceSelection)>,
+    opening_fallback: Option<(PathBuf, RegularFile, SourceSelection)>,
 }
 impl Source {
     pub(super) fn from_pcm(pcm: super::PcmAudio, start: f64) -> Result<Self> {
@@ -723,7 +722,7 @@ impl Source {
 
     #[cfg(all(test, feature = "midi"))]
     pub(super) fn stalled_midi_for_test(path: &Path) -> (Self, crossbeam_channel::Sender<()>) {
-        let file = open_regular_file(path).unwrap();
+        let file = RegularFile::open(path).unwrap();
         let sequence = midi::Sequence::read(file, None).unwrap();
         let identity = sequence.identity;
         let info = sequence.info(path);
@@ -810,7 +809,7 @@ impl Source {
         check_cancelled(cancelled)?;
         Self::open_file_with_cancel(
             path,
-            open_regular_file(path).map_err(source_io_error)?,
+            RegularFile::open(path).map_err(source_io_error)?,
             buffer_len,
             decoder_hint,
             ffmpeg_enabled,
@@ -823,7 +822,7 @@ impl Source {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn open_file_with_cancel(
         path: &Path,
-        file: File,
+        file: RegularFile,
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
@@ -894,7 +893,7 @@ impl Source {
 
     fn open_encoded_unprimed(
         path: &Path,
-        mut file: File,
+        file: RegularFile,
         buffer_len: usize,
         decoder_hint: DecoderHint,
         ffmpeg_enabled: bool,
@@ -902,22 +901,22 @@ impl Source {
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
-        crate::source_identity(&file)?;
         let (tags, peak) = if matches!(metadata, SourceMetadata::PcmOnly) {
             (Tags::default(), None)
         } else {
             // The runtime peak belongs to the admitted file. Core owns
             // descriptive metadata during playback.
             let result = if matches!(metadata, SourceMetadata::PlaybackPeak) {
-                rivu_metadata::read_playback_peak(&mut file).map(|peak| (Tags::default(), peak))
+                read_playback_peak(&file).map(|peak| (Tags::default(), peak))
             } else {
-                read_playback_tags(&mut file).map(Option::unwrap_or_default)
+                read_playback_tags(&file).map(Option::unwrap_or_default)
             };
             let (tags, peak) = result.unwrap_or_else(|error| {
                 tracing::warn!(path = %path.display(), error = %error, "Source tags unavailable");
                 (Tags::default(), None)
             });
-            file.rewind()
+            file.as_file()
+                .rewind()
                 .map_err(source_io_error)
                 .context("Rewinding audio source after metadata")?;
             (tags, peak)
@@ -1045,16 +1044,18 @@ impl Source {
     fn open_native(
         path: &Path,
         buffer_len: usize,
-        file: File,
+        file: RegularFile,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
-        let identity = crate::source_identity(&file)?;
+        let identity = crate::source_identity(file.as_file())?;
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
         }
-        let mut stream =
-            MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions { buffer_len });
+        let mut stream = MediaSourceStream::new(
+            Box::new(file.into_file()),
+            MediaSourceStreamOptions { buffer_len },
+        );
         let compressed_summary = bitrate::probe(&mut stream, cancelled)?;
         let mut metadata_budget = metadata_budget();
         let format = match metadata_budget.with(|| {
@@ -2548,6 +2549,8 @@ pub(super) fn opening_prefix_file(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use rivu_format::tags::TagEncoding;
+    use rivu_metadata::read_tags;
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
 
@@ -2595,11 +2598,11 @@ pub(super) mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("admitted.mid");
         std::fs::write(&path, midi::fixture::held_note()).unwrap();
-        let probe_descriptor = open_regular_file(&path).unwrap();
-        let intake_descriptor = open_regular_file(&path).unwrap();
+        let probe_descriptor = File::open(&path).unwrap();
+        let intake_descriptor = RegularFile::open(&path).unwrap();
         std::fs::rename(&path, directory.path().join("original.mid")).unwrap();
         std::fs::write(&path, b"not MIDI").unwrap();
-        let identity = source_identity(&intake_descriptor).unwrap();
+        let identity = source_identity(intake_descriptor.as_file()).unwrap();
         let info = probe_file(&path, probe_descriptor, false).unwrap();
         assert_eq!(info.duration, Some(2.0));
         assert_eq!((info.sample_rate, info.channels), (0, 0));
@@ -3650,7 +3653,11 @@ pub(super) mod tests {
         file.rewind().unwrap();
         file.write_all(&bytes).unwrap();
 
-        assert_eq!(read_tags(file.as_file_mut()).unwrap(), None);
+        let source_file = RegularFile::open(file.path()).unwrap();
+        assert_eq!(
+            read_tags(&source_file, TagEncoding::Declared).unwrap(),
+            None
+        );
         let expected_title = file.path().file_stem().unwrap().to_string_lossy();
         for hint in [DecoderHint::Native, DecoderHint::Auto, DecoderHint::Ffmpeg] {
             if hint == DecoderHint::Ffmpeg && !cfg!(feature = "ffmpeg") {
@@ -3700,7 +3707,7 @@ pub(super) mod tests {
                 .unwrap(),
                 Source::open_file_with_cancel(
                     file.path(),
-                    open_regular_file(file.path()).unwrap(),
+                    RegularFile::open(file.path()).unwrap(),
                     PROBE_BUFFER_LEN,
                     hint,
                     cfg!(feature = "ffmpeg"),
@@ -3730,7 +3737,7 @@ pub(super) mod tests {
         let path = directory.path().join("audio.flac");
         let next = directory.path().join("next.flac");
         std::fs::copy(original.path(), &path).unwrap();
-        let mut file = open_regular_file(&path).unwrap();
+        let mut file = File::open(&path).unwrap();
         file.seek(std::io::SeekFrom::Start(42)).unwrap();
         std::fs::copy(replacement.path(), &next).unwrap();
         std::fs::rename(next, &path).unwrap();
@@ -4038,6 +4045,15 @@ pub(super) mod tests {
         std::os::unix::fs::symlink(&fifo, &alias).unwrap();
         let cancelled = AtomicBool::new(false);
         for path in [&fifo, &alias] {
+            use std::os::unix::fs::OpenOptionsExt;
+            let descriptor = File::options()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)
+                .unwrap();
+            assert!(is_source_failure(
+                &probe_file(path, descriptor, false).unwrap_err()
+            ));
             for enabled in [false, true] {
                 for hint in [DecoderHint::Auto, DecoderHint::Native, DecoderHint::Ffmpeg] {
                     if hint == DecoderHint::Ffmpeg && (!enabled || !cfg!(feature = "ffmpeg")) {
@@ -4395,12 +4411,12 @@ pub(super) mod tests {
         let path = directory.path().join("source.aac");
         let next = directory.path().join("replacement.opus");
         std::fs::copy(unsupported.path(), &path).unwrap();
-        let file = open_regular_file(&path).unwrap();
+        let file = RegularFile::open(&path).unwrap();
         std::fs::copy(replacement.path(), &next).unwrap();
         std::fs::rename(next, &path).unwrap();
         // Replacing the pathname also updates the unlinked original's ctime.
-        let original = crate::source_identity(&file).unwrap();
-        let replacement = crate::source_identity(&open_regular_file(&path).unwrap()).unwrap();
+        let original = crate::source_identity(file.as_file()).unwrap();
+        let replacement = crate::source_identity(&File::open(&path).unwrap()).unwrap();
         assert_ne!(original, replacement);
         let mut source = Source::open_input_unprimed(
             &path,

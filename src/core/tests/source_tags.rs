@@ -1,5 +1,6 @@
 use super::*;
 use rivu_format::tags::{TagEncoding, TagValues};
+use rivu_utils::regular_file::RegularFile;
 
 fn wav(path: &Path) {
     rivu_audio::test_support::write_i16_wav(path, 1, 8_000, [123]).unwrap();
@@ -208,7 +209,8 @@ fn file_save_commits_verified_dates_and_numbers_without_backups() {
         modified,
         metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec()
     );
-    let read = rivu_metadata::read_tags(&mut std::fs::File::open(&before.path).unwrap())
+    let file = RegularFile::open(&before.path).unwrap();
+    let read = rivu_metadata::read_tags(&file, TagEncoding::Declared)
         .unwrap()
         .unwrap();
     assert_eq!(read.title.as_deref(), Some("Saved title"));
@@ -400,7 +402,8 @@ fn either_database_write_can_fail_and_only_the_verified_save_can_recover() {
             persisted.fingerprint.as_deref(),
             (column == "title").then_some(fingerprint.as_str())
         );
-        let read = rivu_metadata::read_tags(&mut std::fs::File::open(&before.path).unwrap())
+        let file = RegularFile::open(&before.path).unwrap();
+        let read = rivu_metadata::read_tags(&file, TagEncoding::Declared)
             .unwrap()
             .unwrap();
         assert_eq!(read.title.as_deref(), Some(tags.title.as_str()));

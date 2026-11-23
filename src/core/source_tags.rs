@@ -2,6 +2,7 @@ use super::*;
 use anyhow::ensure;
 use rivu_format::tags::{TagEncoding, TagValues};
 use rivu_protocol::model::SourceTagRecovery;
+use rivu_utils::regular_file::RegularFile;
 
 const SAVED_SOURCE_SYNC_FAILED: &str =
     "File tags saved, but synchronizing the database failed; retry database synchronization only";
@@ -127,8 +128,8 @@ impl Core {
                             result: Ok(()),
                         })
                     } else {
-                        let mut file = rivu_utils::regular_file::open_regular_file(&path)?;
-                        let tags = rivu_metadata::read_tags_with_encoding(&mut file, encoding)?
+                        let file = RegularFile::open(&path)?;
+                        let tags = rivu_metadata::read_tags(&file, encoding)?
                             .context("Source tag reading is not supported for this container")?;
                         Ok(SourceTagFinished {
                             tags: Some(source_values(tags)),

@@ -14,9 +14,9 @@ use anyhow::{Context, Result, bail};
 use libloading::Library;
 use rivu_metadata::Tags;
 use rivu_protocol::audio::SourceIdentity;
+use rivu_utils::regular_file::RegularFile;
 use std::{
     ffi::{CStr, CString, c_char, c_int},
-    fs::File,
     io::ErrorKind,
     os::fd::AsRawFd,
     os::unix::fs::FileExt,
@@ -441,7 +441,7 @@ pub(super) struct Input {
     path: PathBuf,
     identity: SourceIdentity,
     // Keep the descriptor path valid until the format context is closed.
-    file: Option<File>,
+    file: Option<RegularFile>,
     format: *mut AVFormatContext,
     stream: c_int,
     stream_ptr: *mut AVStream,
@@ -449,11 +449,11 @@ pub(super) struct Input {
 }
 unsafe impl Send for Input {}
 impl Input {
-    fn from_file(path: PathBuf, file: File, rt: &'static Runtime) -> Result<Self> {
-        let identity = crate::source_identity(&file)?;
+    fn from_file(path: PathBuf, file: RegularFile, rt: &'static Runtime) -> Result<Self> {
+        let identity = crate::source_identity(file.as_file())?;
         // FFmpeg opens its own independently seekable descriptor to this exact
         // checked object, never the original path that could now name a FIFO.
-        let cpath = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+        let cpath = CString::new(format!("/proc/self/fd/{}", file.as_file().as_raw_fd()))?;
         let mut input = Self {
             rt,
             path,
@@ -572,7 +572,11 @@ impl Input {
         // Sample count, block size, reserved, then the `data` chunk header
         // directly after the fixed 52-byte fmt chunk.
         let mut header = [0; 28];
-        self.file.as_ref()?.read_exact_at(&mut header, 64).ok()?;
+        self.file
+            .as_ref()?
+            .as_file()
+            .read_exact_at(&mut header, 64)
+            .ok()?;
         let field = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().unwrap());
         // One frame of the 8:1 byte-packed stream carries eight 1-bit samples.
         let frames = field(0) / 8;
@@ -591,7 +595,7 @@ impl Drop for Input {
 }
 
 /// Inspect WAVE only with a loaded runtime, preserving the file for native decoding.
-pub(super) fn inspect_wave(path: &Path, file: &File) -> Result<Option<Input>> {
+pub(super) fn inspect_wave(path: &Path, file: &RegularFile) -> Result<Option<Input>> {
     let rt = match LazyLock::get(&RUNTIME) {
         Some(Ok(rt)) => rt,
         _ => return Ok(None),
@@ -599,7 +603,7 @@ pub(super) fn inspect_wave(path: &Path, file: &File) -> Result<Option<Input>> {
     let path = rivu_format::config::logical_path(path)?;
     let mut magic = [0; 12];
     // Positional reading leaves native decoding at byte zero without a seek.
-    match file.read_exact_at(&mut magic, 0) {
+    match file.as_file().read_exact_at(&mut magic, 0) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
         Err(error) => return Err(source_io_error(error)).context("read WAVE container magic"),
@@ -617,7 +621,7 @@ pub(super) fn inspect_wave(path: &Path, file: &File) -> Result<Option<Input>> {
 pub(super) struct Decoder {
     rt: &'static Runtime,
     identity: SourceIdentity,
-    _file: File,
+    _file: RegularFile,
     path: PathBuf,
     format: *mut AVFormatContext,
     codec: *mut AVCodecContext,
@@ -641,7 +645,7 @@ unsafe impl Send for Decoder {}
 impl Decoder {
     pub(super) fn from_file(
         path: &Path,
-        file: File,
+        file: RegularFile,
         tags: Tags,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
@@ -1282,7 +1286,6 @@ unsafe fn copy_samples<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivu_utils::regular_file::open_regular_file;
 
     #[test]
     fn source_status_codes_exclude_resources_backend_bugs_and_unknown_errors() {
@@ -1321,7 +1324,7 @@ mod tests {
         ] {
             let mut decoder = Decoder::from_file(
                 file.path(),
-                open_regular_file(file.path()).unwrap(),
+                RegularFile::open(file.path()).unwrap(),
                 Tags::default(),
                 None,
             )
@@ -1404,7 +1407,7 @@ mod tests {
         let duration = |file: &tempfile::NamedTempFile| {
             let decoder = Decoder::from_file(
                 file.path(),
-                open_regular_file(file.path()).unwrap(),
+                RegularFile::open(file.path()).unwrap(),
                 Tags::default(),
                 None,
             )
@@ -1431,7 +1434,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("audio.wav");
         std::fs::copy(original.path(), &path).unwrap();
-        let file = open_regular_file(&path).unwrap();
+        let file = RegularFile::open(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         let name = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
@@ -1467,7 +1470,7 @@ mod tests {
         let file = pcm_file();
         let mut decoder = Decoder::from_file(
             file.path(),
-            open_regular_file(file.path()).unwrap(),
+            RegularFile::open(file.path()).unwrap(),
             Tags::default(),
             None,
         )
@@ -1522,7 +1525,7 @@ mod tests {
         for corrupt in [false, true] {
             let mut decoder = Decoder::from_file(
                 file.path(),
-                open_regular_file(file.path()).unwrap(),
+                RegularFile::open(file.path()).unwrap(),
                 Tags::default(),
                 None,
             )
@@ -1558,7 +1561,7 @@ mod tests {
         let file = pcm_file();
         let mut decoder = Decoder::from_file(
             file.path(),
-            open_regular_file(file.path()).unwrap(),
+            RegularFile::open(file.path()).unwrap(),
             Tags::default(),
             None,
         )
@@ -1595,7 +1598,7 @@ mod tests {
         for skip in [false, true] {
             let mut decoder = Decoder::from_file(
                 file.path(),
-                open_regular_file(file.path()).unwrap(),
+                RegularFile::open(file.path()).unwrap(),
                 Tags::default(),
                 None,
             )

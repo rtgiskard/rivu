@@ -8,11 +8,13 @@ use rivu::config;
 use rivu::config::ConfigPersistence;
 use rivu_audio as audio;
 use rivu_format::decoder_hint::DecoderHint;
+use rivu_format::tags::TagEncoding;
 use rivu_presentation::i18n::Localizer;
 use rivu_protocol::{
     model::{Command, Query},
     response::{StateSections, ViewResponse},
 };
+use rivu_utils::regular_file::RegularFile;
 use rivu_utils::terminal::{TerminalEscaped, terminal_text};
 use std::{io::Write, path::Path};
 
@@ -163,11 +165,10 @@ pub(super) fn run(
                 output.flush()?;
                 return Ok(());
             }
-            let mut file =
-                rivu_utils::regular_file::open_regular_file(&path).with_context(|| {
-                    format!("Open source tags: {}", TerminalEscaped(path.display()))
-                })?;
-            let tags = rivu_metadata::read_tags(&mut file)?
+            let file = RegularFile::open(&path).with_context(|| {
+                format!("Open source tags: {}", TerminalEscaped(path.display()))
+            })?;
+            let tags = rivu_metadata::read_tags(&file, TagEncoding::Declared)?
                 .context("Source tag reading is not supported for this container")?;
             if json {
                 writeln!(
@@ -763,7 +764,8 @@ mod tests {
                 },
                 mode,
             )?;
-            let tags = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?
+            let file = RegularFile::open(&path)?;
+            let tags = rivu_metadata::read_tags(&file, TagEncoding::Declared)?
                 .context("supported WAV tags")?;
             assert_eq!(tags.title.as_deref(), Some("Source title"));
             assert_eq!(tags.artist.as_deref(), Some("Source artist"));
@@ -780,7 +782,8 @@ mod tests {
                 title_edit(&path, Some("Title only")),
                 mode,
             )?;
-            let edited = rivu_metadata::read_tags(&mut fs::File::open(&path)?)?
+            let file = RegularFile::open(&path)?;
+            let edited = rivu_metadata::read_tags(&file, TagEncoding::Declared)?
                 .context("supported WAV tags")?;
             assert_eq!(edited.title.as_deref(), Some("Title only"));
             assert_eq!(edited.artist, tags.artist);

@@ -8,9 +8,8 @@ use super::{
 };
 use anyhow::{Context, Result, bail};
 use rivu_format::decoder_hint::DecoderHint;
-use rivu_utils::regular_file::open_regular_file;
+use rivu_utils::regular_file::RegularFile;
 use std::{
-    fs::File,
     path::Path,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -134,13 +133,13 @@ pub(super) fn render_stream(
 }
 
 fn finish_source(
-    file: Option<&File>,
+    file: Option<&RegularFile>,
     identity: SourceIdentity,
     cancelled: &AtomicBool,
 ) -> Result<()> {
     check_cancelled(Some(cancelled)).context("Audio render cancelled")?;
     if let Some(file) = file
-        && crate::source_identity(file)? != identity
+        && crate::source_identity(file.as_file())? != identity
     {
         bail!("Audio render source changed while decoding");
     }
@@ -150,7 +149,7 @@ fn finish_source(
 /// Owns one opened decoder, so admission and rendering inspect the same source.
 pub struct SourceRenderer {
     source: Source,
-    identity_file: Option<File>,
+    identity_file: Option<RegularFile>,
     format: RenderFormat,
 }
 
@@ -168,7 +167,7 @@ impl SourceRenderer {
             .context("Audio render media buffer size does not fit usize")?
             .checked_mul(super::BYTES_PER_MEBIBYTE)
             .context("Audio render media buffer size overflows")?;
-        let file = open_regular_file(path)?;
+        let file = RegularFile::open(path)?;
         let identity_file = file
             .try_clone()
             .context("Retaining audio render source identity")?;
@@ -278,7 +277,7 @@ impl SourceRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
+    use std::{fs::File, sync::atomic::Ordering};
 
     fn float_source(directory: &Path) -> std::path::PathBuf {
         let path = directory.join("source.wav");

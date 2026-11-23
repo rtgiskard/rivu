@@ -7,6 +7,12 @@ use std::{
     path::Path,
 };
 
+fn declared_tags(path: &Path) -> Tags {
+    read_tags(&RegularFile::open(path).unwrap(), TagEncoding::Declared)
+        .unwrap()
+        .unwrap()
+}
+
 fn assert_written_source(report: &EditReport, source: &WrittenSource, path: &Path) {
     let metadata = fs::metadata(path).unwrap();
     let bytes = fs::read(path).unwrap();
@@ -80,7 +86,7 @@ fn summary_preserves_precision_first_value_and_positive_numbers() {
         ),
     )
     .unwrap();
-    let tags = read_tags(&mut File::open(path).unwrap()).unwrap().unwrap();
+    let tags = declared_tags(&path);
     assert_eq!(tags.title.as_deref(), Some("Title"));
     assert_eq!(tags.artist.as_deref(), Some("First"));
     assert_eq!(tags.release_date.as_deref(), Some("2024-03-09"));
@@ -101,7 +107,8 @@ fn replaygain_reads_db_suffixes_and_rejects_invalid_values() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(&flac(&[&format!("REPLAYGAIN_TRACK_GAIN={gain}")], None))
             .unwrap();
-        let tags = read_tags(&mut file).unwrap().unwrap();
+        let file = RegularFile::from_file(file).unwrap();
+        let tags = read_tags(&file, TagEncoding::Declared).unwrap().unwrap();
         assert_eq!(tags.replaygain_track_gain, expected_gain);
     }
 }
@@ -127,15 +134,21 @@ fn runtime_track_peak_is_positive_finite_and_never_uses_album_peak() {
             None,
         ))
         .unwrap();
-        let (tags, actual) = read_playback_tags(&mut file).unwrap().unwrap();
+        let file = RegularFile::from_file(file).unwrap();
+        let (tags, actual) = read_playback_tags(&file).unwrap().unwrap();
+        assert_eq!(read_playback_peak(&file).unwrap(), expected);
         assert_eq!(actual, expected);
         assert_eq!(tags.replaygain_track_gain, Some(6.0));
-        assert_eq!(read_tags(&mut file).unwrap().unwrap(), tags);
+        assert_eq!(
+            read_tags(&file, TagEncoding::Declared).unwrap().unwrap(),
+            tags
+        );
     }
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&flac(&["REPLAYGAIN_ALBUM_PEAK=0.5"], None))
         .unwrap();
-    assert_eq!(read_playback_tags(&mut file).unwrap().unwrap().1, None);
+    let file = RegularFile::from_file(file).unwrap();
+    assert_eq!(read_playback_tags(&file).unwrap().unwrap().1, None);
 }
 
 #[test]
@@ -156,7 +169,7 @@ fn descriptive_edits_preserve_existing_replaygain_tags() {
         ),
     )
     .unwrap();
-    let before = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+    let before = declared_tags(&path);
     edit_file(
         &path,
         &TagPatch {
@@ -165,7 +178,7 @@ fn descriptive_edits_preserve_existing_replaygain_tags() {
         },
     )
     .unwrap();
-    let after = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+    let after = declared_tags(&path);
     assert_eq!(after.replaygain_track_gain, before.replaygain_track_gain);
     for gain in [Some(-2.5), None] {
         edit_file(
@@ -176,7 +189,7 @@ fn descriptive_edits_preserve_existing_replaygain_tags() {
             },
         )
         .unwrap();
-        let after = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+        let after = declared_tags(&path);
         assert_eq!(after.replaygain_track_gain, gain);
         let saved = fs::read(&path).unwrap();
         for value in [
@@ -249,9 +262,12 @@ fn invalid_replaygain_patch_does_not_replace_source() {
 fn unsupported_content_has_no_tags_or_artwork() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(b"unsupported container").unwrap();
-    assert_eq!(read_tags(&mut file).unwrap(), None);
+    let file = RegularFile::from_file(file).unwrap();
+    assert_eq!(read_tags(&file, TagEncoding::Declared).unwrap(), None);
+    assert_eq!(read_playback_tags(&file).unwrap(), None);
+    assert_eq!(read_playback_peak(&file).unwrap(), None);
     assert_eq!(
-        read_artwork(file, 1024, |data| Some(data.to_vec())).unwrap(),
+        read_artwork(file.into_file(), 1024, |data| Some(data.to_vec())).unwrap(),
         None
     );
 }
@@ -260,9 +276,18 @@ fn unsupported_content_has_no_tags_or_artwork() {
 fn supported_untagged_content_has_empty_tags() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&flac(&[], None)).unwrap();
-    assert_eq!(read_tags(&mut file).unwrap(), Some(Tags::default()));
+    let file = RegularFile::from_file(file).unwrap();
     assert_eq!(
-        read_artwork(file, 1024, |data| Some(data.to_vec())).unwrap(),
+        read_tags(&file, TagEncoding::Declared).unwrap(),
+        Some(Tags::default())
+    );
+    assert_eq!(
+        read_playback_tags(&file).unwrap(),
+        Some((Tags::default(), None))
+    );
+    assert_eq!(read_playback_peak(&file).unwrap(), None);
+    assert_eq!(
+        read_artwork(file.into_file(), 1024, |data| Some(data.to_vec())).unwrap(),
         None
     );
 }
@@ -426,8 +451,13 @@ fn sparse_audio_payload_has_no_whole_file_size_cap() {
     file.write_all(&flac(&["TITLE=Sparse"], None)).unwrap();
     file.set_len(2 * 1024 * 1024 * 1024).unwrap();
     file.rewind().unwrap();
+    let file = RegularFile::from_file(file).unwrap();
     assert_eq!(
-        read_tags(&mut file).unwrap().unwrap().title.as_deref(),
+        read_tags(&file, TagEncoding::Declared)
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
         Some("Sparse")
     );
 }
@@ -503,7 +533,7 @@ fn title_only_mp3_edit_preserves_effective_track_over_id3v1() {
     let path = dir.path().join("mixed.mp3");
     for (primary, secondary, expected) in [(1, 2, 1), (0, 2, 2), (1, 0, 1)] {
         fs::write(&path, tagged_mp3(primary, secondary)).unwrap();
-        let before = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+        let before = declared_tags(&path);
         assert_eq!(before.track_number, Some(expected));
         let report = edit_file(
             &path,
@@ -519,7 +549,7 @@ fn title_only_mp3_edit_preserves_effective_track_over_id3v1() {
             lofty::mpeg::MpegFile::read_from(&mut File::open(&path).unwrap(), options(false))
                 .unwrap();
         assert!(parsed.id3v1().is_none());
-        let after = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+        let after = declared_tags(&path);
         assert_eq!(after.track_number, before.track_number);
     }
 }
@@ -592,9 +622,8 @@ fn explicit_encoding_preserves_primary_precedence_and_secondary_fill() {
     ));
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&bytes).unwrap();
-    let tags = read_tags_with_encoding(&mut file, TagEncoding::Windows1251)
-        .unwrap()
-        .unwrap();
+    let file = RegularFile::from_file(file).unwrap();
+    let tags = read_tags(&file, TagEncoding::Windows1251).unwrap().unwrap();
     assert_eq!(tags.title.as_deref(), Some("Primary Unicode 日本語"));
     assert_eq!(tags.artist.as_deref(), Some("Артист"));
     assert_eq!(tags.track_number, Some(1));
@@ -605,7 +634,7 @@ fn mixed_tags_merge_convertible_fields_remove_secondary_and_allow_clear() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mixed.wav");
     fs::write(&path, tagged_wav(&frame(b"TIT2", b"\x03Primary"), true)).unwrap();
-    let before = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+    let before = declared_tags(&path);
     assert_eq!(before.title.as_deref(), Some("Primary"));
     assert_eq!(before.artist.as_deref(), Some("Secondary artist"));
     let report = edit_file(
@@ -617,7 +646,7 @@ fn mixed_tags_merge_convertible_fields_remove_secondary_and_allow_clear() {
     )
     .unwrap();
     assert!(report.changed());
-    let after = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+    let after = declared_tags(&path);
     assert_eq!(after.title.as_deref(), Some("Changed"));
     assert_eq!(after.artist, before.artist);
     use lofty::file::AudioFile;
@@ -634,13 +663,7 @@ fn mixed_tags_merge_convertible_fields_remove_secondary_and_allow_clear() {
         },
     )
     .unwrap();
-    assert_eq!(
-        read_tags(&mut File::open(&path).unwrap())
-            .unwrap()
-            .unwrap()
-            .title,
-        None
-    );
+    assert_eq!(declared_tags(&path).title, None);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
@@ -766,12 +789,11 @@ fn id3v23_date_precision_survives_v24_normalization() {
     let id3 = bytes.windows(4).position(|w| w == b"ID3 ").unwrap() + 8;
     bytes[id3 + 3] = 3;
     fs::write(&path, bytes).unwrap();
-    let before = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+    let before = declared_tags(&path);
     assert_eq!(before.release_date.as_deref(), Some("2024-03-09T12:34"));
-    let recovered =
-        read_tags_with_encoding(&mut File::open(&path).unwrap(), TagEncoding::Windows1251)
-            .unwrap()
-            .unwrap();
+    let recovered = read_tags(&RegularFile::open(&path).unwrap(), TagEncoding::Windows1251)
+        .unwrap()
+        .unwrap();
     assert_eq!(recovered.release_date, before.release_date);
     edit_file(
         &path,
@@ -781,7 +803,7 @@ fn id3v23_date_precision_survives_v24_normalization() {
         },
     )
     .unwrap();
-    let after = read_tags(&mut File::open(&path).unwrap()).unwrap().unwrap();
+    let after = declared_tags(&path);
     assert_eq!(after.release_date, before.release_date);
     let edited = fs::read(path).unwrap();
     let id3 = edited.windows(4).position(|w| w == b"ID3 ").unwrap() + 8;
@@ -918,10 +940,7 @@ fn six_field_patch_preserves_date_precision_and_clears_aliases() {
             )
             .unwrap();
             assert_eq!(cleared.tags, Tags::default());
-            assert_eq!(
-                read_tags(&mut File::open(&path).unwrap()).unwrap(),
-                Some(Tags::default())
-            );
+            assert_eq!(declared_tags(&path), Tags::default());
         }
     }
 }
@@ -958,24 +977,33 @@ fn encoding_override_recovers_only_latin1_id3_and_is_strict() {
         .concat();
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(&tagged_wav(&frames, false)).unwrap();
-        let tags = read_tags_with_encoding(&mut file, mode).unwrap().unwrap();
+        let file = RegularFile::from_file(file).unwrap();
+        let tags = read_tags(&file, mode).unwrap().unwrap();
         assert_eq!(tags.title.as_deref(), Some(expected));
         assert_eq!(tags.artist.as_deref(), Some("正しいUnicode"));
         assert_eq!(tags.album.as_deref(), Some("专辑"));
-        assert_ne!(read_tags(&mut file).unwrap().unwrap().title, tags.title);
+        assert_ne!(
+            read_tags(&file, TagEncoding::Declared)
+                .unwrap()
+                .unwrap()
+                .title,
+            tags.title
+        );
     }
     let mut invalid = tempfile::tempfile().unwrap();
     invalid
         .write_all(&tagged_wav(&frame(b"TIT2", b"\0\xff"), false))
         .unwrap();
-    assert!(read_tags_with_encoding(&mut invalid, TagEncoding::Utf8).is_err());
-    assert!(read_tags(&mut invalid).is_ok());
+    let invalid = RegularFile::from_file(invalid).unwrap();
+    assert!(read_tags(&invalid, TagEncoding::Utf8).is_err());
+    assert!(read_tags(&invalid, TagEncoding::Declared).is_ok());
     let mut non_id3 = tempfile::tempfile().unwrap();
     non_id3
         .write_all(&flac(&["TITLE=正确Unicode"], None))
         .unwrap();
+    let non_id3 = RegularFile::from_file(non_id3).unwrap();
     assert_eq!(
-        read_tags_with_encoding(&mut non_id3, TagEncoding::Windows1251)
+        read_tags(&non_id3, TagEncoding::Windows1251)
             .unwrap()
             .unwrap()
             .title

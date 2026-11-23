@@ -2,13 +2,12 @@ use super::ScanCancellation;
 use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result, bail};
 use rivu_audio::{
-    AudioBackend, MediaInfo, ensure_ffmpeg_loaded, ffmpeg_is_loaded, probe_file_details,
+    AudioBackend, MediaInfo, ensure_ffmpeg_loaded, ffmpeg_is_loaded, probe_regular_file_details,
     source_identity_from_metadata,
 };
 use rivu_protocol::{audio::SourceIdentity, model::CueSegment};
-use rivu_utils::regular_file::open_regular_file_with_metadata;
+use rivu_utils::regular_file::RegularFile;
 use std::collections::HashMap;
-use std::fs;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -279,7 +278,7 @@ const SOURCE_STEPS_PER_TURN: usize = 32;
 
 struct PendingSource {
     path: PathBuf,
-    file: fs::File,
+    file: RegularFile,
     identity: SourceIdentity,
     size: u64,
     modified_ns: i64,
@@ -323,8 +322,8 @@ impl PendingSource {
             }
             if self.media.is_none() {
                 let file = self.file.try_clone()?;
-                let probe =
-                    probe_file_details(&self.path, file, ffmpeg_enabled).context("probe audio")?;
+                let probe = probe_regular_file_details(&self.path, file, ffmpeg_enabled)
+                    .context("probe audio")?;
                 if let Some(budget) = budget {
                     budget.reserve(media_retained_bytes(&probe.info))?;
                 }
@@ -341,6 +340,7 @@ impl PendingSource {
             if self.fingerprint.is_none() {
                 // A duplicated probe fd shares its seek offset: rewind the same object.
                 self.file
+                    .as_file()
                     .rewind()
                     .with_context(|| format!("rewind {} for hashing", self.path.display()))?;
                 self.hasher = Some(blake3::Hasher::new());
@@ -353,7 +353,12 @@ impl PendingSource {
                 .hasher
                 .as_mut()
                 .context("Audio hash was not initialized")?;
-            let chunk = hash_chunk(&mut self.file, &mut scratch[..length], hasher, cancellation);
+            let chunk = hash_chunk(
+                &mut self.file.as_file(),
+                &mut scratch[..length],
+                hasher,
+                cancellation,
+            );
             match chunk.with_context(|| format!("hash {}", self.path.display()))? {
                 None => return Ok(None),
                 Some(0) => self.hashed = size,
@@ -366,7 +371,7 @@ impl PendingSource {
             }
         }
         cancellation.check()?;
-        if source_identity_from_metadata(&self.file.metadata()?) != self.identity {
+        if source_identity_from_metadata(&self.file.as_file().metadata()?) != self.identity {
             bail!(
                 "Audio source {} changed while scanning",
                 self.path.display()
@@ -478,7 +483,7 @@ where
                 token.check()?;
                 let opened = (|| {
                     path.to_str().context("Audio source path is not UTF-8")?;
-                    open_regular_file_with_metadata(&path).map_err(anyhow::Error::from)
+                    RegularFile::open_with_metadata(&path).map_err(anyhow::Error::from)
                 })();
                 admitted.push((path, opened));
             }
