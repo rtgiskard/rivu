@@ -1073,9 +1073,13 @@ impl Source {
             }
             Err(error) => return Err(error.into()),
         };
-        let default = format.default_track(TrackType::Audio).map(|track| track.id);
-        let mut candidates = format.tracks().iter().collect::<Vec<_>>();
-        candidates.sort_by_key(|track| Some(track.id) != default);
+        let default = format.default_track(TrackType::Audio);
+        let candidates = default.into_iter().chain(
+            format
+                .tracks()
+                .iter()
+                .filter(|track| default.is_none_or(|default| track.id != default.id)),
+        );
         let container = format.format_info().short_name;
         let mut chosen = None;
         let mut errors = Vec::new();
