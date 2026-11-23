@@ -1719,7 +1719,7 @@ mod tests {
     #[test]
     fn impulse_repair_interpolates_short_runs_but_protects_a_sustained_onset() {
         let mut input = vec![0.1; 2000];
-        input[500] = 0.9;
+        input[5] = 0.9; // First frame with full context at a repair width of three.
         input[800] = -0.7;
         input[801] = -0.8;
         input[802] = -0.6;
@@ -1727,15 +1727,16 @@ mod tests {
         let config = DenoiseConfig {
             impulse: ImpulseConfig {
                 enabled: true,
+                max_width: 3,
                 ..Default::default()
             },
             ..Default::default()
         };
         let output = run(config, 48_000, 1, &input, None, 17);
-        assert!((output[500] - 0.1).abs() < 1.0e-6);
+        assert!((output[5] - 0.1).abs() < 1.0e-6);
         assert!(output[800..803].iter().all(|x| (*x - 0.1).abs() < 1.0e-6));
         assert_eq!(&output[1190..1210], &input[1190..1210]);
-        assert_eq!(&output[..10], &input[..10]);
+        assert_eq!(&output[..5], &input[..5]);
         assert_eq!(&output[1990..], &input[1990..]);
     }
 
