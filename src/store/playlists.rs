@@ -81,6 +81,9 @@ impl Store {
         }
         let query = search_query(query);
         let total = self.playlist_match_count(playlist_id, query.as_deref())?;
+        if total == 0 {
+            return Ok(None);
+        }
         let encoded;
         let (sql, identity): (_, &dyn rusqlite::ToSql) = if let (Some(_), [id]) =
             (&query, entry_ids)
@@ -194,7 +197,7 @@ impl Store {
     ) -> Result<Page<PlaylistSummary>> {
         let query = search_query(query);
         let total = self.playlist_count_matching(query.as_deref())?;
-        if limit == 0 {
+        if limit == 0 || offset >= total {
             return Ok(Page {
                 total,
                 rows: Vec::new(),
@@ -431,15 +434,16 @@ impl Store {
             "AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?4"
         };
         let mut stmt = self.conn.prepare_cached(&format!("SELECT {ENTRY_COLUMNS} FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
-        let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
-        let offset = offset.min(i64::MAX as usize) as i64;
-        let mut rows = stmt
-            .query_map(params![playlist_id, query, offset, limit], entry_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if query.is_some() {
-            for (index, row) in rows.iter_mut().enumerate() {
-                row.offset = offset as usize + index;
+        let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS);
+        let mut rows = Vec::with_capacity(limit.min(total - offset));
+        let sql_offset = offset.min(i64::MAX as usize) as i64;
+        let mut result = stmt.query(params![playlist_id, query, sql_offset, limit as i64])?;
+        while let Some(row) = result.next()? {
+            let mut entry = entry_from_row(row)?;
+            if query.is_some() {
+                entry.offset = offset + rows.len();
             }
+            rows.push(entry);
         }
         Ok(Page { total, rows })
     }
@@ -658,7 +662,11 @@ impl Store {
     pub fn remove_playlist_entries(&self, playlist_id: i64, entry_ids: &[i64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let ids = serde_json::to_string(entry_ids)?;
+        exists_playlist(&tx, playlist_id)?;
         let selected = selected_entries(&tx, playlist_id, &ids)?;
+        if selected.len() != entry_ids.len() {
+            validate_selected_entries(&tx, playlist_id, &ids)?;
+        }
         if selected.is_empty() {
             return Ok(false);
         }
@@ -682,7 +690,7 @@ impl Store {
     ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let ids = serde_json::to_string(entry_ids)?;
-        validate_selected_entries(&tx, playlist_id, &ids)?;
+        exists_playlist(&tx, playlist_id)?;
         let selected = tx
             .prepare(
                 "SELECT id,position FROM playlist_entries WHERE playlist_id=?1
@@ -692,6 +700,9 @@ impl Store {
                 Ok((row.get(0)?, row.get(1)?))
             })?
             .collect::<rusqlite::Result<Vec<(i64, i64)>>>()?;
+        if selected.len() != entry_ids.len() {
+            validate_selected_entries(&tx, playlist_id, &ids)?;
+        }
         let target: i64 = match before_entry_id {
             Some(id) => tx
                 .query_row(
@@ -726,7 +737,6 @@ impl Store {
 }
 
 fn validate_selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) -> Result<()> {
-    exists_playlist(tx, playlist_id)?;
     let invalid: Option<i64> = tx
         .query_row(
             "SELECT value FROM json_each(?2) WHERE NOT EXISTS
@@ -742,7 +752,6 @@ fn validate_selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) 
 }
 
 fn selected_entries(tx: &Transaction<'_>, playlist_id: i64, ids: &str) -> Result<Vec<i64>> {
-    validate_selected_entries(tx, playlist_id, ids)?;
     let mut statement = tx.prepare(
         "SELECT position FROM playlist_entries WHERE playlist_id=?1
          AND id IN (SELECT value FROM json_each(?2)) ORDER BY position,id",
