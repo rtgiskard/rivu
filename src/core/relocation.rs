@@ -51,6 +51,14 @@ impl FileIdentity {
         })
     }
 
+    fn require_match(&self, metadata: &Metadata) -> Result<()> {
+        ensure!(
+            Self::read(metadata)? == *self,
+            "Relocation target changed during verification; relocation refused"
+        );
+        Ok(())
+    }
+
     fn modified_ns(&self) -> Result<i64> {
         let ns = rivu_utils::regular_file::modified_unix_ns(self.modified)
             .context("Target modification time is out of range")?;
@@ -84,20 +92,17 @@ async fn verify_target(
     let mut verified = workers
         .execute(move || -> Result<VerifiedTarget> {
             require_source_absent(&admitted.source.path)?;
-            let file = rivu_utils::regular_file::open_regular_file(&admitted.target.path)
-                .context("Opening relocation target")?;
-            let metadata = file
-                .metadata()
-                .context("Reading relocation target metadata")?;
+            let (file, metadata) =
+                rivu_utils::regular_file::open_regular_file_with_metadata(&admitted.target.path)
+                    .context("Opening relocation target")?;
             let identity = FileIdentity::read(&metadata)?;
             ensure!(
                 identity.size == admitted.target.file_size
                     && identity.modified_ns()? == admitted.target.modified_ns,
                 "Target metadata changed since the library scan; scan again before confirming"
             );
-            let verified = VerifiedTarget { file, identity };
-            verified.revalidate(&admitted.target.path)?;
-            Ok(verified)
+            identity.require_match(&std::fs::metadata(&admitted.target.path)?)?;
+            Ok(VerifiedTarget { file, identity })
         })
         .await
         .context("Relocation admission worker panicked")??;
@@ -148,12 +153,8 @@ async fn verify_target(
 
 impl VerifiedTarget {
     fn revalidate(&self, path: &Path) -> Result<()> {
-        ensure!(
-            FileIdentity::read(&self.file.metadata()?)? == self.identity
-                && FileIdentity::read(&std::fs::metadata(path)?)? == self.identity,
-            "Relocation target changed during verification; relocation refused"
-        );
-        Ok(())
+        self.identity.require_match(&self.file.metadata()?)?;
+        self.identity.require_match(&std::fs::metadata(path)?)
     }
 }
 
