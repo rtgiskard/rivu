@@ -1,4 +1,4 @@
-= GPU Measurement Archive (2026-10-18–2026-10-30)
+= GPU Measurement Archive
 :toc:
 :toclevels: 2
 
@@ -12,6 +12,62 @@ or GUI rerun is implied by this archival move. Current contracts and the decisio
 index remain in link:25_gpu_rendering.adoc[GPU Rendering Design].
 
 == Historical measurements
+
+[[album-thumbnail-generation]]
+=== Static album thumbnail generation (2026-11-24)
+
+The thumbnail filter selects AVX2 at runtime on x86-64. In the release filter-only
+comparison on a Ryzen 7 8745HS, the AVX2 candidate and the original triangle
+filter ran in alternating order on one logical core for eight pairs. For a
+1024×1024 opaque source, median resize time fell from 4.40 to 1.18 ms at 200 px
+and from 7.71 to 3.87 ms at 560 px. Across the eight pairs, median speedup
+was 3.74× at 200 px (25th–75th percentiles, 3.73–3.78×) and 1.97× at 560 px
+(1.96–1.98×). The integrated filter matched the scalar
+output byte for byte across opaque, partial-alpha and hidden-RGB inputs,
+including odd widths and scalar tails.
+
+The full-chain comparison used the production loader with either AVX2 or an
+experimental two-pass Vulkan filter on the Radeon 780M (RADV). Each run read,
+hashed and decoded a 1024×1024 PNG with a warm source-file page cache and a
+missing thumbnail tier, then encoded and atomically published a lossless WebP.
+GPU timings include upload, dispatch, synchronization and readback. Each case
+had two warmup pairs and twelve measured pairs with alternating backend order.
+Times are single-image medians in ms with the 25th–75th percentiles in brackets.
+Decoded WebP pixels matched between backends in all four cases.
+
+[cols="2,1,2,2",options="header"]
+|===
+|Source |Tier (px) |AVX2 (ms) |GPU, device ready (ms)
+|Opaque RGB |200 |6.91 [6.84–7.08] |6.35 [6.33–6.39]
+|RGBA with transparent edges |200 |8.54 [8.43–9.30] |7.57 [7.17–8.03]
+|Opaque RGB |560 |12.27 [11.79–12.35] |9.30 [8.75–9.36]
+|RGBA with transparent edges |560 |14.58 [14.37–15.20] |9.70 [9.53–9.83]
+|===
+
+One separate-device first use took 19.13 ms to initialize Vulkan and its
+pipelines, or 28.95 ms through publication of the first opaque 200 px tier.
+
+Memory measurements used seven fresh processes per backend and case. The table
+gives median process peak RSS and RSS after releasing the displayed image while
+keeping the decode workspace and, for Vulkan, the device and buffers alive.
+All values are MiB.
+
+[cols="2,1,1,1,1,1",options="header"]
+|===
+|Source |Tier (px) |AVX2 peak |GPU peak |AVX2 after release |GPU after release
+|Opaque RGB |200 |12.83 |39.35 |6.27 |33.10
+|RGBA with transparent edges |200 |10.46 |37.05 |6.59 |33.34
+|Opaque RGB |560 |12.73 |39.18 |8.74 |35.45
+|RGBA with transparent edges |560 |12.95 |39.36 |6.60 |33.82
+|===
+
+The roughly 26.5 MiB peak RSS difference includes a separate Vulkan device and
+driver mappings. Vulkan retained 7.30 MiB of resize buffers at 200 px and
+13.98 MiB at 560 px, including a 4 MiB input buffer and a 3.13 or 8.75 MiB
+intermediate. The AVX2 intermediate was one 16 KiB row. Buffer allocations
+overlap process accounting on this integrated GPU. The incremental cost of
+sharing the GUI device remains unmeasured. See
+link:91_design_decisions.adoc#DEC-008[the thumbnail backend decision].
 
 [[historical-vendor-measurement-method]]
 === Shared method for the 2026-10-18 vendor comparisons
@@ -43,10 +99,10 @@ the gains did not justify the additional planning and composite bookkeeping.
 [[shared-local-msaa-comparison-2026-10-23]]
 === Shared local MSAA comparison (2026-10-23)
 
-Compared separate release binaries against commit `9b49886b60ce8955c243440b5ca0992118556605`
-on Radeon 780M / RADV, Mesa 26.2.5. The baseline already has local Waveform
-attachments; this comparison measures unifying the other multisampled materials
-and ordinary GPUI Paths, not the earlier full-window-to-local Waveform change.
+The baseline renderer already used local MSAA attachments for Waveform.
+The comparison renderer extended shared local MSAA scratch to the other
+multisampled materials and ordinary GPUI Paths. Both ran as separate release
+binaries on Radeon 780M / RADV with Mesa 26.2.5.
 
 At the measured revision, successful 192x128, 4x-MSAA synthetic frames retained
 the following nominal attachment bytes. These describe renderer-owned capacity

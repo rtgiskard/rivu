@@ -171,6 +171,15 @@ and equivalent failure/retirement evidence. Per-image budgets do not establish a
 window-wide decoded/GPU cap. See link:22_cache.adoc[Artwork retention] and
 link:23_visuals.adoc#artwork-composition-and-animation[Artwork animation].
 
+Keep static album thumbnail generation on the CPU decode seat (implemented 2026-11-24).
+On x86-64, select AVX2 for vertical triangle
+filtering when available. The scalar path serves other CPUs and trailing pixels.
+Both paths preserve the pixels stored in existing lossless WebP tiers. A warm
+Vulkan device reduced cold-generation latency, especially at 560 px, at the cost
+of retained resize buffers and device setup. Reconsider GPU generation if a
+representative workload using the GUI's existing device justifies its incremental
+memory cost. See the link:25_gpu_measurements.adoc#album-thumbnail-generation[thumbnail measurements].
+
 Infrequent, user-initiated artwork cleanup may delete in-use files, avoiding
 cross-process file-lock coordination. Keep process-local shared ownership without
 adding automatic cache invalidation or recovery. See

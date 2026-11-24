@@ -1,3 +1,5 @@
+mod vertical;
+
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -261,6 +263,7 @@ fn resize_bgra(
     let source_width = view.width() as usize;
     let source = view.as_raw().as_chunks::<4>().0;
     let alpha = source.iter().any(|pixel| pixel[3] != 255);
+    let accumulate = vertical::accumulator(alpha);
     let ResizeWorkspace {
         taps,
         spans,
@@ -295,23 +298,7 @@ fn resize_bgra(
             .chunks_exact(source_width)
             .zip(taps.iter())
         {
-            if alpha {
-                // Premultiply on read at 16-bit precision, without a source copy.
-                for (accumulator, pixel) in row.iter_mut().zip(source_row) {
-                    let alpha = u32::from(pixel[3]);
-                    for channel in 0..3 {
-                        let premultiplied = (u32::from(pixel[channel]) * alpha * 257 + 127) / 255;
-                        accumulator[channel] += premultiplied as f32 * weight;
-                    }
-                    accumulator[3] += (alpha * 257) as f32 * weight;
-                }
-            } else {
-                for (accumulator, pixel) in row.iter_mut().zip(source_row) {
-                    for channel in 0..4 {
-                        accumulator[channel] += f32::from(pixel[channel]) * weight;
-                    }
-                }
-            }
+            accumulate(row, source_row, weight);
         }
         for (destination, &(start, offset, length)) in destination
             .as_chunks_mut::<4>()
