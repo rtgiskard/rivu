@@ -62,8 +62,9 @@ def load_audio(source, dtype="float64", *, max_frames=MAX_FRAMES, max_seconds=No
         data = reader.read(dtype=dtype, always_2d=True)
     if data.shape != shape:
         raise ValueError(f"incomplete audio: {source}")
-    if not np.isfinite(data).all():
-        raise ValueError(f"non-finite audio: {source}")
+    for start in range(0, len(data), 65536):
+        if not np.isfinite(data[start:start+65536]).all():
+            raise ValueError(f"non-finite audio: {source}")
     data.flags.writeable = False
     return Audio(data, rate)
 
@@ -123,9 +124,10 @@ def channel_metrics(reference, estimate):
         error = est-ref
         estimate_energy += float(np.dot(est, est))
         error_energy += float(np.dot(error, error))
-        peak_abs = max(peak_abs, float(np.max(np.abs(est))))
-        peak_error = max(peak_error, float(np.max(np.abs(error))))
-        overs_count += int(np.count_nonzero(np.abs(est) > 1))
+        peak_error = max(peak_error, float(np.max(np.abs(error, out=error))))
+        abs_est = np.abs(est, out=error)
+        peak_abs = max(peak_abs, float(np.max(abs_est)))
+        overs_count += int(np.count_nonzero(abs_est > 1))
     return {
         "reference_rms": float(np.sqrt(reference_energy/len(reference))),
         "estimate_rms": float(np.sqrt(estimate_energy/len(estimate))),
