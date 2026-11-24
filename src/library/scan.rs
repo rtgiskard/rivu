@@ -1,6 +1,6 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
 use super::source::{
-    CueRecord, HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, ScanTrack, SourceError,
+    CueRecord, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, ScanTrack, SourceError,
     prepare_source_batch, prepare_sources,
 };
 use crate::execution::BlockingExecutor;
@@ -212,7 +212,7 @@ where
     cancellation.check()?;
     let total = paths.len();
     let mut result = ScanResult::default();
-    let mut scratch = vec![0; HASH_CHUNK_BYTES];
+    let mut scratch = Vec::new();
     let mut processed = 0;
     progress(ScanPhase::ReadingMetadata, 0, Some(total), 0, None);
     for chunk in paths.chunks(SOURCE_BATCH_SIZE) {
@@ -459,7 +459,7 @@ where
     );
     let mut sources = HashMap::new();
     let mut cue_sources = HashSet::new();
-    let mut scratch = vec![0; HASH_CHUNK_BYTES];
+    let mut scratch = Vec::new();
     let mut cue_paths = files.iter().filter(|path| is_cue_path(path));
     loop {
         let mut prepared = Vec::new();

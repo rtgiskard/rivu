@@ -1,6 +1,6 @@
 use super::paths::{is_audio_path, logical_path};
 use super::scan::MAX_REPORTED_SCAN_ERRORS;
-use super::source::{HASH_CHUNK_BYTES, SOURCE_BATCH_SIZE, ScanRecord, prepare_source_batch};
+use super::source::{SOURCE_BATCH_SIZE, ScanRecord, prepare_source_batch};
 use super::{KnownFile, ScanCancellation};
 use crate::execution::BlockingExecutor;
 use anyhow::{Context, Result};
@@ -128,7 +128,7 @@ where
     let total = unique.len();
     drop(identities);
     let mut records = Vec::with_capacity(total);
-    let mut scratch = vec![0; HASH_CHUNK_BYTES];
+    let mut scratch = Vec::new();
     let mut unique = unique.into_iter();
     loop {
         cancellation.check()?;

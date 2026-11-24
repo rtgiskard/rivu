@@ -296,7 +296,7 @@ impl PendingSource {
         &mut self,
         ffmpeg_enabled: bool,
         cancellation: &ScanCancellation,
-        scratch: &mut [u8],
+        scratch: &mut Vec<u8>,
         budget: Option<&super::import_budget::ImportBudget>,
     ) -> Result<Option<ScanRecord>> {
         cancellation.check()?;
@@ -348,6 +348,9 @@ impl PendingSource {
             self.initialized = true;
         }
         if self.fingerprint.is_none() && self.hashed < size {
+            if scratch.is_empty() {
+                scratch.resize(HASH_CHUNK_BYTES, 0);
+            }
             let length = (size - self.hashed).min(scratch.len() as u64) as usize;
             let hasher = self
                 .hasher

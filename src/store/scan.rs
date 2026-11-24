@@ -974,6 +974,9 @@ impl Store {
                     record.path.as_path()
                 }
             };
+            if excluded_directories.is_empty() {
+                return false;
+            }
             // Only directory exclusions produced by the nearest explicit scan apply.
             let Some(root) = owner
                 .ancestors()
