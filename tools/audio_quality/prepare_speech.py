@@ -6,12 +6,16 @@ noisy recordings or listening. Inputs/outputs are never clipped or normalized
 independently. Output directory must not exist.
 """
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+
+if __package__:
+    from .evaluate import identity
+else:
+    from evaluate import identity
 
 
 def main():
@@ -51,17 +55,18 @@ def main():
     for name, noise in noises.items():
         noise_power = float(np.mean(noise ** 2))
         for snr in [-5, 0, 5, 15]:
-            scaled = noise * np.sqrt(clean_power / (10 ** (snr / 10) * noise_power))
+            mixed = noise * np.sqrt(clean_power / (10 ** (snr / 10) * noise_power))
+            np.add(clean, mixed, out=mixed)
             path = output / f"{name}_{snr:+d}dB.wav"
-            sf.write(path, clean + scaled, rate, subtype="FLOAT")
+            sf.write(path, mixed, rate, subtype="FLOAT")
             cases.append({"name": name, "snr_db": snr, "path": path.name,
-                          "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                          "peak": float(np.max(np.abs(clean + scaled)))})
+                          "sha256": identity(path)["sha256"],
+                          "peak": float(np.max(np.abs(mixed)))})
     manifest = {
-        "schema": 2, "source": str(source), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "schema": 2, "source": str(source), "source_sha256": identity(source)["sha256"],
         "provenance": args.provenance, "seed": args.seed, "rate": rate, "frames": clean.size,
         "reference": {"name": "clean", "snr_db": None, "path": "clean.wav",
-                      "sha256": hashlib.sha256((output / "clean.wav").read_bytes()).hexdigest()},
+                      "sha256": identity(output / "clean.wav")["sha256"]},
         "shared_reference_rms": 0.08,
         "noise_kind": "deterministic synthetic; no claim of real-world noise coverage", "cases": cases,
     }

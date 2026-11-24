@@ -45,7 +45,11 @@ def main():
                 if info.file_size > 4_000_000:
                     raise ValueError(f"oversized input member: {member}")
                 original = archive.read(info)
-                audio, rate = sf.read(io.BytesIO(original), dtype="float64", always_2d=True)
+                with sf.SoundFile(io.BytesIO(original)) as source:
+                    # PCM_16 samples are exact in float32. Validate other sources before narrowing.
+                    dtype = "float32" if source.format == "WAV" and source.subtype == "PCM_16" else "float64"
+                    audio = source.read(dtype=dtype, always_2d=True)
+                    rate = source.samplerate
                 if rate != 48_000 or audio.shape[1] != 1 or not np.isfinite(audio).all():
                     raise ValueError(f"unexpected source format: {member}")
                 destination = root / kind / name

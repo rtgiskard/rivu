@@ -9,7 +9,6 @@ documented Al James excerpt). Selection is resolved and bound to SHA256, so inpu
 order and identical-content renames do not change diagnostic membership.
 """
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -38,7 +37,7 @@ def main():
     for source in sources:
         if source.stat().st_size > 20_000_000:
             raise ValueError("select a small reference excerpt, not an unbounded track")
-        hashes[source] = hashlib.sha256(source.read_bytes()).hexdigest()
+        hashes[source] = identity(source)["sha256"]
     diagnostic_hashes = {hashes[source] for source in diagnostic_sources}
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=False)
