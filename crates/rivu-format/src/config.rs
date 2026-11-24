@@ -1143,13 +1143,33 @@ pub fn normalize_language(language: &str) -> &str {
 
 /// Normalize an absolute logical path without resolving symlinks or requiring it to exist.
 pub fn logical_path(path: &Path) -> Result<PathBuf> {
-    let mut normalized = if path.is_absolute() {
+    let normalized = if path.is_absolute() {
         PathBuf::with_capacity(path.as_os_str().len())
     } else {
         let mut directory = std::env::current_dir().context("resolve current directory")?;
         directory.reserve(path.as_os_str().len());
         directory
     };
+    Ok(append_logical_components(normalized, path))
+}
+
+/// Resolve a playlist-style path against an already normalized absolute directory.
+pub fn logical_path_from(parent: &Path, path: &Path) -> PathBuf {
+    let mut base = PathBuf::with_capacity(
+        path.as_os_str().len()
+            + if path.is_absolute() {
+                0
+            } else {
+                parent.as_os_str().len() + 1
+            },
+    );
+    if !path.is_absolute() {
+        base.push(parent);
+    }
+    append_logical_components(base, path)
+}
+
+fn append_logical_components(mut normalized: PathBuf, path: &Path) -> PathBuf {
     for component in path.components() {
         match component {
             Component::CurDir => {}
@@ -1159,7 +1179,7 @@ pub fn logical_path(path: &Path) -> Result<PathBuf> {
             _ => normalized.push(component.as_os_str()),
         }
     }
-    Ok(normalized)
+    normalized
 }
 
 /// Maximum UTF-8 TOML size accepted by readers, parsers, and serializers (4 MiB).

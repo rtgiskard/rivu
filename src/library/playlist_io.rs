@@ -353,12 +353,7 @@ async fn parse_m3u_paths(
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                let item_path = Path::new(line);
-                let item_path = if item_path.is_absolute() {
-                    logical_path(item_path)?
-                } else {
-                    logical_path(&parent.join(item_path))?
-                };
+                let item_path = rivu_format::config::logical_path_from(parent, Path::new(line));
                 if let Some(roots) = &roots {
                     ensure!(
                         roots.iter().any(|root| item_path.starts_with(root)),
@@ -665,13 +660,23 @@ async fn write_relative_path(
     Ok(())
 }
 
-fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
-    let mut parent_components = parent.components().peekable();
-    let mut target_components = target.components().peekable();
-    while parent_components.peek().is_some() && parent_components.peek() == target_components.peek()
-    {
+fn path_relative_to<'a>(parent: &Path, target: &'a Path) -> std::borrow::Cow<'a, Path> {
+    let mut parent_components = parent.components();
+    let mut target_components = target.components();
+    while let Some(component) = parent_components.clone().next() {
+        if Some(component) != target_components.clone().next() {
+            break;
+        }
         parent_components.next();
         target_components.next();
+    }
+    if parent_components.as_path().as_os_str().is_empty() {
+        let suffix = target_components.as_path();
+        return std::borrow::Cow::Borrowed(if suffix.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            suffix
+        });
     }
     let mut relative = PathBuf::new();
     for component in parent_components {
@@ -682,11 +687,7 @@ fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
     for component in target_components {
         relative.push(component.as_os_str());
     }
-    if relative.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        relative
-    }
+    std::borrow::Cow::Owned(relative)
 }
 
 #[cfg(test)]
