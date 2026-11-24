@@ -1566,7 +1566,11 @@ impl BrowserColumns {
                 (if row.missing { "󰩋" } else { " " }, colors.warning),
             ] {
                 spans.push(Span::styled(
-                    cell_text(symbol, 2, false),
+                    if symbol == " " {
+                        Cow::Borrowed("  ")
+                    } else {
+                        Cow::Owned(cell_text(symbol, 2, false))
+                    },
                     Style::default().fg(color),
                 ));
             }
@@ -1632,34 +1636,41 @@ fn cell_text(text: &str, width: usize, right: bool) -> String {
     if width == 0 {
         return String::new();
     }
-    let mut output = String::with_capacity(width);
+    let clean = cell_clean(text);
+    let mut end = 0;
     let mut used = 0;
     let mut clipped = false;
-    for grapheme in cell_clean(text).graphemes(true) {
+    for grapheme in clean.graphemes(true) {
         let cells = Span::raw(grapheme).width();
         if used + cells > width {
             clipped = true;
             break;
         }
-        output.push_str(grapheme);
+        end += grapheme.len();
         used += cells;
     }
     if clipped {
         while used >= width {
-            let (index, last) = output
+            let (index, last) = clean[..end]
                 .grapheme_indices(true)
                 .next_back()
                 .expect("occupied cell");
             used -= Span::raw(last).width();
-            output.truncate(index);
+            end = index;
         }
-        output.push('…');
         used += 1;
     }
+    let padding = width - used;
+    let mut output = String::with_capacity(end + padding + usize::from(clipped) * '…'.len_utf8());
     if right {
-        output.insert_str(0, &" ".repeat(width - used));
-    } else {
-        output.extend(std::iter::repeat_n(' ', width - used));
+        output.extend(std::iter::repeat_n(' ', padding));
+    }
+    output.push_str(&clean[..end]);
+    if clipped {
+        output.push('…');
+    }
+    if !right {
+        output.extend(std::iter::repeat_n(' ', padding));
     }
     output
 }
