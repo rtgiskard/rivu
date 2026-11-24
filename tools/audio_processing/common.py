@@ -20,7 +20,7 @@ def require(condition, code, message):
 
 def digest_stream(stream):
     h = hashlib.sha256()
-    for block in iter(lambda: stream.read(1024 * 1024), b""):
+    while block := stream.read(256 * 1024):
         h.update(block)
     return h.hexdigest()
 

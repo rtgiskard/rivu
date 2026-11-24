@@ -28,7 +28,7 @@ MAX_CHANNELS = 8
 def _identify_stream(path, stream):
     digest = hashlib.sha256()
     size = 0
-    while block := stream.read(1024 * 1024):
+    while block := stream.read(256 * 1024):
         digest.update(block)
         size += len(block)
     return {"path": str(path), "sha256": digest.hexdigest(), "bytes": size}
