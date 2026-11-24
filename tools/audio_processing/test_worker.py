@@ -434,6 +434,44 @@ class SignalTests(unittest.TestCase):
                 self.assertEqual(int(np.argmax(output[:,1])),rate//2)
                 self.assertTrue(np.isfinite(output).all())
 
+    def test_separation_packets_and_peaks(self):
+        import numpy as np
+        from runtime import worker
+        from types import SimpleNamespace
+
+        stride = worker.MAX_FRAME_BYTES // 8
+        frames = 2 * stride + 3
+        audio = np.linspace(-1, 1, frames * 2, dtype="float32").reshape(frames, 2)
+        vocals = audio[:, ::-1]  # Strided stereo model result.
+        audio[stride, 0] = -2
+        audio[-1, 1] = 4
+        source = SimpleNamespace(window=lambda left, right: audio[left:right], finish=lambda: "source")
+        writes = []
+
+        def write_pcm(stem, packet):
+            self.assertTrue(packet.flags.c_contiguous)
+            self.assertEqual(packet.dtype, np.dtype("<f4"))
+            writes.append((stem, packet.tobytes()))
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            bundle_fixture(base, "separate", "melband_roformer_kim")
+            request = {"operation":"separate", "sample_rate":8000, "channels":2, "frames":frames,
+                       "model_manifest":str(base / "manifest.json")}
+            with patch.object(worker, "build_engine", return_value=(8000, lambda samples: vocals)), \
+                 patch.object(worker, "deny_network"), patch("common.importlib.metadata.version", return_value="1"), \
+                 patch.dict(os.environ):
+                _, report = worker._process_validated(
+                    request, source, write_pcm, lambda *a, **kw: None, streaming=False)
+                residual = audio - vocals
+                expected = [(stem, samples[start:start+stride].astype("<f4", copy=False).tobytes())
+                            for stem, samples in (("vocals", vocals), ("accompaniment", residual))
+                            for start in range(0, frames, stride)]
+                self.assertEqual(writes, expected)
+                self.assertEqual(report["metrics"]["output_peaks"],
+                                 {"vocals":float(np.max(np.abs(vocals))),
+                                  "accompaniment":float(np.max(np.abs(residual)))})
+
 @unittest.skipUnless(importlib.util.find_spec("numpy") and importlib.util.find_spec("soundfile"),
                      "NumPy and soundfile required for real WAV container behavior")
 class ExplicitExportTests(unittest.TestCase):

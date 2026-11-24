@@ -6,8 +6,9 @@ kind, a uint32 little-endian payload size, and at most 65536 payload bytes. Kind
 is UTF-8 JSON, 1 is interleaved float32-le input, and 2 is
 the empty input-end marker, which must be followed immediately by stdin EOF.
 Each process handles one task; the producer must close stdin without waiting for
-completion. Output kinds 17/18/19 are speech/vocals/accompaniment
-PCM at the exact source format. Dry speech sends no PCM in either direction:
+completion. Output kinds 17/18/19 are speech/vocals/accompaniment PCM at the
+exact source format. Discard all PCM on error or unsuccessful exit, even if a
+stem appears complete. Dry speech sends no PCM in either direction:
 input-end/EOF and a validated speech="input" completion retain caller storage.
 Only explicit export.py/evaluation writes files, including dry PCM exports.
 
@@ -157,22 +158,24 @@ def build_engine(manifest, base, device, controls=None):
                                atten_lim_db=controls.get("attenuation_limit_db", 80)).cpu().numpy().T
         return 48000, run
 
-def read_exact(stream, count):
+def read_exact(stream, count, scratch=None):
     common.require(0 <= count <= MAX_FRAME_BYTES, "protocol", "frame exceeds 64 KiB")
-    data = bytearray(count)
+    data = bytearray(count) if scratch is None else scratch[:count]
+    target = memoryview(data) if scratch is None else data
     offset = 0
     while offset < count:
-        chunk = stream.read(count-offset)
-        common.require(bool(chunk), "protocol", "truncated frame")
-        data[offset:offset+len(chunk)] = chunk
-        offset += len(chunk)
+        received = stream.readinto(target[offset:] if offset else target)
+        common.require(type(received) is int and 0 <= received <= count-offset,
+                "protocol", "invalid frame read count")
+        common.require(received != 0, "protocol", "truncated frame")
+        offset += received
     return data
 
 
-def read_frame(stream):
-    header = read_exact(stream, 5)
+def read_frame(stream, scratch=None):
+    header = read_exact(stream, 5, scratch)
     kind, size = struct.unpack("<BI", header)
-    return kind, read_exact(stream, size)
+    return kind, read_exact(stream, size, scratch)
 
 
 def write_frame(stream, kind, payload):
@@ -191,6 +194,8 @@ class StreamInput:
         self.buffer = None
         self.left = self.right = self.received = 0
         self.pending = memoryview(b"")
+        # Refill only after the pending slice has been copied into a window.
+        self.frame_scratch = None if self.reuse_input else memoryview(bytearray(MAX_FRAME_BYTES))
 
     def window(self, left, right):
         import numpy as np
@@ -205,12 +210,12 @@ class StreamInput:
         offset = 0
         while offset < len(target):
             if not self.pending:
-                kind, payload = read_frame(self.stream)
+                kind, payload = read_frame(self.stream, self.frame_scratch)
                 common.require(kind == INPUT_PCM and len(payload) and len(payload) % (self.channels*4) == 0,
                         "protocol", "expected aligned input PCM")
                 self.received += len(payload)//(self.channels*4)
                 common.require(self.received <= self.frames, "protocol", "input exceeds declared frames")
-                self.pending = memoryview(payload)
+                self.pending = payload
             count = min(len(target)-offset, len(self.pending))
             target[offset:offset+count] = self.pending[:count]
             self.pending = self.pending[count:]
@@ -222,7 +227,7 @@ class StreamInput:
         expected = 0 if self.reuse_input else self.frames
         common.require(self.right == expected and self.received == expected and not self.pending,
                 "protocol", "input frame count mismatch")
-        kind, payload = read_frame(self.stream)
+        kind, payload = read_frame(self.stream, self.frame_scratch)
         common.require(kind == INPUT_END and not payload, "protocol", "expected empty input end marker")
         common.require(not self.stream.read(1), "protocol", "unexpected data after input end marker")
         self.buffer = None
@@ -278,6 +283,9 @@ def _process_validated(request, source, write_pcm, emit, *, streaming):
         wall_start = time.perf_counter()
         cpu_start = time.process_time()
     step, context = core_seconds*rate, context_seconds*rate
+    stride = MAX_FRAME_BYTES//(channels*4)
+    if request["operation"] == "separate":
+        residual = np.empty((min(frames, stride), channels), dtype="<f4")
     for begin in range(0, frames, step):
         end = min(frames, begin+step)
         left, right = max(0, begin-context), min(frames, end+context)
@@ -319,19 +327,28 @@ def _process_validated(request, source, write_pcm, emit, *, streaming):
                 if wet != 1.0:
                     result = original*(1.0-wet) + result*wet
             del converted, inferred, restored
-        for stem in stems:
-            chunk = original-result if stem == "accompaniment" else result
-            common.require(np.isfinite(chunk).all(), "inference_output", "nonfinite output; refusing sanitization")
-            if collect_report:
-                io_start = time.perf_counter()
-            # Transport copies at most 64 KiB, even for a strided model result.
-            stride = MAX_FRAME_BYTES//(channels*4)
-            for index in range(0, len(chunk), stride):
-                write_pcm(stem, np.ascontiguousarray(chunk[index:index+stride], dtype="<f4"))
-            if collect_report:
-                sample_io_seconds += time.perf_counter()-io_start
-                peaks[stem] = max(peaks[stem], abs(float(np.min(chunk))), abs(float(np.max(chunk))))
-            del chunk
+            common.require(np.isfinite(result).all(), "inference_output", "nonfinite output; refusing sanitization")
+        target = stems[0]
+        if collect_report:
+            io_start = time.perf_counter()
+        for index in range(0, len(result), stride):
+            write_pcm(target, np.ascontiguousarray(result[index:index+stride], dtype="<f4"))
+        if collect_report:
+            sample_io_seconds += time.perf_counter()-io_start
+            peaks[target] = max(peaks[target], abs(float(np.min(result))), abs(float(np.max(result))))
+        if request["operation"] == "separate":
+            for index in range(0, len(result), stride):
+                stop = min(index+stride, len(result))
+                packet = residual[:stop-index]
+                np.subtract(original[index:stop], result[index:stop], out=packet)
+                low, high = float(packet.min()), float(packet.max())
+                common.require(math.isfinite(low) and math.isfinite(high), "inference_output", "nonfinite output; refusing sanitization")
+                if collect_report:
+                    peaks["accompaniment"] = max(peaks["accompaniment"], abs(low), abs(high))
+                    io_start = time.perf_counter()
+                write_pcm("accompaniment", packet)
+                if collect_report:
+                    sample_io_seconds += time.perf_counter()-io_start
         if collect_report:
             block_energy = float(np.einsum("ij,ij->", original, original, dtype=np.float64, optimize=False))
             input_energy += block_energy

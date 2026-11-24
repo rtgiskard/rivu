@@ -42,10 +42,10 @@ def input_stream(request, audio):
 class FramingTests(unittest.TestCase):
     def test_fragmented_frames_limits_and_truncated_prefixes(self):
         class Fragmented(io.BytesIO):
-            def read(self, count):
-                if not 0 <= count <= worker.MAX_FRAME_BYTES:
+            def readinto(self, target):
+                if len(target) > worker.MAX_FRAME_BYTES:
                     raise AssertionError("unbounded read")
-                return super().read(min(count, 3))
+                return super().readinto(target[:3])
         wire = b"\x11\x04\x00\x00\x00abcd"
         self.assertEqual(worker.read_frame(Fragmented(wire)), (17, bytearray(b"abcd")))
         for end in range(len(wire)):
@@ -62,6 +62,15 @@ class FramingTests(unittest.TestCase):
             worker.write_frame(output, 17, payload + b"x")
         self.assertEqual(output.getvalue(), wire)
 
+    def test_invalid_readinto_counts_are_protocol_errors(self):
+        class InvalidCount:
+            def readinto(self, target):
+                return count
+
+        for count in (None, False, True, -1, 6, 1.0):
+            with self.subTest(count=count), self.assertRaisesRegex(common.WorkerError, "read count"):
+                worker.read_frame(InvalidCount())
+
     def test_unknown_fields_and_invalid_dimensions_are_rejected(self):
         request = {"version":worker.VERSION,"task_id":"test","operation":"speech","sample_rate":8000,
                    "channels":1,"frames":8,"model_manifest":"/manifest.json"}
@@ -77,7 +86,15 @@ class FramingTests(unittest.TestCase):
     def test_pcm_window_overlap_is_bounded_and_exact(self):
         import numpy as np
         audio = np.arange(10000, dtype="float32").reshape(-1, 2)
-        stream = io.BytesIO()
+        class TrackingStream(io.BytesIO):
+            def readinto(self, target):
+                if len(target) > 5:
+                    if hasattr(self, "storage") and target.obj is not self.storage:
+                        raise AssertionError("PCM frame storage was replaced")
+                    self.storage = target.obj
+                return super().readinto(target)
+
+        stream = TrackingStream()
         for offset in range(0, len(audio), 113):
             worker.write_frame(stream, worker.INPUT_PCM, memoryview(audio[offset:offset+113]).cast("B"))
         worker.write_frame(stream, worker.INPUT_END, b"")
@@ -88,6 +105,7 @@ class FramingTests(unittest.TestCase):
             self.assertLessEqual(source.buffer.nbytes, 1700*2*4)
         self.assertIsNone(source.finish())
         self.assertIsNone(source.buffer)
+        self.assertTrue(hasattr(stream, "storage"))
 
     def test_input_end_and_sample_counts_are_mandatory(self):
         import numpy as np
@@ -296,6 +314,8 @@ class LocalBackendTransportTests(unittest.TestCase):
             bundle_fixture(base, operation, "MossFormer2_SE_48K" if operation == "speech" else "melband_roformer_kim")
             audio = np.linspace(-1.25, 1.25, frames*channels, dtype="<f4").reshape(-1, channels)
             audio[0, 0] = -0.0
+            if inference_failure == "residual_overflow":
+                audio[-1] = np.finfo("float32").max
             request = {"version":worker.VERSION,"task_id":"local-transport","operation":operation,"sample_rate":8000,
                        "channels":channels,"frames":frames,"model_manifest":str(base/"manifest.json"),"threads":1,
                        "parameters":{"wet_mix":wet} if operation == "speech" else {"overlap":0.75}}
@@ -319,8 +339,9 @@ def audit(event, args):
         mutations.append((event, args))
         raise AssertionError("implicit filesystem mutation: " + event)
 sys.addaudithook(audit)
-worker.CORE_SECONDS, worker.CONTEXT_SECONDS = 1, 1
 dry, failure = sys.argv[2] == "True", sys.argv[3]
+if failure != "residual_overflow":
+    worker.CORE_SECONDS, worker.CONTEXT_SECONDS = 1, 1
 def check_packages(manifest):
     if dry:
         raise AssertionError("dry processing loaded model dependencies")
@@ -333,6 +354,8 @@ def infer(samples):
         return samples[:-1]
     if failure == "nonfinite":
         return np.full_like(samples, np.nan)
+    if failure == "residual_overflow":
+        return -samples
     print("bounded model diagnostic")
     return samples * np.float32(0.5)
 def build_engine(*args):
@@ -347,6 +370,8 @@ if sys.argv[4] != "None":
     original_read_frame, original_write_frame = worker.read_frame, worker.write_frame
     state = {"end": False, "eof": False}
     class GuardedInput:
+        def readinto(self, target):
+            return sys.__stdin__.buffer.readinto(target)
         def read(self, count):
             if state["end"]:
                 assert count == 1
@@ -359,8 +384,8 @@ if sys.argv[4] != "None":
     class Input:
         buffer = GuardedInput()
     sys.stdin = Input()
-    def read_frame(stream):
-        kind, payload = original_read_frame(stream)
+    def read_frame(stream, scratch=None):
+        kind, payload = original_read_frame(stream, scratch)
         if kind == worker.INPUT_END:
             state["end"] = True
         return kind, payload
@@ -465,6 +490,18 @@ raise SystemExit(result)
         np.testing.assert_array_equal(outputs[18], audio*0.5)
         np.testing.assert_array_equal(outputs[19].view("uint32"), (audio-outputs[18]).view("uint32"))
         self.validate_event_schema(events)
+
+    def test_late_residual_overflow_ends_stream_after_finite_packets(self):
+        import numpy as np
+        stride = worker.MAX_FRAME_BYTES // 8
+        completed, audio, events, outputs = self.run_backend(
+            "separate", frames=2*stride+3, inference_failure="residual_overflow")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual((events[-1]["type"], events[-1]["code"]), ("error", "inference_output"))
+        self.assertNotIn("complete", [event["type"] for event in events])
+        self.assertEqual(set(outputs), {18, 19})
+        np.testing.assert_array_equal(outputs[18], -audio)
+        np.testing.assert_array_equal(outputs[19], 2*audio[:2*stride])
 
     def test_missing_end_after_pcm_is_failure_not_completion(self):
         completed, audio, events, outputs = self.run_backend("speech", malformed=lambda data:data[:-5])
