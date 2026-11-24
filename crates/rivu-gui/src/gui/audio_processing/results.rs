@@ -434,13 +434,12 @@ impl AudioProcessing {
         } else {
             ("", "")
         };
-        let summary = format!(
-            "{operation}{separator}{phase} · {} / {}",
-            task.completed,
-            task.total
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "?".into())
-        );
+        use std::fmt::Write as _;
+        let mut summary = format!("{operation}{separator}{phase} · {} / ", task.completed);
+        match task.total {
+            Some(total) => write!(summary, "{total}").unwrap(),
+            None => summary.push('?'),
+        }
         let mut details = format!(
             "{} #{id} · {source}\n{}\n{summary}",
             self.tr("processing-task"),
@@ -462,21 +461,25 @@ impl AudioProcessing {
                     })
                 })
                 .unwrap_or_else(|| "—".into());
-            details.push_str(&format!(
+            write!(
+                details,
                 " · {mode} · {}",
                 self.tr(if current {
                     "processing-result-current"
                 } else {
                     "processing-result-edited"
                 })
-            ));
+            )
+            .unwrap();
             if let Some(target) = task.settings.graph_target {
-                details.push_str(&format!(
+                write!(
+                    details,
                     " · {} #{}:{}",
                     self.tr("processing-result-target"),
                     target.node,
                     target.port
-                ));
+                )
+                .unwrap();
             }
         }
         let mut actions = row().min_w_0().flex_wrap().gap_1();
