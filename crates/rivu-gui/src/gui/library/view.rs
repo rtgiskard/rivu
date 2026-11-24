@@ -54,14 +54,14 @@ fn track_columns(
                 if track.artist.is_empty() {
                     "-".into()
                 } else {
-                    track.artist.clone().into()
+                    track.artist.as_str().into()
                 }
             }
             LibraryColumn::Album => {
                 if track.album.is_empty() {
                     "-".into()
                 } else {
-                    track.album.clone().into()
+                    track.album.as_str().into()
                 }
             }
             LibraryColumn::Duration => track.duration.map_or_else(
