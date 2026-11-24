@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use super::{
     paged::PagedList,
     state::{
@@ -1178,19 +1180,19 @@ fn draw_status(
             if !metadata.is_empty() {
                 metadata.push_str(" · ");
             }
-            metadata.push_str(&format!("{:.1} kHz", track.sample_rate as f64 / 1000.0));
+            write!(metadata, "{:.1} kHz", track.sample_rate as f64 / 1000.0).unwrap();
         }
         if let Some(bits) = track.bits_per_sample {
             if !metadata.is_empty() {
                 metadata.push_str(" · ");
             }
-            metadata.push_str(&format!("{bits} bit"));
+            write!(metadata, "{bits} bit").unwrap();
         }
         if let Some(bitrate) = track.bitrate_bps {
             if !metadata.is_empty() {
                 metadata.push_str(" · ");
             }
-            metadata.push_str(&format!("{:.0} kbps", bitrate as f64 / 1000.0));
+            write!(metadata, "{:.0} kbps", bitrate as f64 / 1000.0).unwrap();
         }
         frame.render_widget(
             Paragraph::new(cell_text(&metadata, columns[1].width as usize, true))
