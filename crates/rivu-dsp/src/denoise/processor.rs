@@ -95,11 +95,16 @@ impl ProfileCollector {
             self.poisoned = true;
             bail!("noise profile capture cancelled");
         }
-        for frame in input.chunks_exact(self.channels) {
+        let mut remaining = input;
+        while !remaining.is_empty() {
             let start = self.filled * self.channels;
-            self.input[start..start + self.channels].copy_from_slice(frame);
-            self.filled += 1;
-            self.captured_frames += 1;
+            let count = remaining.len().min(self.input.len() - start);
+            let (chunk, rest) = remaining.split_at(count);
+            self.input[start..start + count].copy_from_slice(chunk);
+            remaining = rest;
+            let copied_frames = count / self.channels;
+            self.filled += copied_frames;
+            self.captured_frames += copied_frames as u64;
             if self.filled == self.size {
                 if cancel() {
                     self.poisoned = true;
