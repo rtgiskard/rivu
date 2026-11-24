@@ -13,15 +13,17 @@ pub(super) fn filtered(source: &RenderImage) -> Arc<RenderImage> {
         source.as_bytes(0).expect("decoded artwork frame"),
     )
     .expect("decoded artwork dimensions");
-    // The atmosphere needs only low frequencies. Nearest sampling bounds the
-    // work to the small output instead of allocating a cover-sized filter pass.
-    let mut sampled =
-        image::imageops::resize(&source, SIDE, SIDE, image::imageops::FilterType::Nearest);
-    for pixel in sampled.pixels_mut() {
-        for channel in 0..3 {
-            pixel[channel] = ((u16::from(pixel[channel]) * u16::from(pixel[3]) + 127) / 255) as u8;
+    // Sample the center of each output cell without filtering whole source rows.
+    let center = |index: u32, extent: u32| (2 * index + 1) * extent / (2 * SIDE);
+    let columns: [u32; SIDE as usize] = std::array::from_fn(|x| center(x as u32, source.width()));
+    let sampled = ImageBuffer::from_fn(SIDE, SIDE, |x, y| {
+        let mut pixel = *source.get_pixel(columns[x as usize], center(y, source.height()));
+        let alpha = u16::from(pixel[3]);
+        for channel in &mut pixel.0[..3] {
+            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
         }
-    }
+        pixel
+    });
     let mut blurred = image::imageops::blur(&sampled, 10.0);
     for pixel in blurred.pixels_mut() {
         if pixel[3] != 0 {
@@ -53,6 +55,18 @@ mod tests {
         for pixel in result.as_bytes(0).unwrap().as_chunks::<4>().0 {
             assert_eq!(*pixel, [31, 67, 191, 255]);
         }
+    }
+
+    #[test]
+    fn non_square_atmosphere_samples_pixel_centers_on_both_axes() {
+        let pixels = ImageBuffer::from_fn(173, 29, |x, y| {
+            Rgba([(x * 43 + y * 73) as u8, (x ^ y) as u8, y as u8, 255])
+        });
+        let expected =
+            image::imageops::resize(&pixels, SIDE, SIDE, image::imageops::FilterType::Nearest);
+        let expected = image::imageops::blur(&expected, 10.0);
+        let result = filtered(&RenderImage::new([image::Frame::new(pixels)]));
+        assert_eq!(result.as_bytes(0).unwrap(), expected.as_raw());
     }
 
     #[test]
