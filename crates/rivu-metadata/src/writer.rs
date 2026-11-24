@@ -236,7 +236,8 @@ fn read_target(file: &mut File, kind: FileType) -> Result<(Tag, Vec<TagType>)> {
         .remove(target_type)
         .unwrap_or_else(|| Tag::new(target_type));
     let mut secondary = Vec::new();
-    for tag in parsed.tags() {
+    while let Some(kind) = parsed.tags().first().map(Tag::tag_type) {
+        let mut tag = parsed.remove(kind).expect("tag type was present");
         if !secondary.contains(&tag.tag_type()) {
             secondary.push(tag.tag_type());
         }
@@ -251,7 +252,7 @@ fn read_target(file: &mut File, kind: FileType) -> Result<(Tag, Vec<TagType>)> {
                     | ItemKey::DiscTotal
             ) {
                 if crate::positive_number(&target, item.key()).is_some()
-                    || crate::positive_number(tag, item.key()).is_none()
+                    || crate::positive_number(&tag, item.key()).is_none()
                 {
                     continue;
                 }
@@ -261,9 +262,12 @@ fn read_target(file: &mut File, kind: FileType) -> Result<(Tag, Vec<TagType>)> {
                 target.push(item.clone());
             }
         }
-        for picture in tag.pictures() {
-            if !target.pictures().contains(picture) {
-                target.push_picture(picture.clone());
+        let mut index = 0;
+        while index < tag.pictures().len() {
+            if target.pictures().contains(&tag.pictures()[index]) {
+                index += 1;
+            } else {
+                target.push_picture(tag.remove_picture(index));
             }
         }
     }
