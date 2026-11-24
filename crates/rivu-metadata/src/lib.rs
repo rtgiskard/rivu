@@ -131,7 +131,7 @@ pub fn read_tags(file: &RegularFile, encoding: TagEncoding) -> Result<Option<Tag
 
 fn read_descriptive_tags(file: &File, encoding: TagEncoding) -> Result<Option<Tags>> {
     let mut tags = Tags::default();
-    Ok(read_tags_and_peak(file, encoding, Some(&mut tags))?.map(|_| tags))
+    Ok(read_tags_and_peak(file, encoding, Some(&mut tags), false)?.map(|_| tags))
 }
 
 /// Read runtime playback peak alongside tags in one pass, without adding it to
@@ -139,20 +139,21 @@ fn read_descriptive_tags(file: &File, encoding: TagEncoding) -> Result<Option<Ta
 pub fn read_playback_tags(file: &RegularFile) -> Result<Option<(Tags, Option<f64>)>> {
     let mut tags = Tags::default();
     Ok(
-        read_tags_and_peak(file.as_file(), TagEncoding::Declared, Some(&mut tags))?
+        read_tags_and_peak(file.as_file(), TagEncoding::Declared, Some(&mut tags), true)?
             .map(|peak| (tags, peak)),
     )
 }
 
 /// Read only the runtime peak. Unsupported containers and missing peaks return None.
 pub fn read_playback_peak(file: &RegularFile) -> Result<Option<f64>> {
-    Ok(read_tags_and_peak(file.as_file(), TagEncoding::Declared, None)?.flatten())
+    Ok(read_tags_and_peak(file.as_file(), TagEncoding::Declared, None, true)?.flatten())
 }
 
 fn read_tags_and_peak(
     file: &File,
     encoding: TagEncoding,
     mut descriptive: Option<&mut Tags>,
+    read_peak: bool,
 ) -> Result<Option<Option<f64>>> {
     configure_lofty(false);
     let Some(kind) = detect(file)? else {
@@ -170,7 +171,7 @@ fn read_tags_and_peak(
         if let Some(tags) = descriptive.as_deref_mut() {
             fill_missing(tags, tag);
         }
-        if peak.is_none() {
+        if read_peak && peak.is_none() {
             peak = first(tag, ItemKey::ReplayGainTrackPeak)
                 .and_then(|text| text.trim().parse::<f64>().ok())
                 .filter(|peak| peak.is_finite() && *peak > 0.0);
