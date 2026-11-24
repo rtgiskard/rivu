@@ -346,12 +346,15 @@ def _process_validated(request, source, write_pcm, emit, *, streaming):
         return completion, None
     import resource
     wall = time.perf_counter()-wall_start
+    worker_path = Path(__file__)
+    implementation_sha256 = {path.name: common.digest(path)
+                             for path in [Path(common.__file__), *sorted(worker_path.parent.glob("*.py"))]}
     report = {"outputs":dict.fromkeys(stems, True), "sample_rate":rate, "channels":channels, "frames":frames,
               "model":{**model, "files":manifest["files"],
                        "provenance":manifest.get("provenance", {})},
               "source_sha256":source_hash, "request_sha256":common.canonical_digest(request),
-              "worker_sha256":common.digest(__file__), "python":sys.version, "packages":manifest["packages"],
-              "implementation_sha256":{path.name:common.digest(path) for path in [Path(common.__file__), *sorted(Path(__file__).parent.glob("*.py"))]},
+              "worker_sha256":implementation_sha256[worker_path.name], "python":sys.version, "packages":manifest["packages"],
+              "implementation_sha256":implementation_sha256,
               "interpreter":{"path":sys.executable,"sha256":common.digest(sys.executable)},
               "installed_packages":{} if dry else {name:importlib.metadata.version(name) for name in manifest["packages"]},
               "device":"cpu" if dry else request.get("device", "cpu"), "threads":request.get("threads", 4),
