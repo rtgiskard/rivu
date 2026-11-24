@@ -331,11 +331,16 @@ impl SharedPcmWindow {
         }
         let _publishing = Publishing(&self.publishing);
         let storage = self.storage();
-        let latest = self.sequence();
-        let append = self.block(latest).filter(|previous| {
+        let latest = self.frontier();
+        let partial = (1..PCM_BLOCK_FRAMES).contains(&usize::from(latest.offset));
+        let previous = if !header.gap && partial {
+            self.block(latest.sequence)
+        } else {
+            None
+        };
+        let append = previous.filter(|previous| {
             let old = previous.header();
-            !header.gap
-                && old.epoch == header.epoch
+            old.epoch == header.epoch
                 && old.intent == header.intent
                 && old.generation == header.generation
                 && old.capture == header.capture
@@ -355,12 +360,10 @@ impl SharedPcmWindow {
                 && previous.layout() == layout
                 && previous.len() < PCM_BLOCK_FRAMES
         });
-        let incoming = header;
         let (sequence, previous_frames) = if let Some(previous) = append {
-            header = previous.header();
-            (latest, previous.len())
+            (latest.sequence, previous.len())
         } else {
-            let Some(sequence) = latest.checked_add(1) else {
+            let Some(sequence) = latest.sequence.checked_add(1) else {
                 return false;
             };
             (sequence, 0)
@@ -376,11 +379,11 @@ impl SharedPcmWindow {
         header.sequence = sequence;
         let second = PcmHeader {
             sequence: final_sequence,
-            start_frame: incoming.start_frame + first_frames as u64,
-            output_frame: incoming.output_frame + first_frames as u64,
-            media_start: incoming.media_start + first_frames as f64 * incoming.media_step,
+            start_frame: header.start_frame + first_frames as u64,
+            output_frame: header.output_frame + first_frames as u64,
+            media_start: header.media_start + first_frames as f64 * header.media_step,
             gap: false,
-            ..incoming
+            ..header
         };
         let mut completed = [None, None];
         for (part, (header, previous_frames, frames)) in [
@@ -407,29 +410,31 @@ impl SharedPcmWindow {
             // Any newly observed metadata or samples must also reveal invalidation
             // when a reader validates its snapshot after the acquire fence.
             fence(Ordering::Release);
-            slot.sequence.store(header.sequence, Ordering::Relaxed);
-            slot.epoch.store(header.epoch, Ordering::Relaxed);
-            slot.intent.store(header.intent, Ordering::Relaxed);
-            slot.generation.store(header.generation, Ordering::Relaxed);
-            slot.capture.store(header.capture, Ordering::Relaxed);
-            slot.start_frame
-                .store(header.start_frame, Ordering::Relaxed);
-            slot.output_frame
-                .store(header.output_frame, Ordering::Relaxed);
-            slot.media_start
-                .store(header.media_start.to_bits(), Ordering::Relaxed);
-            slot.media_step
-                .store(header.media_step.to_bits(), Ordering::Relaxed);
-            slot.sample_rate
-                .store(header.sample_rate, Ordering::Relaxed);
-            slot.gap.store(u32::from(header.gap), Ordering::Relaxed);
+            if previous_frames == 0 {
+                slot.sequence.store(header.sequence, Ordering::Relaxed);
+                slot.epoch.store(header.epoch, Ordering::Relaxed);
+                slot.intent.store(header.intent, Ordering::Relaxed);
+                slot.generation.store(header.generation, Ordering::Relaxed);
+                slot.capture.store(header.capture, Ordering::Relaxed);
+                slot.start_frame
+                    .store(header.start_frame, Ordering::Relaxed);
+                slot.output_frame
+                    .store(header.output_frame, Ordering::Relaxed);
+                slot.media_start
+                    .store(header.media_start.to_bits(), Ordering::Relaxed);
+                slot.media_step
+                    .store(header.media_step.to_bits(), Ordering::Relaxed);
+                slot.sample_rate
+                    .store(header.sample_rate, Ordering::Relaxed);
+                slot.gap.store(u32::from(header.gap), Ordering::Relaxed);
+                slot.channels.store(layout.len() as u32, Ordering::Relaxed);
+                slot.sample_offset.store(offset as u32, Ordering::Relaxed);
+                for (target, channel) in slot.layout.iter().zip(layout) {
+                    target.store(*channel, Ordering::Relaxed);
+                }
+            }
             slot.frames
                 .store((previous_frames + frames) as u32, Ordering::Relaxed);
-            slot.channels.store(layout.len() as u32, Ordering::Relaxed);
-            slot.sample_offset.store(offset as u32, Ordering::Relaxed);
-            for (target, channel) in slot.layout.iter().zip(layout) {
-                target.store(*channel, Ordering::Relaxed);
-            }
             let start = offset + previous_frames * layout.len();
             for target in &storage.samples[start..start + count] {
                 let Some(value) = samples.next() else {

@@ -565,6 +565,48 @@ fn iterator_panic_releases_publisher_without_exposing_partial_block() {
 }
 
 #[test]
+fn dishonest_split_append_leaves_frontier_unchanged_and_retry_starts_a_new_block() {
+    struct ReportsTwo(std::iter::RepeatN<f32>);
+    impl Iterator for ReportsTwo {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<f32> {
+            self.0.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (2, Some(2))
+        }
+    }
+    impl ExactSizeIterator for ReportsTwo {}
+
+    for actual in [1, 3] {
+        let owner = SharedPcmWindow::new().unwrap();
+        let prefix = PCM_BLOCK_FRAMES - 1;
+        let mut tail = header(0);
+        assert!(owner.publish(tail, &[17], std::iter::repeat_n(0.25, prefix)));
+        let frontier = owner.frontier();
+        let previous = owner.block(1).unwrap();
+        tail.start_frame += prefix as u64;
+        tail.output_frame += prefix as u64;
+        tail.media_start += prefix as f64 * tail.media_step;
+
+        assert!(!owner.publish(tail, &[17], ReportsTwo(std::iter::repeat_n(0.5, actual))));
+        assert_eq!(owner.frontier(), frontier);
+        assert!(!previous.still_current());
+        assert!(owner.block(1).is_none());
+
+        assert!(owner.publish(tail, &[17], [0.75].into_iter()));
+        let retry = owner.block(2).unwrap();
+        tail.sequence = 2;
+        assert_eq!(retry.header(), tail);
+        assert_eq!(retry.layout(), &[17]);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry.sample(0, 0), 0.75);
+    }
+}
+
+#[test]
 fn reader_rejects_malformed_and_in_progress_metadata() {
     let owner = SharedPcmWindow::new().unwrap();
     let reader = SharedPcmWindow::open(&owner.share_path()).unwrap();
