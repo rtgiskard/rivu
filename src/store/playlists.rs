@@ -185,8 +185,18 @@ impl Store {
     }
 
     fn playlist_count_matching(&self, query: Option<&str>) -> Result<usize> {
-        Ok(self.conn.prepare_cached("SELECT COUNT(*) FROM playlists WHERE id>0 AND (?1 IS NULL OR instr(lower(name),?1)>0)")?.query_row([query],
-        |row| row.get::<_, i64>(0),)? as usize)
+        if let Some(query) = query {
+            Ok(self
+                .conn
+                .prepare_cached(
+                    "SELECT COUNT(*) FROM playlists WHERE id>0 AND instr(lower(name),?1)>0",
+                )?
+                .query_row([query], |row| row.get::<_, i64>(0))? as usize)
+        } else {
+            Ok(self.conn.prepare_cached(
+                "SELECT (SELECT COUNT(*) FROM playlists)-(SELECT COUNT(*) FROM playlists WHERE id<=0)",
+            )?.query_row([], |row| row.get::<_, i64>(0))? as usize)
+        }
     }
 
     pub fn playlist_summary_page(

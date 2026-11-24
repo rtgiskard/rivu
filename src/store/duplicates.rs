@@ -156,7 +156,7 @@ impl Store {
             });
         }
         let mut query = self.conn.prepare_cached(
-            "SELECT fingerprint,COUNT(*),SUM(missing<>0),SUM(missing=0)
+            "SELECT fingerprint,COUNT(*),SUM(missing<>0)
          FROM tracks INDEXED BY tracks_fingerprint
          WHERE cue_sheet IS NULL AND fingerprint IS NOT NULL
          GROUP BY fingerprint HAVING COUNT(*)>1 ORDER BY fingerprint LIMIT ?1 OFFSET ?2",
@@ -168,12 +168,14 @@ impl Store {
                     offset.min(i64::MAX as usize) as i64
                 ],
                 |row| {
+                    let total_members = row.get::<_, i64>(1)? as usize;
+                    let missing_members = row.get::<_, i64>(2)? as usize;
                     Ok(DuplicateGroup {
                         fingerprint: fingerprint_from_row(row, 0)?
                             .expect("non-null group fingerprint"),
-                        total_members: row.get::<_, i64>(1)? as usize,
-                        missing_members: row.get::<_, i64>(2)? as usize,
-                        present_members: row.get::<_, i64>(3)? as usize,
+                        total_members,
+                        missing_members,
+                        present_members: total_members - missing_members,
                     })
                 },
             )?

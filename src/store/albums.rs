@@ -40,6 +40,13 @@ impl Store {
         let filter = "?1 IS NULL OR instr(lower(p.title),lower(COALESCE(?1,'')))>0 OR EXISTS(SELECT 1 FROM album_artists WHERE directory=p.directory AND title=p.title AND instr(lower(artist),lower(COALESCE(?1,'')))>0)";
         let total =
             self.cached_count(super::CountDomain::Albums, &[query.unwrap_or("")], || {
+                if query.unwrap_or("").is_empty() {
+                    return Ok(self
+                        .conn
+                        .prepare_cached("SELECT COUNT(*) FROM albums")?
+                        .query_row([], |row| row.get::<_, i64>(0))?
+                        as usize);
+                }
                 Ok(self
                     .conn
                     .prepare_cached(&format!("SELECT COUNT(*) FROM albums AS p WHERE {filter}"))?
