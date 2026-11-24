@@ -181,22 +181,9 @@ impl Store {
     }
 
     pub fn playlist_count(&self) -> Result<usize> {
-        self.playlist_count_matching(None)
-    }
-
-    fn playlist_count_matching(&self, query: Option<&str>) -> Result<usize> {
-        if let Some(query) = query {
-            Ok(self
-                .conn
-                .prepare_cached(
-                    "SELECT COUNT(*) FROM playlists WHERE id>0 AND instr(lower(name),?1)>0",
-                )?
-                .query_row([query], |row| row.get::<_, i64>(0))? as usize)
-        } else {
-            Ok(self.conn.prepare_cached(
-                "SELECT (SELECT COUNT(*) FROM playlists)-(SELECT COUNT(*) FROM playlists WHERE id<=0)",
-            )?.query_row([], |row| row.get::<_, i64>(0))? as usize)
-        }
+        Ok(self.conn.prepare_cached(
+            "SELECT (SELECT COUNT(*) FROM playlists)-(SELECT COUNT(*) FROM playlists WHERE id<=0)",
+        )?.query_row([], |row| row.get::<_, i64>(0))? as usize)
     }
 
     pub fn playlist_summary_page(
@@ -206,7 +193,16 @@ impl Store {
         limit: usize,
     ) -> Result<Page<PlaylistSummary>> {
         let query = search_query(query);
-        let total = self.playlist_count_matching(query.as_deref())?;
+        let total = match query.as_deref() {
+            Some(query) => {
+                self.conn
+                    .prepare_cached(
+                        "SELECT COUNT(*) FROM playlists WHERE id>0 AND instr(lower(name),?1)>0",
+                    )?
+                    .query_row([query], |row| row.get::<_, i64>(0))? as usize
+            }
+            None => self.playlist_count()?,
+        };
         if limit == 0 || offset >= total {
             return Ok(Page {
                 total,

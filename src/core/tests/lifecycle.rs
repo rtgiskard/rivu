@@ -2,6 +2,9 @@ use super::*;
 use crate::core::catalog::ScanFinished;
 use rivu_protocol::response::TaskLookup;
 
+const HIDE_PLAYLISTS: &str = "ALTER TABLE playlists RENAME TO unavailable_playlists";
+const RESTORE_PLAYLISTS: &str = "ALTER TABLE unavailable_playlists RENAME TO playlists";
+
 pub(super) fn attach_read_owner(core: &mut Core, directory: &Path) {
     core.read_queries = Some(
         query_worker::ReadQueries::start(directory.join("library.db"), Arc::clone(&core.shared))
@@ -85,10 +88,7 @@ fn incomplete_startup_domains_recover_counts_history_and_playlist_edit_tokens() 
                 "ALTER TABLE tracks RENAME TO unavailable_tracks",
                 "ALTER TABLE unavailable_tracks RENAME TO tracks",
             ),
-            "playlist_summary" => (
-                "ALTER TABLE playlists RENAME COLUMN name TO unavailable_name",
-                "ALTER TABLE playlists RENAME COLUMN unavailable_name TO name",
-            ),
+            "playlist_summary" => (HIDE_PLAYLISTS, RESTORE_PLAYLISTS),
             _ => (
                 "UPDATE tracks SET last_played='unreadable' WHERE id=1",
                 "UPDATE tracks SET last_played=42 WHERE id=1",
@@ -174,14 +174,10 @@ fn first_playlist_queries_after_partial_startup_capture_recovered_tokens() {
             core.state.library.playlist_entry_revisions = Arc::default();
             let connection =
                 rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-            connection
-                .execute_batch("ALTER TABLE playlists RENAME COLUMN name TO unavailable_name")
-                .unwrap();
+            connection.execute_batch(HIDE_PLAYLISTS).unwrap();
             assert!(core.load_initial_state().is_err());
             assert!(core.projections.playlist_tokens);
-            connection
-                .execute_batch("ALTER TABLE playlists RENAME COLUMN unavailable_name TO name")
-                .unwrap();
+            connection.execute_batch(RESTORE_PLAYLISTS).unwrap();
             core.publish();
             if worker {
                 attach_read_owner(&mut core, directory.path());
@@ -368,9 +364,7 @@ fn remaining_dirty_domains_recover_once_and_failures_wait_for_new_demand() {
     core.projections.playlist_total = true;
     core.transport.history_pending = true;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection
-        .execute_batch("ALTER TABLE playlists RENAME COLUMN name TO unavailable_name")
-        .unwrap();
+    connection.execute_batch(HIDE_PLAYLISTS).unwrap();
     core.publish();
     attach_read_owner(&mut core, directory.path());
     let transition = core.read_queries.as_ref().unwrap().fence.transition();
@@ -398,9 +392,7 @@ fn remaining_dirty_domains_recover_once_and_failures_wait_for_new_demand() {
     assert!(!core.projections.in_flight);
     assert!(core.scan_rx.try_recv().is_err());
 
-    connection
-        .execute_batch("ALTER TABLE playlists RENAME COLUMN unavailable_name TO name")
-        .unwrap();
+    connection.execute_batch(RESTORE_PLAYLISTS).unwrap();
     let (reply, response) = oneshot::channel();
     let transition = core.read_queries.as_ref().unwrap().fence.transition();
     core.business_event(dispatch::BusinessEvent::Request(Request {
@@ -1023,13 +1015,9 @@ fn failed_initial_load_preserves_saved_selection_through_recovery_and_shutdown()
         // Recreate the unpublished startup projection, not a new selection intent.
         core.state.queue = QueueState::default();
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-        connection
-            .execute_batch("ALTER TABLE playlists RENAME COLUMN name TO unavailable_name")
-            .unwrap();
+        connection.execute_batch(HIDE_PLAYLISTS).unwrap();
         assert!(core.load_initial_state().is_err());
-        connection
-            .execute_batch("ALTER TABLE playlists RENAME COLUMN unavailable_name TO name")
-            .unwrap();
+        connection.execute_batch(RESTORE_PLAYLISTS).unwrap();
         if recover {
             core.command(Command::Enqueue { track_ids: vec![4] })
                 .unwrap();
