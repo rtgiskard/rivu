@@ -45,6 +45,7 @@ class FileInput:
         self.stream = stack.enter_context(self.path.open("rb", buffering=0))
         self.identity = self._identity()
         self.reader = stack.enter_context(sf.SoundFile(self.stream))
+        self._window_buffer = None
 
     def admit(self):
         self.sha256 = self._digest()
@@ -71,10 +72,17 @@ class FileInput:
         return digest.hexdigest()
 
     def window(self, left, right):
+        """Return borrowed PCM valid until the next window read."""
         self.reader.seek(left)
-        return self.reader.read(right-left, dtype="float32", always_2d=True)
+        frames = right - left
+        if self._window_buffer is None or frames > len(self._window_buffer):
+            import numpy as np
+            self._window_buffer = None
+            self._window_buffer = np.empty((frames, self.reader.channels), dtype="float32")
+        return self.reader.read(frames, out=self._window_buffer)
 
     def finish(self):
+        self._window_buffer = None
         try:
             stat = self.path.stat()
             unchanged = ((stat.st_dev, stat.st_ino) == self.identity[:2]

@@ -32,6 +32,25 @@ class ProducerIdentityTests(unittest.TestCase):
         self.assertEqual(source.stat().st_size, replacement.stat().st_size)
         return source, replacement, original
 
+    def test_file_windows_reread_overlap_and_return_only_available_frames(self):
+        from contextlib import ExitStack
+        import numpy as np
+        import soundfile as sf
+        from export import FileInput
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            path = Path(directory) / "source.wav"
+            audio = np.arange(24, dtype="float32").reshape(12, 2)
+            sf.write(path, audio, 8000, subtype="FLOAT")
+            source = FileInput(path, stack)
+            first = source.window(0, 4)
+            np.testing.assert_array_equal(first, audio[:4])
+            first[:] = -1
+            larger = source.window(2, 8)
+            np.testing.assert_array_equal(larger, audio[2:8])
+            tail = source.window(9, 14)
+            np.testing.assert_array_equal(tail, audio[9:])
+            self.assertTrue(np.shares_memory(larger, tail))
+
     def test_export_rejects_replacement_and_in_place_changes(self):
         import numpy as np
         import soundfile as sf
@@ -583,6 +602,9 @@ class ExplicitExportTests(unittest.TestCase):
                 requested = [call.args[1] for call in reads.call_args_list]
                 self.assertTrue(all(0 < frames <= rate for frames in requested), requested)
                 self.assertEqual(sum(requested), len(audio))
+                buffers = [call.kwargs["out"] for call in reads.call_args_list]
+                self.assertEqual(buffers[0].shape, (max(requested), channels))
+                self.assertTrue(all(buffer is buffers[0] for buffer in buffers))
                 self.assertEqual(output_rate, rate)
                 self.assertEqual(events[-1][0], "complete")
                 self.assertEqual(events[-1][1]["frames"], len(audio))
