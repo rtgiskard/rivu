@@ -309,24 +309,25 @@ async fn read_frame_with<T>(
     bytes: &mut Vec<u8>,
     decode: impl FnOnce(&[u8]) -> Result<T>,
 ) -> Result<T> {
-    bytes.clear();
     release_large_buffer(bytes);
     let mut prefix = [0; 4];
-    stream.read_exact(&mut prefix[..1]).await?;
+    let received = stream.read(&mut prefix).await?;
+    if received == 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+    }
     let result = timeout(IO_TIMEOUT, async {
-        stream.read_exact(&mut prefix[1..]).await?;
+        stream.read_exact(&mut prefix[received..]).await?;
         let length = crate::framing::decode_length(prefix, MAX_FRAME)?;
-        bytes.clear();
-        if length > bytes.capacity() {
-            bytes.reserve_exact(length);
+        if length > bytes.len() {
+            bytes.reserve_exact(length - bytes.len());
+            bytes.resize(length, 0);
         }
-        bytes.resize(length, 0);
-        stream.read_exact(bytes).await?;
-        decode(bytes)
+        let body = &mut bytes[..length];
+        stream.read_exact(body).await?;
+        decode(body)
     })
     .await
     .context("Incomplete audio frame timed out");
-    bytes.clear();
     release_large_buffer(bytes);
     result?
 }
@@ -408,9 +409,41 @@ mod framing_tests {
     }
 
     #[test]
+    fn reader_completes_split_headers_and_reuses_only_the_declared_body() {
+        let wire = [4, 0, 0, 0, 9, 8, 7, 6, 1, 0, 0, 0, 5];
+        for first in 1..=4 {
+            let mut stream = (&wire[..first]).chain(&wire[first..]);
+            let mut bytes = Vec::new();
+            async_io::block_on(async {
+                let value: [u8; 4] = read_frame(&mut stream, &mut bytes).await.unwrap();
+                assert_eq!(value, [9, 8, 7, 6]);
+                let value: u8 = read_frame(&mut stream, &mut bytes).await.unwrap();
+                assert_eq!(value, 5);
+                assert_eq!(bytes, [5, 8, 7, 6]);
+            });
+        }
+    }
+
+    #[test]
+    fn reader_reports_eof_for_each_incomplete_header_or_body() {
+        let wire = [2, 0, 0, 0, 42];
+        for end in 0..=wire.len() {
+            let mut stream = &wire[..end];
+            let mut bytes = vec![99; 8];
+            let error =
+                async_io::block_on(read_frame::<[u8; 2]>(&mut stream, &mut bytes)).unwrap_err();
+            assert_eq!(
+                error.downcast::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
     fn reader_rejects_untrusted_prefixes_without_retaining_bulk_storage() {
         for (length, body) in [
             (MAX_FRAME + 1, vec![]),
+            (MAX_FRAME, vec![0]),
             (0, vec![]),
             (3, vec![0]),
             (2, vec![255, 255]),
@@ -422,7 +455,9 @@ mod framing_tests {
             let mut receiver = Async::new(receiver).unwrap();
             let mut bytes = Vec::with_capacity(MAX_FRAME);
             assert!(async_io::block_on(read_frame::<Request>(&mut receiver, &mut bytes)).is_err());
-            assert!(bytes.is_empty());
+            if length > RETAINED_BUFFER_LIMIT {
+                assert!(bytes.is_empty());
+            }
             assert!(bytes.capacity() <= RETAINED_BUFFER_LIMIT);
         }
     }
