@@ -128,8 +128,7 @@ struct SpectrumAnalyzer {
     density: Option<DensityField>,
     pcm_snapshots: Option<[Arc<Vec<[f32; 2]>>; PCM_SNAPSHOT_COUNT]>,
     spectrogram_snapshots: Option<[Arc<Vec<f32>>; SPECTRUM_SNAPSHOT_COUNT]>,
-    // Unnormalized conjugate-pair power, shared only with additional consumers.
-    // Spatial pan still needs the independently reconstructed channel powers.
+    // Unnormalized conjugate-pair power for band energy, also reusable by the spectrum.
     bin_powers: Vec<f32>,
 }
 
@@ -251,6 +250,10 @@ impl SpectrumAnalyzer {
     }
 
     fn set_visualizer_demand(&mut self, demand: VisualizerDemand) {
+        let cache_powers = demand.band_energy && (self.spectrum || demand.spectrogram);
+        if demand == self.visualizer.demand && cache_powers == !self.bin_powers.is_empty() {
+            return;
+        }
         if demand.stereo_density {
             if self.density.is_none() {
                 self.density = Some(DensityField::new(self.sample_rate));
@@ -282,7 +285,7 @@ impl SpectrumAnalyzer {
             self.visualizer.pcm = PcmSnapshot::default();
             self.pcm_snapshots = None;
         }
-        if demand.band_energy || demand.spectrogram {
+        if cache_powers {
             self.bin_powers.resize(self.rolling.len() / 2, 0.0);
         } else {
             self.bin_powers = Vec::new();
@@ -377,7 +380,7 @@ impl SpectrumAnalyzer {
             let normalization_squared = self.normalization * self.normalization;
             for bin in 1..=n / 2 {
                 let packed = self.frequency[bin];
-                let partner = self.frequency[(n - bin) % n].conj();
+                let partner = self.frequency[n - bin].conj();
                 let left = (packed + partner) * 0.5;
                 let right = (packed - partner) * Complex32::new(0.0, -0.5);
                 let left_power = left.norm_sqr();
@@ -396,9 +399,9 @@ impl SpectrumAnalyzer {
                 });
             }
         }
-        let cached_bins = if self.visualizer.demand.spectrogram && self.snapshot_spectrogram() {
-            1..n / 2 + 1
-        } else if self.visualizer.demand.band_energy {
+        let has_spectrogram = self.visualizer.demand.spectrogram && self.snapshot_spectrogram();
+        let cached_bins = if !has_spectrogram && self.spectrum && self.visualizer.demand.band_energy
+        {
             // The three drive bands are contiguous. Do not scan unused bins
             // when band energy is the only additional power consumer.
             let bins = self.drive_bins[0].0..self.drive_bins[2].1;
@@ -417,12 +420,28 @@ impl SpectrumAnalyzer {
                 let mut power = 0.0;
                 for bin in first..last {
                     let endpoint = if bin == n / 2 { 0.5 } else { 1.0 };
-                    power += self.bin_powers[bin - 1] * 0.5 * endpoint;
+                    let pair_power = if has_spectrogram || self.spectrum {
+                        self.bin_powers[bin - 1]
+                    } else {
+                        self.frequency[bin].norm_sqr() + self.frequency[n - bin].norm_sqr()
+                    };
+                    power += pair_power * 0.5 * endpoint;
                 }
                 *target = (power * self.power_normalization).sqrt();
             }
         }
         if self.spectrum {
+            if has_spectrogram {
+                // Calibration is monotonic, so the loudest calibrated bin is the band level.
+                let bins = &self.visualizer.spectrogram;
+                for (level, &(first, last)) in self.levels.iter_mut().zip(&self.bands) {
+                    *level = bins[first - 1..last - 1]
+                        .iter()
+                        .copied()
+                        .fold(f32::NEG_INFINITY, f32::max);
+                }
+                return rms;
+            }
             for (level, &(first, last)) in self.levels.iter_mut().zip(&self.bands) {
                 let mut power = 0.0_f32;
                 for bin in first..last {
@@ -457,7 +476,9 @@ impl SpectrumAnalyzer {
                     let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
                     let pair_power =
                         self.frequency[bin].norm_sqr() + self.frequency[n - bin].norm_sqr();
-                    self.bin_powers[bin - 1] = pair_power;
+                    if self.visualizer.demand.band_energy {
+                        self.bin_powers[bin - 1] = pair_power;
+                    }
                     let power = pair_power * 0.25 * endpoint_gain;
                     *level = (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0;
                 }
