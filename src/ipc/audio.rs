@@ -32,8 +32,8 @@ const MAX_CLIENTS: usize = 8;
 const BUFFERED_CHUNKS: usize = 2;
 const CHUNK_FRAMES: usize = 4096;
 const CHUNK_BYTES: usize = 32 * 1024;
-// One filling, two queued, one writing; all buffers circulate in the same pool.
-const PCM_BUFFERS: usize = BUFFERED_CHUNKS + 2;
+// One filling and two queued. Only encoded bytes are held by the socket write.
+const PCM_BUFFERS: usize = BUFFERED_CHUNKS + 1;
 
 pub(crate) struct AudioServer {
     shutdown: Sender<()>,
@@ -534,7 +534,15 @@ impl RenderOutput {
                 Event::Work(done) => result = Some(done.and_then(|result| result)),
                 Event::Chunk(Ok(chunk)) => {
                     let written = {
-                        let sending = send(writer, &chunk, bytes).fuse();
+                        let sending = async {
+                            encode_frame_into(&chunk, bytes)?;
+                            if let Response::Pcm { mut samples, .. } = chunk {
+                                samples.clear();
+                                let _ = self.buffers.try_send(samples);
+                            }
+                            write_frame(writer, bytes).await
+                        }
+                        .fuse();
                         futures::pin_mut!(sending);
                         futures::select_biased! {
                             _ = stopped.recv().fuse() => None,
@@ -548,10 +556,6 @@ impl RenderOutput {
                             let _ = work.await;
                         }
                         return written.unwrap_or(Ok(()));
-                    }
-                    if let Response::Pcm { mut samples, .. } = chunk {
-                        samples.clear();
-                        let _ = self.buffers.try_send(samples);
                     }
                 }
                 Event::Chunk(Err(_)) => {
