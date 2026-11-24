@@ -155,6 +155,8 @@ pub struct WaveformSummary {
     energy: Vec<[f64; 3]>,
     end_seconds: Option<f64>,
     traversal: u64,
+    /// A bin attaining `frame.max_peak` when it exceeds the normalization floor.
+    max_peak_bin: usize,
 }
 
 impl WaveformSummary {
@@ -335,7 +337,12 @@ impl WaveformSummary {
         self.frame.duration = None;
     }
 
-    fn update_rms(&mut self, bin: usize) {
+    fn finish_bin(&mut self, bin: usize) {
+        let peak = self.frame.peaks[bin].unwrap_or(0.0);
+        if peak > self.frame.max_peak {
+            self.frame.max_peak = peak;
+            self.max_peak_bin = bin;
+        }
         for (side, (rms, counts)) in [
             (&mut self.frame.rms, &self.frame.rms_counts),
             (&mut self.frame.left_rms, &self.frame.left_rms_counts),
@@ -382,6 +389,7 @@ impl WaveformSummary {
         };
         let rate = identity.sample_rate;
         let revision = self.frame.revision.wrapping_add(1);
+        let traversal = self.traversal.max(1);
         let mut last_bin = None;
         for (offset, [left, right]) in samples.enumerate() {
             let seconds = start + offset as f64 * step;
@@ -398,13 +406,14 @@ impl WaveformSummary {
             // final RMS once, not three square roots for every sample frame.
             if last_bin != Some(bin) {
                 if let Some(previous) = last_bin {
-                    self.update_rms(previous);
+                    self.finish_bin(previous);
                 }
                 last_bin = Some(bin);
-            }
-            if self.frame.bin_epochs[bin] != self.traversal.max(1) {
-                self.clear_bin(bin);
-                self.frame.bin_epochs[bin] = self.traversal.max(1);
+                if self.frame.bin_epochs[bin] != traversal {
+                    self.clear_bin(bin);
+                    self.frame.bin_epochs[bin] = traversal;
+                }
+                self.frame.bin_revisions[bin] = revision;
             }
             let left = if left.is_finite() { left } else { 0.0 };
             let right = if right.is_finite() { right } else { 0.0 };
@@ -434,23 +443,28 @@ impl WaveformSummary {
                 Some(span) => span.start.min(media_frame)..span.end.max(end_frame),
                 None => media_frame..end_frame,
             });
-            self.frame.bin_revisions[bin] = revision;
         }
         if let Some(bin) = last_bin {
-            self.update_rms(bin);
+            self.finish_bin(bin);
         }
         self.end_seconds = Some(end);
         self.frame.complete = false;
         self.frame.revision = revision;
-        // Each combined bin is max(left, right); clearing and coarsening use
-        // the same bins for all three arrays, so only combined peaks need a scan.
-        self.frame.max_peak = self
-            .frame
-            .peaks
-            .iter()
-            .flatten()
-            .copied()
-            .fold(1.0, f32::max);
+        // Replay can replace the maximum, coarsening can move or discard it,
+        // and a preceding EOF can have trimmed its bin.
+        if self.frame.max_peak > 1.0
+            && self.frame.peaks.get(self.max_peak_bin) != Some(&Some(self.frame.max_peak))
+        {
+            self.frame.max_peak = 1.0;
+            for (bin, peak) in self.frame.peaks.iter().enumerate() {
+                if let Some(peak) = *peak
+                    && peak > self.frame.max_peak
+                {
+                    self.frame.max_peak = peak;
+                    self.max_peak_bin = bin;
+                }
+            }
+        }
     }
 
     pub fn finish(&mut self, duration: f64) {
@@ -617,9 +631,13 @@ mod tests {
                 assert_eq!(summary.frame.right_rms[bin], Some(0.75));
                 assert!((summary.frame.rms[bin].unwrap() - 0.3125_f32.sqrt()).abs() < 1e-6);
                 assert_eq!(summary.frame.rms_counts[bin], 2);
+                assert_eq!(summary.frame.bin_revisions[bin], summary.frame.revision);
+                assert_eq!(summary.frame.bin_epochs[bin], summary.traversal);
             } else {
                 assert_eq!(summary.frame.rms[bin], None);
                 assert_eq!(summary.frame.rms_counts[bin], 0);
+                assert_eq!(summary.frame.bin_revisions[bin], 0);
+                assert_eq!(summary.frame.bin_epochs[bin], 0);
             }
         }
     }
