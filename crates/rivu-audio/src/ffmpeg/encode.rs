@@ -622,55 +622,60 @@ impl AudioEncoder {
         );
         validate_full_scale(samples)?;
         while !samples.is_empty() {
+            if self.used == 0 && samples.len() >= self.pending.len() {
+                let (frame, rest) = samples.split_at(self.pending.len());
+                self.encode_frame(Some(frame))?;
+                samples = rest;
+                continue;
+            }
             let count = samples.len().min(self.pending.len() - self.used);
             self.pending[self.used..self.used + count].copy_from_slice(&samples[..count]);
             self.used += count;
             samples = &samples[count..];
             if self.used == self.pending.len() {
-                self.encode_pending()?;
+                self.encode_frame(None)?;
             }
         }
         Ok(())
     }
-    fn encode_pending(&mut self) -> Result<()> {
-        if self.used == 0 {
-            return Ok(());
-        }
+    // A complete input frame can go straight into the codec-owned writable buffer.
+    // Frames assembled across writes and the final tail use pending instead.
+    fn encode_frame(&mut self, direct: Option<&[f32]>) -> Result<()> {
+        let samples = direct.unwrap_or_else(|| &self.pending[..self.used]);
         let a = api()?;
         unsafe {
             checked((a.frame_writable)(self.frame), "make export frame writable")?;
-            let count = (self.used / self.channels) as c_int;
+            let count = (samples.len() / self.channels) as c_int;
             (*self.frame).nb_samples = count;
             (*self.frame).pts = self.pts;
             if let Some(bits) = self.integer_bits {
                 if bits == 16 {
                     let output = std::slice::from_raw_parts_mut(
                         (*self.frame).data[0].cast::<i16>(),
-                        self.used,
+                        samples.len(),
                     );
-                    for (out, &sample) in output.iter_mut().zip(&self.pending[..self.used]) {
+                    for (out, &sample) in output.iter_mut().zip(samples) {
                         *out = self.noise.quantize(sample, bits) as i16;
                     }
                 } else {
                     let output = std::slice::from_raw_parts_mut(
                         (*self.frame).data[0].cast::<i32>(),
-                        self.used,
+                        samples.len(),
                     );
-                    for (out, &sample) in output.iter_mut().zip(&self.pending[..self.used]) {
+                    for (out, &sample) in output.iter_mut().zip(samples) {
                         // FLAC drops the low eight bits; quantize before left alignment.
                         *out = self.noise.quantize(sample, bits) << 8;
                     }
                 }
             } else if self.conversion.is_null() {
                 // The opened codec accepts our interleaved f32 representation.
-                // Only `used` samples belong to a short final frame.
                 ptr::copy_nonoverlapping(
-                    self.pending.as_ptr(),
+                    samples.as_ptr(),
                     (*self.frame).data[0].cast::<f32>(),
-                    self.used,
+                    samples.len(),
                 );
             } else {
-                let mut input = self.pending.as_ptr().cast::<u8>();
+                let mut input = samples.as_ptr().cast::<u8>();
                 let converted = checked(
                     (a.swr_convert)(
                         self.conversion,
@@ -739,7 +744,9 @@ impl AudioEncoder {
     }
     pub fn finish(&mut self) -> Result<()> {
         ensure!(!self.finished, "Encoder already finalized");
-        self.encode_pending()?;
+        if self.used != 0 {
+            self.encode_frame(None)?;
+        }
         let a = api()?;
         checked(
             unsafe { (a.send)(self.context, ptr::null()) },
@@ -892,12 +899,24 @@ mod tests {
                         [value, -value * 0.5]
                     })
                     .collect::<Vec<_>>();
-                let pcm = stereo_roundtrip(&path, format, bits, &samples, 74);
+                // Exercise both a frame assembled across writes and direct frames
+                // followed by a short tail for each encoder sample format.
+                let chunk = if frames == 48013 { 32002 } else { 74 };
+                let pcm = stereo_roundtrip(&path, format, bits, &samples, chunk);
                 assert_eq!(
                     pcm.frames(),
                     frames as u64,
                     "{format:?} trimmed/padded a short tail"
                 );
+                if frames == 48013 && format != AudioExportFormat::Flac {
+                    let staged_path = directory.path().join("staged.audio");
+                    let staged = stereo_roundtrip(&staged_path, format, bits, &samples, 74);
+                    let mut expected = vec![0.0; samples.len()];
+                    let mut actual = vec![0.0; samples.len()];
+                    assert_eq!(staged.read_frames(0, &mut expected), frames);
+                    assert_eq!(pcm.read_frames(0, &mut actual), frames);
+                    assert_eq!(actual, expected);
+                }
                 if format == AudioExportFormat::Flac {
                     let mut decoded = vec![0.0; samples.len()];
                     assert_eq!(pcm.read_frames(0, &mut decoded), frames);
