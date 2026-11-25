@@ -15,7 +15,7 @@ use symphonia::core::{
         AudioCodecId,
         well_known::{CODEC_ID_FLAC, CODEC_ID_MP3},
     },
-    io::{MediaSource, MediaSourceStream, ReadBytes},
+    io::{MediaSource, MediaSourceStream, ReadBytes, SeekBuffered},
 };
 
 const MAX_HEADERS: usize = 128;
@@ -127,8 +127,7 @@ pub(super) fn probe(
     }
     let position = source.pos();
     let summary = inspect(source, cancelled);
-    source
-        .seek(SeekFrom::Start(position))
+    seek_to(source, position)
         .map_err(super::source::source_io_error)
         .context("Restoring native probe position")?;
     check_cancelled(cancelled)?;
@@ -139,8 +138,17 @@ fn stopped(cancelled: Option<&AtomicBool>) -> bool {
     cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
+fn seek_to(source: &mut MediaSourceStream<'_>, offset: u64) -> std::io::Result<()> {
+    // Symphonia's buffered seek takes a signed, pointer-sized distance.
+    if source.pos().abs_diff(offset) >= isize::MAX as u64 || source.seek_buffered(offset) != offset
+    {
+        source.seek(SeekFrom::Start(offset))?;
+    }
+    Ok(())
+}
+
 fn read_at<const N: usize>(source: &mut MediaSourceStream<'_>, offset: u64) -> Option<[u8; N]> {
-    source.seek(SeekFrom::Start(offset)).ok()?;
+    seek_to(source, offset).ok()?;
     let mut bytes = [0; N];
     source.read_exact(&mut bytes).ok()?;
     Some(bytes)
@@ -380,7 +388,7 @@ fn mp3(source: &mut MediaSourceStream<'_>, start: u64, end: u64) -> Option<Summa
         return None;
     }
     let mut frame = [0; 1441];
-    source.seek(SeekFrom::Start(start)).ok()?;
+    seek_to(source, start).ok()?;
     source.read_exact(&mut frame[..header.frame_len]).ok()?;
     let frame = &frame[..header.frame_len];
     // Xing's conventional offset ignores the optional MPEG CRC, as do the
@@ -645,6 +653,47 @@ mod tests {
             assert_eq!(mpeg_packet_samples(&packet, parsed.rate), None);
         }
         assert_eq!(mpeg_packet_samples(&[0xff, 0xfb, 0, 0], 44_100), None);
+    }
+
+    #[test]
+    fn buffered_probe_preserves_demuxer_position_without_an_underlying_seek() {
+        struct BufferedFile(Cursor<Vec<u8>>);
+        impl Read for BufferedFile {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(buf)
+            }
+        }
+        impl Seek for BufferedFile {
+            fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+                panic!("the entire probe fits in the read-ahead buffer");
+            }
+        }
+        impl MediaSource for BufferedFile {
+            fn is_seekable(&self) -> bool {
+                true
+            }
+            fn byte_len(&self) -> Option<u64> {
+                Some(self.0.get_ref().len() as u64)
+            }
+        }
+
+        let frame = mpeg_frame(9);
+        let mut bytes = vec![0; 17];
+        bytes.extend_from_slice(&frame);
+        bytes.extend_from_slice(&frame);
+        let mut source = MediaSourceStream::new(
+            Box::new(BufferedFile(Cursor::new(bytes))),
+            MediaSourceStreamOptions::default(),
+        );
+        source.read_exact(&mut [0; 17]).unwrap();
+        assert_eq!(
+            probe(&mut source, None).unwrap().unwrap().bitrate,
+            Some(128_000)
+        );
+        assert_eq!(source.pos(), 17);
+        let mut header = [0; 4];
+        source.read_exact(&mut header).unwrap();
+        assert_eq!(header, frame[..4]);
     }
 
     #[test]

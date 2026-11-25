@@ -97,7 +97,7 @@ fn navigation_commands_preserve_execution_status_and_occurrence_selection() {
 
 #[test]
 fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
-    for repeat in [RepeatMode::Off, RepeatMode::One] {
+    for repeat in [RepeatMode::Off, RepeatMode::One, RepeatMode::All] {
         let (_directory, mut core) = navigation_fixture(PlaybackStatus::Playing);
         edit_preferences(&mut core, |config| config.repeat = repeat);
         let expected = core
@@ -117,14 +117,14 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
         .unwrap();
         assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
         assert_eq!(core.state.queue.current_id, Some(expected));
-        let loads: Vec<_> = recorded_audio(&port, &commands)
-            .into_iter()
-            .filter_map(|command| match command {
-                AudioCommand::Load { paused, .. } => Some(paused),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(loads, [true]);
+        assert!(matches!(
+            recorded_audio(&port, &commands).as_slice(),
+            [
+                AudioCommand::Pause(true),
+                AudioCommand::StopAndSnapshot(_),
+                AudioCommand::Load { paused: true, .. }
+            ]
+        ));
         core.audio_event(AudioEvent::Ended {
             generation,
             completed_duration: None,
@@ -1359,6 +1359,10 @@ fn manual_tail_next_preserves_source_while_natural_eof_stops() {
             assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
             assert_eq!(core.state.playback.position, 0.0);
             assert_eq!(core.state.queue.current_id, Some(tail));
+            assert!(matches!(
+                recorded_audio(&port, &commands).as_slice(),
+                [AudioCommand::StopAndSnapshot(_)]
+            ));
         }
     }
 }
@@ -1634,9 +1638,20 @@ fn all_missing_autoplay_is_bounded_by_occurrence_and_preserves_last_failure() {
         });
         playing(&mut core, 1);
         core.transport.reset_history();
-        let _commands = recording_audio(&mut core);
+        let commands = recording_audio(&mut core);
+        let port = audio_port(&mut core);
         natural_end(&mut core);
         fail_missing_sources(&mut core);
+        let audio = recorded_audio(&port, &commands);
+        let (last, attempts) = audio.split_last().unwrap();
+        assert!(matches!(last, AudioCommand::StopAndSnapshot(_)));
+        assert_eq!(attempts.len(), 2 * core.transport.history.len());
+        for attempt in attempts.as_chunks::<2>().0 {
+            assert!(matches!(
+                attempt,
+                [AudioCommand::StopAndSnapshot(_), AudioCommand::Load { .. }]
+            ));
+        }
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert!(core.transport.session.is_none());
         assert_eq!(core.transport.history.len(), 5);
@@ -2053,7 +2068,8 @@ fn maintenance_deferred_autoplay_uses_pause_and_resume_intent() {
         if expected == PlaybackStatus::Playing {
             core.command(Command::Pause).unwrap();
         }
-        let _commands = recording_audio(&mut core);
+        let commands = recording_audio(&mut core);
+        let port = audio_port(&mut core);
         natural_end(&mut core);
         fail_missing_sources(&mut core);
         assert_eq!(core.state.current_track().unwrap().id, 3);
@@ -2062,7 +2078,12 @@ fn maintenance_deferred_autoplay_uses_pause_and_resume_intent() {
         assert!(core.transport.pending_navigation.is_some());
         core.command(command).unwrap();
         core.database_unavailable = false;
+        let _ = recorded_audio(&port, &commands);
         core.flush_deferred_playback().unwrap();
+        assert!(matches!(
+            recorded_audio(&port, &commands).as_slice(),
+            [AudioCommand::StopAndSnapshot(_), AudioCommand::Load { .. }]
+        ));
         assert_eq!(core.state.current_track().unwrap().id, 4);
         assert_eq!(core.state.playback.status, expected);
     }

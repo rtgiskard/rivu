@@ -6,7 +6,7 @@
 
 use super::output::Output;
 use anyhow::{Context, Result};
-use std::{ffi::c_void, ptr::NonNull};
+use std::{ffi::c_void, ops::Range, ptr::NonNull};
 
 /// A playback speed within the supported range.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -148,9 +148,9 @@ pub(super) struct SpeedStage {
     channels: usize,
     sample_rate: u32,
     stretch: Option<Stretch>,
-    // Stretched output not yet admitted by the output ring.
+    // Initialized once. Only this range holds samples awaiting admission.
     staged: Vec<f32>,
-    staged_offset: usize,
+    pending: Range<usize>,
     // Leading latency frames to drop so output starts at source frame zero.
     skip: usize,
     consumed: u64,
@@ -167,7 +167,7 @@ impl SpeedStage {
             sample_rate,
             stretch: None,
             staged: Vec::new(),
-            staged_offset: 0,
+            pending: 0..0,
             skip: 0,
             consumed: 0,
             useful: 0,
@@ -198,16 +198,17 @@ impl SpeedStage {
             // Without a stretcher no segment has staged anything.
             let stretch = Stretch::new(self.channels, self.sample_rate)?;
             let slowest = |frames: usize| (frames as f64 / PlaybackSpeed::MIN) as usize + 1;
-            let frames =
-                slowest(MAX_INPUT_FRAMES) + slowest(stretch.input_latency) + stretch.output_latency;
+            let frames = slowest(MAX_INPUT_FRAMES)
+                .max(slowest(stretch.input_latency) + stretch.output_latency);
+            let samples = frames * self.channels;
             self.staged
-                .try_reserve_exact(frames * self.channels)
+                .try_reserve_exact(samples)
                 .context("Cannot allocate playback speed buffer")?;
+            self.staged.resize(samples, 0.0);
             self.stretch = Some(stretch);
         }
         self.speed = self.next;
-        self.staged.clear();
-        self.staged_offset = 0;
+        self.pending = 0..0;
         self.consumed = 0;
         self.useful = 0;
         self.finished = false;
@@ -289,16 +290,19 @@ impl SpeedStage {
             self.stage(flush, |stretch, out| stretch.flush(out, speed));
             // Emit exactly the frames that play this segment's source.
             let owed = self.speed.output_frames(self.consumed) as i64 - self.useful as i64;
-            let len = self.staged.len() as i64 + owed * self.channels as i64;
-            self.staged
-                .resize(len.max(self.staged_offset as i64) as usize, 0.0);
+            let end = self.pending.end as i64 + owed * self.channels as i64;
+            let end = end.max(self.pending.start as i64) as usize;
+            if end > self.pending.end {
+                self.staged[self.pending.end..end].fill(0.0);
+            }
+            self.pending.end = end;
         }
         self.drain(output, output_left, observe)
     }
 
     /// No stretched audio remains to be admitted.
     pub(super) fn idle(&self) -> bool {
-        !self.active() || (self.finished && self.staged_offset == self.staged.len())
+        !self.active() || (self.finished && self.pending.is_empty())
     }
 
     /// Output frames that play `frames` source frames after `start`.
@@ -307,16 +311,16 @@ impl SpeedStage {
     }
 
     fn stage(&mut self, frames: usize, render: impl FnOnce(&mut Stretch, &mut [f32])) {
-        let start = self.staged.len();
-        self.staged.resize(start + frames * self.channels, 0.0);
+        let start = self.pending.end;
+        self.pending.end += frames * self.channels;
         render(
             self.stretch.as_mut().expect("stretcher"),
-            &mut self.staged[start..],
+            &mut self.staged[start..self.pending.end],
         );
         // Latency frames precede everything kept, so they start at the cursor.
         let skipped = self.skip.min(frames);
         self.skip -= skipped;
-        self.staged_offset += skipped * self.channels;
+        self.pending.start += skipped * self.channels;
         self.useful += (frames - skipped) as u64;
     }
 
@@ -326,25 +330,21 @@ impl SpeedStage {
         output_left: &mut usize,
         observe: &mut impl FnMut(SpeedEvent<'_>),
     ) -> bool {
-        if self.staged_offset < self.staged.len() {
+        if !self.pending.is_empty() {
             let frame = output.submitted();
-            let pending = &self.staged[self.staged_offset..];
+            let pending = &self.staged[self.pending.clone()];
             let frames = (pending.len() / self.channels).min(*output_left);
             let admitted_frames = output.push(&pending[..frames * self.channels]);
             *output_left -= admitted_frames;
             let admitted = admitted_frames * self.channels;
             if admitted != 0 {
-                observe(SpeedEvent::Stretched(
-                    frame,
-                    &self.staged[self.staged_offset..self.staged_offset + admitted],
-                ));
+                observe(SpeedEvent::Stretched(frame, &pending[..admitted]));
             }
-            self.staged_offset += admitted;
+            self.pending.start += admitted;
         }
-        let drained = self.staged_offset == self.staged.len();
+        let drained = self.pending.is_empty();
         if drained {
-            self.staged.clear();
-            self.staged_offset = 0;
+            self.pending = 0..0;
         }
         drained
     }

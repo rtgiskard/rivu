@@ -158,7 +158,7 @@ impl Core {
         replace(&self.store)?;
         self.queue_replaced(true)?;
         let first = self.store.queue_id_at(0)?.context(empty)?;
-        self.start(first, QueueHistory::Record)
+        self.play_after_queue_replacement(first)
     }
 
     pub(in crate::core) fn random_queue_id(&self, rng: &mut impl rand::Rng) -> Result<Option<u64>> {

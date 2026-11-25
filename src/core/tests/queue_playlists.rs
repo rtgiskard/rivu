@@ -1564,8 +1564,13 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         MAX_QUERY_ROWS + 3
     );
     write_pcm(&core.track(first).unwrap().path);
-    let _commands = recording_audio(&mut core);
+    let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     core.command(Command::PlayAlbum { key }).unwrap();
+    assert!(matches!(
+        recorded_audio(&port, &commands).as_slice(),
+        [AudioCommand::StopAndSnapshot(_), AudioCommand::Load { .. }]
+    ));
     assert_eq!(core.state.queue.total, MAX_QUERY_ROWS + 3);
     assert_eq!(
         core.store
@@ -2023,10 +2028,16 @@ fn failed_playlist_start_does_not_keep_an_obsolete_queue_selection() {
     let playlist_id = core.store.create_playlist("missing").unwrap();
     core.store.add_playlist(playlist_id, &[2]).unwrap();
     core.playlist_created(playlist_id, true).unwrap();
+    let commands = recording_audio(&mut core);
+    let port = audio_port(&mut core);
     let error = core
         .command(Command::PlayPlaylist { playlist_id })
         .unwrap_err();
     assert!(error.to_string().contains("2.wav"));
+    assert!(matches!(
+        recorded_audio(&port, &commands).as_slice(),
+        [AudioCommand::StopAndSnapshot(_)]
+    ));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_eq!(core.state.queue.current_position, Some(0));
     assert_eq!(core.state.current_track().unwrap().id, 2);

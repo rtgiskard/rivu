@@ -282,6 +282,34 @@ impl Worker {
                 .is_some_and(|playback| !playback.paused()),
         );
     }
+    fn begin_opening(
+        &mut self,
+        path: PathBuf,
+        selection: SourceSelection,
+        decoder_hint: DecoderHint,
+        metadata: Arc<PlaybackMetadata>,
+        generation: u64,
+        paused: bool,
+    ) -> &mut Opening {
+        self.stop();
+        self.seek_revision = 0;
+        self.opening.insert(Opening {
+            path,
+            input: OpeningInput::File,
+            range: selection.range,
+            start: selection.start,
+            decoder_hint,
+            metadata,
+            generation,
+            paused,
+            pending_seek: None,
+            source: None,
+            source_info: None,
+            listened_seconds: 0.0,
+            graph: None,
+            expected_identity: None,
+        })
+    }
     fn command(&mut self, command: AudioCommand) -> bool {
         self.diagnostics_dirty |= matches!(
             &command,
@@ -423,24 +451,20 @@ impl Worker {
                 paused,
                 listened_seconds,
             } => {
-                self.stop();
-                self.seek_revision = 0;
-                self.opening = Some(Opening {
+                let opening = self.begin_opening(
                     path,
-                    input: pcm.map_or(OpeningInput::File, OpeningInput::Pcm),
-                    range,
+                    SourceSelection {
+                        range,
+                        start: start_seconds,
+                    },
                     decoder_hint,
-                    generation,
                     metadata,
-                    start: start_seconds,
-                    pending_seek: None,
+                    generation,
                     paused,
-                    source: None,
-                    source_info,
-                    listened_seconds,
-                    graph: None,
-                    expected_identity: None,
-                });
+                );
+                opening.input = pcm.map_or(OpeningInput::File, OpeningInput::Pcm);
+                opening.source_info = source_info;
+                opening.listened_seconds = listened_seconds;
             }
             AudioCommand::GraphAudition {
                 path,
@@ -456,24 +480,22 @@ impl Worker {
                 listened_seconds,
                 runner,
             } => {
-                self.stop();
-                self.seek_revision = 0;
-                self.opening = Some(Opening {
+                let opening = self.begin_opening(
                     path,
-                    input: pcm.map_or(OpeningInput::File, OpeningInput::Pcm),
-                    range,
+                    SourceSelection {
+                        range,
+                        start: start_seconds,
+                    },
                     decoder_hint,
-                    generation,
                     metadata,
-                    start: start_seconds,
-                    pending_seek: None,
+                    generation,
                     paused,
-                    source: None,
-                    source_info,
-                    listened_seconds,
-                    graph: Some(*runner),
-                    expected_identity: Some(expected_identity),
-                });
+                );
+                opening.input = pcm.map_or(OpeningInput::File, OpeningInput::Pcm);
+                opening.source_info = source_info;
+                opening.listened_seconds = listened_seconds;
+                opening.graph = Some(*runner);
+                opening.expected_identity = Some(expected_identity);
             }
             AudioCommand::Load {
                 path,
@@ -484,24 +506,17 @@ impl Worker {
                 start_seconds,
                 paused,
             } => {
-                self.stop();
-                self.seek_revision = 0;
-                self.opening = Some(Opening {
+                self.begin_opening(
                     path,
-                    input: OpeningInput::File,
-                    range,
+                    SourceSelection {
+                        range,
+                        start: start_seconds,
+                    },
                     decoder_hint,
-                    generation,
                     metadata,
-                    start: start_seconds,
-                    pending_seek: None,
+                    generation,
                     paused,
-                    source: None,
-                    source_info: None,
-                    listened_seconds: 0.0,
-                    graph: None,
-                    expected_identity: None,
-                });
+                );
             }
             AudioCommand::Metadata {
                 generation,

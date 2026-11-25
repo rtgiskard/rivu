@@ -1318,6 +1318,9 @@ until physical close and statistics persistence settle. History projection recov
 is independent: a failed read neither retains an otherwise settled source nor
 replays its confirmed writes. Matching late source facts can finish accounting,
 but cannot navigate, fence transport again or change a newer playback intent.
+When EOF immediately advances playback, or playing an album or playlist replaces
+the queue, Core reuses the stop acknowledgement before loading the next occurrence.
+Navigation deferred by database maintenance requests a fresh stop when it resumes.
 Failed first-frame opening records its own generation and counters, never the
 previous source's stop snapshot.
 

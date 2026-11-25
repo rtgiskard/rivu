@@ -118,6 +118,21 @@ pub(super) enum QueueHistory {
     Restore(usize),
 }
 
+// A stop acknowledgement can be reused within the same queue transition. Deferred
+// navigation re-enters through the ordinary path and checks the worker again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreviousSource {
+    NeedsStop,
+    Stopped,
+}
+
+enum QueueStep {
+    Stay,
+    Stop,
+    Play(u64),
+    Autoplay,
+}
+
 pub(super) struct SourceReplacement {
     pub(super) generation: u64,
     pub(super) heard: f64,
@@ -429,7 +444,8 @@ impl Core {
                 let status = self.state.playback.status;
                 self.transport.autoplay = None;
                 self.stop_playback()?;
-                self.advance_with_status(true, status)?;
+                let step = self.next_queue_step(true, status)?;
+                self.take_queue_step(step, status, PreviousSource::Stopped)?;
             }
             AudioEvent::SeekRejected {
                 revision,
@@ -458,7 +474,7 @@ impl Core {
                     let status = self.state.playback.status;
                     let failed = self.state.queue.current_id;
                     let path = self.state.current_track().map(|track| track.path.clone());
-                    self.stop_for_replacement()
+                    self.stop_for_replacement(PreviousSource::NeedsStop)
                         .with_context(|| message.clone())?;
                     // An absent or empty music folder affects every track
                     // below it: stop rather than walk the queue.
@@ -481,7 +497,7 @@ impl Core {
                         |path| format!("{message} ({})", path.display()),
                     ));
                     self.state.system.last_error = autoplay.notice(false);
-                    self.continue_autoplay(status)?;
+                    self.continue_autoplay(status, PreviousSource::Stopped)?;
                 } else {
                     self.stop().with_context(|| message.clone())?;
                     if resume_failed {
@@ -586,7 +602,17 @@ impl Core {
         status: PlaybackStatus,
     ) -> Result<()> {
         self.transport.autoplay = None;
-        self.start_occurrence(queue_id, history, status, true)
+        self.start_occurrence(queue_id, history, status, true, PreviousSource::NeedsStop)
+    }
+
+    pub(super) fn play_after_queue_replacement(&mut self, first: u64) -> Result<()> {
+        self.start_occurrence(
+            first,
+            QueueHistory::Record,
+            PlaybackStatus::Playing,
+            true,
+            PreviousSource::Stopped,
+        )
     }
 
     /// The configured root containing `path` when it is absent, unreadable or
@@ -610,25 +636,27 @@ impl Core {
         history: QueueHistory,
         status: PlaybackStatus,
         check_missing: bool,
+        previous: PreviousSource,
     ) -> Result<()> {
         self.ensure_queue_control_ready()?;
         let (track_id, position) = self
             .store
             .queue_location(queue_id)?
             .context("Queue entry not found")?;
-        let track = self.track(track_id)?;
-        // Independent controls do not depend on database recovery. Only a new
-        // playback owner must settle the previous producer before replacing it.
+        // Validate the destination before interrupting a source. Retiring events
+        // may enrich this same track, so load its final facts after the stop.
+        if previous == PreviousSource::NeedsStop {
+            self.track(track_id)?;
+        }
         if self.transport.retired.is_some() {
             self.flush_deferred_playback()?;
         }
-        self.stop_for_replacement()?;
+        self.stop_for_replacement(previous)?;
         anyhow::ensure!(
             self.transport.retired.is_none(),
             "Previous audio source has not confirmed its final stop"
         );
-        // Retiring Started/Ended bookkeeping can enrich this same track in the store.
-        let track = Arc::new(self.track(track.id)?);
+        let track = Arc::new(self.track(track_id)?);
         let check_file = check_missing && status != PlaybackStatus::Stopped;
         let track_metadata = if check_file {
             std::fs::metadata(&track.path).ok()
@@ -1017,14 +1045,20 @@ impl Core {
 
     pub(in crate::core) fn stop(&mut self) -> Result<()> {
         self.transport.autoplay = None;
-        self.stop_for_replacement()
+        self.stop_for_replacement(PreviousSource::NeedsStop)
     }
 
-    fn stop_for_replacement(&mut self) -> Result<()> {
+    fn stop_for_replacement(&mut self, previous: PreviousSource) -> Result<()> {
         // Stop relinquishes pending audition intent even without a physical source.
         // Prepared graph handoff consumes its intent before establishing a source.
         self.pending_processing_audition = None;
         self.transport.pending_navigation = None;
+        if previous == PreviousSource::Stopped
+            && self.transport.session.is_none()
+            && self.transport.retired.is_none()
+        {
+            return Ok(());
+        }
         let result = self.stop_playback();
         if result.is_err() {
             self.transport.autoplay = None;
@@ -1149,22 +1183,9 @@ impl Core {
         self.state.playback.status = PlaybackStatus::Paused;
         Ok(())
     }
-    /// Load the next untried occurrence: a random or following position, then
-    /// the first untried one after it. Failures return through `Failed`, so
-    /// each attempt yields to the event loop.
-    fn continue_autoplay(&mut self, status: PlaybackStatus) -> Result<()> {
-        if self.database_maintenance_active() {
-            self.transport.pending_navigation = Some(status);
-            return Ok(());
-        }
-        let result = self.load_autoplay(status);
-        if result.is_err() {
-            self.transport.autoplay = None;
-        }
-        result
-    }
-
-    fn load_autoplay(&mut self, status: PlaybackStatus) -> Result<()> {
+    /// Find the next untried occurrence in wrap order. Decoder failures return
+    /// through `Failed`, so each attempt yields to the event loop.
+    fn next_autoplay_id(&mut self) -> Result<Option<u64>> {
         self.ensure_queue_control_ready()?;
         let total = self.state.queue.total;
         let first = if total == 0 {
@@ -1201,20 +1222,7 @@ impl Core {
                 }
             }
         }
-        let Some(id) = candidate else {
-            let notice = autoplay.notice(true);
-            self.stop()?;
-            self.state.system.last_error = notice;
-            return Ok(());
-        };
-        let notice = autoplay.notice(false);
-        autoplay.attempted.insert(id);
-        self.start_occurrence(id, QueueHistory::Record, status, false)?;
-        // Selection admission clears last_error; keep the aggregate notice.
-        if notice.is_some() {
-            self.state.system.last_error = notice;
-        }
-        Ok(())
+        Ok(candidate)
     }
 
     pub(in crate::core) fn advance_with_status(
@@ -1222,19 +1230,28 @@ impl Core {
         natural: bool,
         status: PlaybackStatus,
     ) -> Result<()> {
+        let step = self.next_queue_step(natural, status)?;
+        self.take_queue_step(step, status, PreviousSource::NeedsStop)
+    }
+
+    fn next_queue_step(&mut self, natural: bool, status: PlaybackStatus) -> Result<QueueStep> {
         if !natural {
             self.transport.autoplay = None;
         }
         if self.database_maintenance_active() {
             if natural {
                 self.transport.pending_navigation = Some(status);
-                return Ok(());
+                return Ok(QueueStep::Stay);
             }
             bail!("Database maintenance is in progress; navigation was not executed");
         }
         self.ensure_queue_control_ready()?;
         if self.state.queue.total == 0 {
-            return if natural { self.stop() } else { Ok(()) };
+            if natural {
+                self.transport.autoplay = None;
+                return Ok(QueueStep::Stop);
+            }
+            return Ok(QueueStep::Stay);
         }
         let current = self.state.queue.current_id;
         if natural
@@ -1243,32 +1260,86 @@ impl Core {
         {
             // Repeat One stops on its failed source; only Repeat All skips.
             self.transport.autoplay = Some(Autoplay::default());
-            return self.continue_autoplay(status);
+            return Ok(QueueStep::Autoplay);
         }
-        if natural
+        self.transport.autoplay = None;
+        let next = if natural
             && self.preferences.live().repeat == RepeatMode::One
             && let Some(id) = current
         {
-            return self.start_with_status(id, QueueHistory::Record, status);
-        }
-        if self.preferences.live().shuffle {
+            Some(id)
+        } else if self.preferences.live().shuffle {
             // Every Next is an independent draw over occurrences, including current.
-            let id = self
-                .random_queue_id(&mut rand::rng())?
-                .context("Queue positions are inconsistent")?;
-            return self.start_with_status(id, QueueHistory::Record, status);
-        }
-        let index = self.state.queue.current_position;
-        let next = index.map_or(0, |index| index + 1);
-        if let Some(id) = self.store.queue_id_at(next)? {
-            return self.start_with_status(id, QueueHistory::Record, status);
-        }
-        if self.preferences.live().repeat == RepeatMode::All {
-            let id = self.store.queue_id_at(0)?.context("Queue is empty")?;
-            return self.start_with_status(id, QueueHistory::Record, status);
-        }
-        if natural { self.stop() } else { Ok(()) }
+            Some(
+                self.random_queue_id(&mut rand::rng())?
+                    .context("Queue positions are inconsistent")?,
+            )
+        } else {
+            let index = self
+                .state
+                .queue
+                .current_position
+                .map_or(0, |index| index + 1);
+            match self.store.queue_id_at(index)? {
+                None if self.preferences.live().repeat == RepeatMode::All => {
+                    Some(self.store.queue_id_at(0)?.context("Queue is empty")?)
+                }
+                id => id,
+            }
+        };
+        Ok(match next {
+            Some(id) => QueueStep::Play(id),
+            None if natural => QueueStep::Stop,
+            None => QueueStep::Stay,
+        })
     }
+
+    fn take_queue_step(
+        &mut self,
+        step: QueueStep,
+        status: PlaybackStatus,
+        previous: PreviousSource,
+    ) -> Result<()> {
+        match step {
+            QueueStep::Stay => Ok(()),
+            QueueStep::Stop => self.stop_for_replacement(previous),
+            QueueStep::Play(id) => {
+                self.start_occurrence(id, QueueHistory::Record, status, true, previous)
+            }
+            QueueStep::Autoplay => self.continue_autoplay(status, previous),
+        }
+    }
+
+    fn continue_autoplay(
+        &mut self,
+        status: PlaybackStatus,
+        previous: PreviousSource,
+    ) -> Result<()> {
+        if self.database_maintenance_active() {
+            self.transport.pending_navigation = Some(status);
+            return Ok(());
+        }
+        let candidate = self.next_autoplay_id().inspect_err(|_| {
+            self.transport.autoplay = None;
+        })?;
+        let autoplay = self.transport.autoplay.as_mut().expect("search is active");
+        let notice = autoplay.notice(candidate.is_none());
+        if let Some(id) = candidate {
+            autoplay.attempted.insert(id);
+            self.start_occurrence(id, QueueHistory::Record, status, false, previous)
+                .inspect_err(|_| self.transport.autoplay = None)?;
+            // Selection admission clears last_error. Restore the aggregate notice.
+            if notice.is_some() {
+                self.state.system.last_error = notice;
+            }
+        } else {
+            self.transport.autoplay = None;
+            self.stop_for_replacement(previous)?;
+            self.state.system.last_error = notice;
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn previous(&mut self) -> Result<()> {
         let status = self.state.playback.status;
         self.transport.autoplay = None;
@@ -1424,7 +1495,7 @@ impl Core {
             {
                 if self.transport.autoplay.is_some() {
                     if self.preferences.live().repeat == RepeatMode::All {
-                        self.continue_autoplay(status)?;
+                        self.continue_autoplay(status, PreviousSource::NeedsStop)?;
                     } else {
                         self.stop()?;
                     }
