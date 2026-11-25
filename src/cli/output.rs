@@ -62,6 +62,47 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
     )
 }
 
+fn write_track_fields(
+    output: &mut dyn Write,
+    i18n: &Localizer,
+    id: i64,
+    [title, artist, album]: [&str; 3],
+    path: &Path,
+    missing: bool,
+    favorite: bool,
+) -> io::Result<()> {
+    write!(
+        output,
+        "{id}\t{}\t{}\t{}\t{}{}{}",
+        TerminalEscaped(title),
+        TerminalEscaped(artist),
+        TerminalEscaped(album),
+        TerminalEscaped(path.display()),
+        if missing {
+            i18n.text("core-missing-marker")
+        } else {
+            ""
+        },
+        if favorite {
+            i18n.text("core-favorite-marker")
+        } else {
+            ""
+        },
+    )
+}
+
+pub(super) fn bitrate(bps: Option<u64>, exact: bool) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| match bps {
+        Some(value) => write!(
+            f,
+            "{}{:.1} kbps",
+            if exact { "" } else { "≈" },
+            value as f64 / 1000.0
+        ),
+        None => f.write_str("—"),
+    })
+}
+
 pub(super) fn list_library(
     i18n: &Localizer,
     data_dir: &Path,
@@ -91,34 +132,20 @@ pub(super) fn list_library(
             })
         },
         |output, track, _| {
-            write!(
+            write_track_fields(
                 output,
-                "{}\t{}\t{}\t{}\t{}{}{}\t",
+                i18n,
                 track.id,
-                TerminalEscaped(&track.title),
-                TerminalEscaped(&track.artist),
-                TerminalEscaped(&track.album),
-                TerminalEscaped(track.path.display()),
-                if track.missing {
-                    i18n.text("core-missing-marker")
-                } else {
-                    ""
-                },
-                if track.favorite {
-                    i18n.text("core-favorite-marker")
-                } else {
-                    ""
-                }
+                [&track.title, &track.artist, &track.album],
+                &track.path,
+                track.missing,
+                track.favorite,
             )?;
-            match track.bitrate_bps {
-                Some(value) => writeln!(
-                    output,
-                    "{}{:.1} kbps",
-                    if track.bitrate_exact { "" } else { "≈" },
-                    value as f64 / 1000.0
-                )?,
-                None => writeln!(output, "—")?,
-            }
+            writeln!(
+                output,
+                "\t{}",
+                bitrate(track.bitrate_bps, track.bitrate_exact)
+            )?;
             Ok(())
         },
     )
@@ -133,25 +160,16 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
             } else {
                 writeln!(output, "total\t{}", page.total)?;
                 for track in page.rows {
-                    writeln!(
-                        output,
-                        "{}\t{}\t{}\t{}\t{}{}{}",
+                    write_track_fields(
+                        &mut output,
+                        i18n,
                         track.id,
-                        TerminalEscaped(&track.title),
-                        TerminalEscaped(&track.artist),
-                        TerminalEscaped(&track.album),
-                        TerminalEscaped(track.path.display()),
-                        if track.missing {
-                            i18n.text("core-missing-marker")
-                        } else {
-                            ""
-                        },
-                        if track.favorite {
-                            i18n.text("core-favorite-marker")
-                        } else {
-                            ""
-                        },
+                        [&track.title, &track.artist, &track.album],
+                        &track.path,
+                        track.missing,
+                        track.favorite,
                     )?;
+                    writeln!(output)?;
                 }
             }
         }
@@ -724,6 +742,35 @@ pub(super) fn show_scan(
 #[cfg(test)]
 mod tests {
     use super::{show_history, write_error};
+
+    #[test]
+    fn library_text_escapes_columns_and_appends_localized_flags() {
+        let i18n = rivu_presentation::i18n::Localizer::for_cli("zh-CN");
+        let mut bytes = Vec::new();
+        super::write_track_fields(
+            &mut bytes,
+            &i18n,
+            42,
+            ["a\tb", "x\ny", "z\r"],
+            std::path::Path::new("音楽/\x1b.flac"),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "42\ta\\tb\tx\\ny\tz\\r\t音楽/\\x1b.flac [缺失] [收藏]"
+        );
+        assert_eq!(
+            super::bitrate(Some(128_100), true).to_string(),
+            "128.1 kbps"
+        );
+        assert_eq!(
+            super::bitrate(Some(64_300), false).to_string(),
+            "≈64.3 kbps"
+        );
+        assert_eq!(super::bitrate(None, false).to_string(), "—");
+    }
 
     #[test]
     fn status_json_uses_protocol_sections_and_tokens() {

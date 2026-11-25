@@ -41,13 +41,25 @@ pub(super) fn print_error(error: &CliError) {
 }
 
 pub(super) fn run() -> std::result::Result<(), CliError> {
-    // Command-line surfaces use the process locale, independently of GUI settings.
+    let parsed = match Args::command().try_get_matches_from(std::env::args_os()) {
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion => {
+            return finish_parse(error);
+        }
+        result => result,
+    };
     let i18n = Localizer::for_cli("auto");
-    let mut command = Args::command();
-    localize_help(&mut command, &i18n, "");
-    let matches = match command.try_get_matches_from_mut(std::env::args_os()) {
+    let localized_command = || {
+        let mut command = Args::command();
+        localize_help(&mut command, &i18n, "");
+        command
+    };
+    let matches = match parsed {
         Ok(matches) => matches,
-        Err(error) => return finish_parse(error),
+        // Let clap render help and argument errors with localized labels.
+        Err(_) => match localized_command().try_get_matches_from(std::env::args_os()) {
+            Err(error) => return finish_parse(error),
+            Ok(matches) => matches,
+        },
     };
     let args = match Args::from_arg_matches(&matches) {
         Ok(args) => args,
@@ -57,15 +69,13 @@ pub(super) fn run() -> std::result::Result<(), CliError> {
         return finish_parse(error);
     }
     if args.action.is_none() {
-        command.print_help().map_err(|error| CliError {
-            error: error.into(),
-            json: args.json,
-        })?;
-        std::io::stdout().lock().flush().map_err(|error| CliError {
-            error: error.into(),
-            json: args.json,
-        })?;
-        return Ok(());
+        return localized_command()
+            .print_help()
+            .and_then(|()| std::io::stdout().lock().flush())
+            .map_err(|error| CliError {
+                error: error.into(),
+                json: args.json,
+            });
     }
     let json = args.json;
     execute(args, i18n).map_err(|error| CliError { error, json })

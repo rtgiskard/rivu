@@ -60,14 +60,8 @@ fn format_probe(
             ),
             (
                 "bitrate",
-                info.bitrate_bps
-                    .map_or("—".into(), |value| {
-                        format!(
-                            "{}{:.1} kbps",
-                            if info.bitrate_exact { "" } else { "≈" },
-                            value as f64 / 1000.0
-                        )
-                    })
+                output::bitrate(info.bitrate_bps, info.bitrate_exact)
+                    .to_string()
                     .into(),
             ),
             (
