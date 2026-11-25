@@ -34,9 +34,10 @@
 //! Real nonnegative gains preserve each STFT bin's phase. One gain is estimated
 //! from mean channel power and applied to every channel, preserving interchannel
 //! phase and level ratios within each bin (not independent stereo gating).
-//! Square-root periodic Hann analysis/synthesis with explicit overlap-weight
-//! normalization handles boundaries. Leading delay is discarded and `finish`
-//! emits only actual source frames. No limiter, normalization or output clamp is
+//! Square-root periodic Hann analysis/synthesis uses prepared overlap weights.
+//! The first emitted hop has three contributing windows and later hops have four,
+//! including when `finish` pads the analysis input to emit the last source frames.
+//! Leading delay is discarded. No limiter, normalization or output clamp is
 //! applied. Isolated impulse repair is conservative local interpolation; it is
 //! not a restoration algorithm for long dropouts, clipping or dense crackle.
 //!

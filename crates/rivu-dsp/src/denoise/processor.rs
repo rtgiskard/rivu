@@ -15,6 +15,27 @@ fn window(size: usize) -> Vec<f32> {
         .collect()
 }
 
+fn window_energy(window: &[f32]) -> f32 {
+    window.iter().map(|x| x * x).sum()
+}
+
+fn emission_weights(window: &[f32], hop: usize) -> Vec<f32> {
+    // Two leading hops are discarded. The first emitted hop has three windows,
+    // then every hop has four. Sum oldest first, as in chronological overlap-add.
+    let mut weights = Vec::with_capacity(2 * hop);
+    for overlaps in [3, 4] {
+        for phase in 0..hop {
+            let mut weight = 0.0;
+            for age in (0..overlaps).rev() {
+                let w = window[age * hop + phase];
+                weight += w * w;
+            }
+            weights.push(weight);
+        }
+    }
+    weights
+}
+
 fn validate_block(input: &[f32], channels: usize) -> Result<usize> {
     ensure!(
         input.len().is_multiple_of(channels),
@@ -43,6 +64,7 @@ pub struct ProfileCollector {
     input: Vec<f32>,
     filled: usize,
     window: Vec<f32>,
+    full_energy: Option<f32>,
     fft: Arc<dyn Fft<f32>>,
     spectrum: Vec<Complex32>,
     scratch: Vec<Complex32>,
@@ -66,6 +88,7 @@ impl ProfileCollector {
         );
         let fft = FftPlanner::new().plan_fft_forward(fft_size);
         let scratch = vec![Complex32::default(); fft.get_inplace_scratch_len()];
+        let window = window(fft_size);
         Ok(Self {
             sample_rate,
             channels,
@@ -74,7 +97,8 @@ impl ProfileCollector {
             captured_frames: 0,
             input: vec![0.0; fft_size * channels],
             filled: 0,
-            window: window(fft_size),
+            full_energy: None,
+            window,
             fft,
             spectrum: vec![Complex32::default(); fft_size],
             scratch,
@@ -123,10 +147,13 @@ impl ProfileCollector {
         // Center partial selections in the window; normalize using only actual
         // selected samples, never the zero-padding support.
         let offset = (self.size - valid) / 2;
-        let energy: f32 = self.window[offset..offset + valid]
-            .iter()
-            .map(|x| x * x)
-            .sum();
+        let energy = if valid == self.size {
+            *self
+                .full_energy
+                .get_or_insert_with(|| window_energy(&self.window))
+        } else {
+            window_energy(&self.window[offset..offset + valid])
+        };
         if energy <= MIN_POWER {
             return Ok(());
         }
@@ -428,9 +455,9 @@ impl Denoiser {
         if config.mode != DenoiseMode::Off {
             let size = config.fft_size;
             let bins = size / 2 + 1;
-            // Input, overlap, window, weights; channel spectra; six PSD/gain
+            // Input, overlap, window, two hops of emission weights, six PSD/gain
             // arrays, plus five MCRA arrays only in Adaptive mode.
-            bytes += (2 * size * channels + 2 * size + 6 * bins) * size_of::<f32>();
+            bytes += (2 * size * channels + size + size / 2 + 6 * bins) * size_of::<f32>();
             bytes += size * channels * size_of::<Complex32>();
             if config.mode == DenoiseMode::Adaptive {
                 bytes += 5 * bins * size_of::<f32>();
@@ -531,6 +558,12 @@ impl Denoiser {
         } else {
             0
         };
+        let window = window(spectral_size);
+        let weights = if spectral {
+            emission_weights(&window, hop)
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             config,
             sample_rate,
@@ -549,13 +582,13 @@ impl Denoiser {
             input: vec![0.0; spectral_size * channels],
             filled: spectral_size / 2,
             frame_start: -(size as i64 / 2),
-            window: if spectral { window(size) } else { Vec::new() },
+            window,
             forward,
             inverse,
             spectra: vec![Complex32::default(); spectral_size * channels],
             scratch: vec![Complex32::default(); scratch_len],
             overlap: vec![0.0; spectral_size * channels],
-            weights: vec![0.0; spectral_size],
+            weights,
             power: vec![0.0; bins],
             smoothed_power: vec![0.0; bins],
             noise,
@@ -654,6 +687,7 @@ impl Denoiser {
     fn emit(
         &mut self,
         wet_frame: usize,
+        weight: f32,
         output: &mut Vec<f32>,
         immediate_dry: Option<&[f32]>,
     ) -> Result<()> {
@@ -663,7 +697,7 @@ impl Denoiser {
             let processed = if self.config.mode == DenoiseMode::Off {
                 self.frame[ch]
             } else {
-                self.overlap[wet_frame * self.channels + ch] / self.weights[wet_frame]
+                self.overlap[wet_frame * self.channels + ch] / weight
             };
             ensure!(processed.is_finite(), "denoise output overflow");
             *sample = if wet == 1.0 {
@@ -705,7 +739,7 @@ impl Denoiser {
             "denoise repair overflow"
         );
         if self.config.mode == DenoiseMode::Off {
-            self.emit(0, output, immediate_dry)?;
+            self.emit(0, 1.0, output, immediate_dry)?;
             return Ok(());
         }
         self.input[self.filled * self.channels..(self.filled + 1) * self.channels]
@@ -768,13 +802,11 @@ impl Denoiser {
                 );
             }
         }
-        for (weight, window) in self.weights.iter_mut().zip(&self.window) {
-            *weight += window * window;
-        }
+        let weight_offset = if self.frame_start > 0 { self.hop } else { 0 };
         for i in 0..self.hop {
             let position = self.frame_start + i as i64;
             if position >= 0 && (position as u64) < self.received && self.emitted < self.received {
-                self.emit(i, output, None)?;
+                self.emit(i, self.weights[weight_offset + i], output, None)?;
             }
         }
         let samples = self.hop * self.channels;
@@ -782,8 +814,6 @@ impl Denoiser {
         self.filled -= self.hop;
         self.overlap.copy_within(samples.., 0);
         self.overlap[(self.size - self.hop) * self.channels..].fill(0.0);
-        self.weights.copy_within(self.hop.., 0);
-        self.weights[self.size - self.hop..].fill(0.0);
         self.frame_start += self.hop as i64;
         self.analyzed += 1;
         Ok(())
@@ -1028,7 +1058,6 @@ impl Denoiser {
         self.filled = self.input.len() / self.channels / 2;
         self.frame_start = -(self.size as i64 / 2);
         self.overlap.fill(0.0);
-        self.weights.fill(0.0);
         self.power.fill(0.0);
         self.smoothed_power.fill(0.0);
         if self.config.mode == DenoiseMode::Adaptive && !self.noise.is_empty() {
@@ -1154,6 +1183,29 @@ mod tests {
         assert!(processor.dry.is_empty());
         assert_eq!(processor.dry.capacity(), capacity);
         assert_eq!(processor.analyzed, 0);
+    }
+
+    #[test]
+    fn prepared_emission_weights_match_chronological_overlap_add_bitwise() {
+        for size in [256, 512, 1024, 2048, 4096, 8192] {
+            let hop = size / 4;
+            let window = window(size);
+            let prepared = emission_weights(&window, hop);
+            let mut rolling = vec![0.0_f32; size];
+            for frame in 0..8 {
+                for (weight, w) in rolling.iter_mut().zip(&window) {
+                    *weight += w * w;
+                }
+                if frame >= 2 {
+                    let offset = if frame == 2 { 0 } else { hop };
+                    for i in 0..hop {
+                        assert_eq!(rolling[i].to_bits(), prepared[offset + i].to_bits());
+                    }
+                }
+                rolling.copy_within(hop.., 0);
+                rolling[size - hop..].fill(0.0);
+            }
+        }
     }
 
     #[test]
@@ -1297,7 +1349,7 @@ mod tests {
         processor.frame.copy_from_slice(&[f32::MAX, -f32::MAX]);
         let mut output = Vec::new();
         processor
-            .emit(0, &mut output, Some(&[-f32::MAX, f32::MAX]))
+            .emit(0, 1.0, &mut output, Some(&[-f32::MAX, f32::MAX]))
             .unwrap();
         assert_eq!(output, [0.0; 2]);
         assert_eq!(processor.dry.capacity(), 0);
