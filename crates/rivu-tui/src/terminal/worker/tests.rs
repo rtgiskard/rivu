@@ -226,8 +226,8 @@ fn command_and_query_worker_death_exit_the_owner_before_input() {
                 let (sender, receiver) = bounded(1);
                 let (result_sender, results) = bounded(1);
                 let worker = std::thread::spawn(move || {
-                    let _requests = receiver;
                     let _results = result_sender;
+                    drop(receiver);
                     assert!(!panics, "injected command worker panic");
                 });
                 assert!(matches!(
@@ -257,8 +257,8 @@ fn command_and_query_worker_death_exit_the_owner_before_input() {
                 let (sender, receiver) = bounded(1);
                 let (alive, liveness) = bounded(0);
                 let worker = std::thread::spawn(move || {
-                    let _requests = receiver;
                     let _alive = alive;
+                    drop(receiver);
                     assert!(!panics, "injected query worker panic");
                 });
                 assert!(matches!(
