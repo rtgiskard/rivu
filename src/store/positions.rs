@@ -30,7 +30,7 @@ pub(super) fn insert_tracks(
         ), params![directories, ids])?;
     } else {
         tx.execute(
-            "INSERT INTO insertion_tracks SELECT CAST(key AS INTEGER),value FROM json_each(?1) ORDER BY CAST(key AS INTEGER)",
+            "INSERT INTO insertion_tracks SELECT CAST(key AS INTEGER),value FROM json_each(?1)",
             [ids],
         )?;
     }
