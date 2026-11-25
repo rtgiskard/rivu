@@ -103,6 +103,10 @@ Protocol 60 replaces the three task-status queries with `LookupTask(TaskTarget)`
 and moves shared playlist location fields to the batch response. Database and
 configuration formats are unchanged.
 
+Protocol 62 carries the complete output diagnostic in each Playback section and
+supports cursor continuation for compact Queue identity queries. Restart Core
+and its clients together. See link:21_ipc.adoc#revisions-and-watching[Revisions and watching].
+
 Moving waveform ownership to the GUI changes local side-channel compatibility.
 Realtime PCM uses `.pcm.v6`/`RIVUPCM6`/SHM6`, and generic finite PCM rendering
 uses `.audio.v1`. The database and saved visualization configuration remain

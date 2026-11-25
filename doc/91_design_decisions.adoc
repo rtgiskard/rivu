@@ -720,6 +720,21 @@ latency; 12 gains little at 1.5× CPU, 14 costs about 6×. A `pw-cat` probe show
 tuning already exists and Rivu adds no second setting. No listening test was run.
 Reconsider if per-application tuning is requested or PipeWire changes precedence.
 
+[[DEC-030]]
+=== DEC-030: Replace Playback diagnostics with their section
+
+Protocol 62 uses the Playback revision for progress and output diagnostics.
+Clients apply a single snapshot, including an empty diagnostic after retirement.
+
+Two local clients watching a playing 48 kHz stereo WAV received 354 Playback
+responses in three six-second runs. Omitting unchanged diagnostics reduced
+the recorded responses from 68,448 to 23,392 bytes. Replaying the same frames
+with the release codec saved about 0.62 microseconds per encode/decode pair.
+Both encodings used the same protocol 61 envelope to isolate payload cost.
+At this rate, roughly 2.5 kB/s across both clients buys little for a separate
+revision, client-side merge rule and CLI serialization layout. Reconsider if
+the diagnostic payload, update rate or typical client count grows substantially.
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

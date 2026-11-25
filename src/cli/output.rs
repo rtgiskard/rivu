@@ -809,6 +809,10 @@ mod tests {
         assert_eq!(json["revisions"]["playback"], 7);
         assert_eq!(json["revisions"]["current_track"], 11);
         assert_eq!(json["revisions"]["configuration"], 19);
+        assert_eq!(
+            json["playback"]["playback"].get("audio_output"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(json["current_track"]["source_generation"], 13);
         assert_eq!(json["playback"]["playback"]["volume"], 0.25);
         assert_eq!(json["system"]["selected_device"], "live output");

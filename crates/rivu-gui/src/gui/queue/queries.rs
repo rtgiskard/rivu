@@ -2,10 +2,53 @@ use super::model::{QueueJob, QueueLocateRequest, QueueReconcileJob, QueueTarget}
 use super::{Queue, QueueCommit, QueueEvent, QueueIdentity, QueueSelectionRequest};
 use gpui::{Context, Window};
 use rivu_protocol::{
-    model::{Page, Query},
+    model::{Batch, BatchContinuation, Query, QueueCursor},
     response::{QueryError, ViewResponse},
 };
 use std::{ops::Range, time::Duration};
+
+fn selection_batch(
+    view: ViewResponse,
+    after: Option<&BatchContinuation<QueueCursor>>,
+    offset: usize,
+    limit: usize,
+    total: usize,
+) -> Result<Batch<QueueIdentity, BatchContinuation<QueueCursor>>, &'static str> {
+    let batch = match (after, view) {
+        (None, ViewResponse::QueueIdentityPage(page)) if page.total == total => Batch {
+            rows: page.rows,
+            next: page.next,
+        },
+        (None, ViewResponse::QueueIdentityPage(_)) => return Err("gl-queue-changed"),
+        (Some(after), ViewResponse::QueueIdentityBatch(batch))
+            if after.offset == offset
+                && batch.rows.first().is_some_and(|first| {
+                    (first.position, first.id) > (after.cursor.position, after.cursor.id)
+                }) =>
+        {
+            batch
+        }
+        (Some(_), ViewResponse::QueueIdentityBatch(_)) => return Err("gl-queue-changed"),
+        _ => return Err("gl-queue-range-response"),
+    };
+    if batch.rows.len() != limit
+        || batch
+            .rows
+            .iter()
+            .enumerate()
+            .any(|(i, row)| row.offset != offset + i)
+        || batch.next.is_some() != (offset + limit < total)
+        || batch.next.is_some_and(|next| {
+            next.offset != offset + limit
+                || !batch.rows.last().is_some_and(|last| {
+                    last.position == next.cursor.position && last.id == next.cursor.id
+                })
+        })
+    {
+        return Err("gl-queue-changed");
+    }
+    Ok(batch)
+}
 
 impl Queue {
     pub(in crate::gui) fn apply_queue_search(
@@ -643,6 +686,7 @@ impl Queue {
                 if let Some(Range { start, end }) = span {
                     let mut identities = Vec::with_capacity(end - start);
                     let mut offset = start;
+                    let mut after = None;
                     while offset < end {
                         if !this
                             .update(cx, |this, cx| {
@@ -657,55 +701,54 @@ impl Queue {
                         let handle = handle.clone();
                         let ticket = ticket.clone();
                         let query = job.query.clone();
-                        let (response, _) = crate::gui::query::run(
-                            handle,
-                            cx,
-                            move |handle| async move {
-                                handle
-                                    .query_if_current(
-                                        Query::QueueIdentityPage {
-                                            query,
-                                            offset,
-                                            limit,
-                                        },
-                                        ticket,
-                                    )
-                                    .await
+                        let request = match after {
+                            None => Query::QueueIdentityPage {
+                                query,
+                                offset,
+                                limit,
                             },
-                            |response, cx| {
-                                let _ = this.update(cx, |this, cx| {
-                                    this.timeout_queue_selection(&job, response, cx);
-                                });
+                            Some(after) => Query::QueueIdentityBatch {
+                                query,
+                                after,
+                                limit,
                             },
-                        )
-                        .await;
+                        };
+                        let (response, _) =
+                            crate::gui::query::run(
+                                handle,
+                                cx,
+                                move |handle| async move {
+                                    handle.query_if_current(request, ticket).await
+                                },
+                                |response, cx| {
+                                    let _ = this.update(cx, |this, cx| {
+                                        this.timeout_queue_selection(&job, response, cx);
+                                    });
+                                },
+                            )
+                            .await;
                         if matches!(
                             &response.result,
                             Err(QueryError::RevisionChanged | QueryError::Cancelled)
                         ) {
                             return Ok(None);
                         }
-                        if matches!(&response.result, Ok(ViewResponse::QueueIdentityPage(_)))
+                        if response.result.is_ok()
                             && projection.stamp(response.revisions) != job.stamp
                         {
                             return Ok(None);
                         }
-                        let ViewResponse::QueueIdentityPage(Page { rows: page, total }) =
-                            response.result.map_err(|error| error.to_string())?
-                        else {
-                            return Err(i18n.text("gl-queue-range-response").into());
-                        };
-                        if total != job.total
-                            || page.len() != limit
-                            || page
-                                .iter()
-                                .enumerate()
-                                .any(|(index, row)| row.offset != offset + index)
-                        {
-                            return Err(i18n.text("gl-queue-changed").into());
-                        }
-                        offset += page.len();
-                        identities.extend(page);
+                        let batch = selection_batch(
+                            response.result.map_err(|error| error.to_string())?,
+                            after.as_ref(),
+                            offset,
+                            limit,
+                            job.total,
+                        )
+                        .map_err(|key| i18n.text(key).to_owned())?;
+                        offset += batch.rows.len();
+                        after = batch.next;
+                        identities.extend(batch.rows);
                     }
                     rows = Some(identities);
                 }
@@ -756,5 +799,69 @@ impl Queue {
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivu_protocol::model::QueueIdentityPage;
+
+    #[test]
+    fn range_accepts_compact_continuations_until_its_own_end() {
+        let first = QueueIdentity {
+            id: 4,
+            track_id: 2,
+            position: 10,
+            offset: 3,
+        };
+        let last = QueueIdentity {
+            id: 1,
+            position: 12,
+            offset: 4,
+            ..first
+        };
+        let after = BatchContinuation {
+            cursor: QueueCursor {
+                position: first.position,
+                id: first.id,
+            },
+            offset: last.offset,
+            scope: [42; 32],
+        };
+        let next = BatchContinuation {
+            cursor: QueueCursor {
+                position: last.position,
+                id: last.id,
+            },
+            offset: last.offset + 1,
+            ..after
+        };
+        let page = ViewResponse::QueueIdentityPage(QueueIdentityPage {
+            total: 9,
+            rows: vec![first],
+            next: Some(after),
+        });
+        let first_batch = selection_batch(page, None, 3, 1, 9).unwrap();
+        assert_eq!(first_batch.rows, [first]);
+        let response = |row, next| {
+            ViewResponse::QueueIdentityBatch(Batch {
+                rows: vec![row],
+                next,
+            })
+        };
+        let fetched = selection_batch(
+            response(last, Some(next)),
+            first_batch.next.as_ref(),
+            4,
+            1,
+            9,
+        )
+        .unwrap();
+        assert_eq!(fetched.rows, [last]);
+        assert!(selection_batch(response(last, None), Some(&after), 4, 1, 5).is_ok());
+        assert!(selection_batch(response(first, Some(next)), Some(&after), 4, 1, 9).is_err());
+        assert!(selection_batch(response(last, None), Some(&after), 4, 1, 9).is_err());
+        assert!(selection_batch(response(last, Some(after)), Some(&after), 4, 1, 9).is_err());
     }
 }

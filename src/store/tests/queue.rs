@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn filtered_identity_batch_stops_at_the_requested_match() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(id,path) VALUES(1,'needle'),(2,'other');
+         WITH RECURSIVE positions(p) AS (VALUES(0) UNION ALL SELECT p+1 FROM positions WHERE p<2000)
+         INSERT INTO playlist_entries(playlist_id,track_id,position)
+         SELECT 0,CASE WHEN p IN (0,1,1000,1001) THEN 1 ELSE 2 END,p FROM positions;",
+        )
+        .unwrap();
+    let stamp = QueryStamp::default();
+    let query = Some("needle");
+    let first = store.queue_identity_page(query, 0, 1, stamp).unwrap();
+    assert_eq!(first.total, 4);
+    let counter = SqlVmSteps::new(&store.conn);
+    let early = store
+        .queue_identity_batch(query, first.next.unwrap(), 1, stamp)
+        .unwrap();
+    let early_steps = counter.take();
+    assert_eq!(early.rows[0].position, 1);
+    let far = store
+        .queue_identity_batch(query, early.next.unwrap(), 1, stamp)
+        .unwrap();
+    let gap_steps = counter.take();
+    assert_eq!(far.rows[0].position, 1000);
+    let last = store
+        .queue_identity_batch(query, far.next.unwrap(), 16, stamp)
+        .unwrap();
+    let last_steps = counter.take();
+    assert_eq!(last.rows[0].position, 1001);
+    assert!(last.next.is_none());
+    // Only the middle batch has to cross the thousand-entry gap.
+    assert!(early_steps * 10 < gap_steps, "{early_steps} vs {gap_steps}");
+    assert!(last_steps * 10 < gap_steps, "{last_steps} vs {gap_steps}");
+}
+
+#[test]
 fn queue_identity_projections_preserve_filtered_occurrences_and_scope() {
     use rivu_protocol::model::{MAX_QUERY_ROWS, QueueIdentity};
 
@@ -50,14 +88,36 @@ fn queue_identity_projections_preserve_filtered_occurrences_and_scope() {
             offset: 2,
         },
     ];
-    let first = store.queue_identity_page(query, 0, 2).unwrap();
-    let second = store.queue_identity_page(query, 2, 2).unwrap();
+    let stamp = QueryStamp::default();
+    let first = store.queue_identity_page(query, 0, 2, stamp).unwrap();
+    let second = store.queue_identity_page(query, 2, 2, stamp).unwrap();
     assert_eq!((first.total, second.total), (3, 3));
     assert_eq!(first.rows, expected[..2]);
     assert_eq!(second.rows, expected[2..]);
+    assert!(second.next.is_none());
+    let after = first.next.unwrap();
+    let rest = store
+        .queue_identity_batch(Some("needle %_"), after, 2, stamp)
+        .unwrap();
+    assert_eq!(rest.rows, second.rows);
+    assert!(rest.next.is_none());
+    for limit in [0, MAX_QUERY_ROWS + 1] {
+        assert!(
+            store
+                .queue_identity_batch(query, after, limit, stamp)
+                .is_err()
+        );
+    }
+    assert!(matches!(
+        store
+            .queue_identity_batch(Some("other"), after, 1, stamp)
+            .unwrap_err()
+            .downcast_ref::<rivu_protocol::response::QueryError>(),
+        Some(rivu_protocol::response::QueryError::RevisionChanged)
+    ));
     assert!(
         store
-            .queue_identity_page(query, 3, 1)
+            .queue_identity_page(query, 3, 1, stamp)
             .unwrap()
             .rows
             .is_empty()
@@ -84,7 +144,7 @@ fn queue_identity_projections_preserve_filtered_occurrences_and_scope() {
             .is_err()
     );
 
-    let unfiltered = store.queue_identity_page(None, 4, 1).unwrap();
+    let unfiltered = store.queue_identity_page(None, 4, 1, stamp).unwrap();
     assert_eq!(unfiltered.total, 5);
     assert_eq!(
         unfiltered.rows,

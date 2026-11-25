@@ -315,6 +315,14 @@ pub struct QueueCursor {
     pub id: u64,
 }
 
+/// Random-access identity page with an exact total and a sequential continuation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueIdentityPage {
+    pub total: usize,
+    pub rows: Vec<QueueIdentity>,
+    pub next: Option<BatchContinuation<QueueCursor>>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackStatus {

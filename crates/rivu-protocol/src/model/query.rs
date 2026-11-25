@@ -133,6 +133,11 @@ pub enum Query {
         offset: usize,
         limit: usize,
     },
+    QueueIdentityBatch {
+        query: Option<String>,
+        after: BatchContinuation<QueueCursor>,
+        limit: usize,
+    },
     QueueEntryLocations {
         query: Option<String>,
         queue_ids: Vec<u64>,
@@ -244,6 +249,7 @@ impl QueryStamp {
         hash.update(&self.revisions.library.to_le_bytes());
         hash.update(&self.revisions.bitrate.to_le_bytes());
         hash.update(&self.revisions.queue.to_le_bytes());
+        hash.update(&self.revisions.queue_structure.to_le_bytes());
         for scope in [
             self.revisions.playlist_entries,
             self.revisions.playlist_metadata,
@@ -307,6 +313,7 @@ pub enum QueryIdentity<'a> {
     QueuePage(&'a Option<String>),
     QueueBatch(&'a Option<String>),
     QueueIdentityPage(&'a Option<String>),
+    QueueIdentityBatch(&'a Option<String>),
     QueueEntryLocations(&'a [u64], &'a Option<String>),
     PlaylistEntry(i64),
     DuplicateGroups,
@@ -393,7 +400,9 @@ impl Query {
             }
             // Unfiltered occurrence identities and positions change only with
             // membership/order; filtered ranks also follow queued match values.
-            Self::QueueIdentityPage { query, .. } | Self::QueueEntryLocations { query, .. } => {
+            Self::QueueIdentityPage { query, .. }
+            | Self::QueueIdentityBatch { query, .. }
+            | Self::QueueEntryLocations { query, .. } => {
                 if query.is_some() {
                     stamp.queue = revisions.queue;
                 } else {
@@ -486,6 +495,7 @@ impl Query {
             | Self::QueuePage { query, .. }
             | Self::QueueBatch { query, .. }
             | Self::QueueIdentityPage { query, .. }
+            | Self::QueueIdentityBatch { query, .. }
             | Self::QueueEntryLocations { query, .. }
             | Self::LibraryMatchCounts { query, .. } => query.as_deref(),
             Self::OtherTracksCount
@@ -590,6 +600,7 @@ impl Query {
             Self::QueuePage { query, .. } => QueryIdentity::QueuePage(query),
             Self::QueueBatch { query, .. } => QueryIdentity::QueueBatch(query),
             Self::QueueIdentityPage { query, .. } => QueryIdentity::QueueIdentityPage(query),
+            Self::QueueIdentityBatch { query, .. } => QueryIdentity::QueueIdentityBatch(query),
             Self::QueueEntryLocations { queue_ids, query } => {
                 QueryIdentity::QueueEntryLocations(queue_ids, query)
             }
@@ -979,12 +990,25 @@ mod tests {
             assert_ne!(page.identity(), changed_filter.identity());
             for query in [
                 page,
+                Query::QueueIdentityBatch {
+                    query: filter.clone(),
+                    after: BatchContinuation {
+                        cursor: QueueCursor { position: 2, id: 4 },
+                        offset: 1,
+                        scope: [0; 32],
+                    },
+                    limit: 2,
+                },
                 Query::QueueEntryLocations {
                     query: filter.clone(),
                     queue_ids: vec![9],
                 },
             ] {
                 assert_eq!(query.stamp(baseline), query.stamp(unrelated));
+                assert_eq!(
+                    query.stamp(baseline),
+                    query.stamp(baseline.with_bitrate_revision(1))
+                );
                 assert!(impact(&query, baseline, structural).coordinates_changed);
                 assert_eq!(impact(&query, baseline, content).rows_changed(), filtered);
             }

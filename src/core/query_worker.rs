@@ -150,6 +150,17 @@ impl ReadView<'_> {
                 query.as_deref(),
                 *offset,
                 *limit,
+                current_stamp,
+            )?),
+            Query::QueueIdentityBatch {
+                query,
+                after,
+                limit,
+            } => ViewResponse::QueueIdentityBatch(self.store.queue_identity_batch(
+                query.as_deref(),
+                *after,
+                *limit,
+                current_stamp,
             )?),
             Query::QueueEntryLocations { query, queue_ids } => ViewResponse::QueueEntryLocations(
                 self.store
@@ -1444,6 +1455,21 @@ mod tests {
                 limit: 10,
                 expected: None,
             };
+            let ViewResponse::QueueIdentityPage(first_ids) = execute_read(
+                &core,
+                &path,
+                &mut reader,
+                &fence,
+                Query::QueueIdentityPage {
+                    query: Some("track".into()),
+                    offset: 0,
+                    limit: 1,
+                },
+            )
+            .result
+            .unwrap() else {
+                panic!("expected identity page")
+            };
             let identities: Vec<_> = page.rows.iter().map(QueueIdentity::from).collect();
             let assert_unchanged = |response: QueryResponse| match response.result.unwrap() {
                 ViewResponse::QueuePage(current) => assert_eq!(current, page),
@@ -1452,6 +1478,10 @@ mod tests {
                     assert_eq!(current.rows, identities);
                 }
                 ViewResponse::QueueEntryLocations(current) => assert_eq!(current, identities),
+                ViewResponse::QueueIdentityBatch(current) => {
+                    assert_eq!(current.rows, identities[1..]);
+                    assert!(current.next.is_none());
+                }
                 ViewResponse::QueueBatch(current) => {
                     assert_eq!(current.rows, page.rows[1..]);
                     assert!(current.next.is_none());
@@ -1465,6 +1495,11 @@ mod tests {
                 Query::QueueIdentityPage {
                     query: Some("track".into()),
                     offset: 0,
+                    limit: 10,
+                },
+                Query::QueueIdentityBatch {
+                    query: Some("track".into()),
+                    after: first_ids.next.expect("multiple matching occurrences"),
                     limit: 10,
                 },
                 Query::QueueEntryLocations {
@@ -1489,7 +1524,10 @@ mod tests {
                 let current = execute_read(&core, &path, &mut reader, &fence, query.clone());
                 if queue_changed {
                     assert!(matches!(response.result, Err(QueryError::RevisionChanged)));
-                    if matches!(query, Query::QueueBatch { .. }) {
+                    if matches!(
+                        query,
+                        Query::QueueBatch { .. } | Query::QueueIdentityBatch { .. }
+                    ) {
                         assert!(matches!(current.result, Err(QueryError::RevisionChanged)));
                     } else {
                         assert!(current.result.is_ok());

@@ -299,8 +299,9 @@ pub enum ViewResponse {
         page: Page<crate::model::DuplicateMember>,
         selected: Vec<crate::model::DuplicateMember>,
     },
-    QueueIdentityPage(Page<QueueIdentity>),
+    QueueIdentityPage(crate::model::QueueIdentityPage),
     QueueEntryLocations(Vec<QueueIdentity>),
+    QueueIdentityBatch(Batch<QueueIdentity, BatchContinuation<QueueCursor>>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskLookup {

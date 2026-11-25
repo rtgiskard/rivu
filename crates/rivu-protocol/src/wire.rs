@@ -18,7 +18,7 @@ use rivu_format::decoder_hint::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub const PROTOCOL_VERSION: u8 = 60;
+pub const PROTOCOL_VERSION: u8 = 62;
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub const MAX_CLIENTS: usize = 16;
@@ -276,6 +276,11 @@ pub enum WireQuery {
     QueueEntryLocations {
         query: Option<String>,
         queue_ids: Vec<u64>,
+    },
+    QueueIdentityBatch {
+        query: Option<String>,
+        after: crate::model::BatchContinuation<crate::model::QueueCursor>,
+        limit: u64,
     },
 }
 
@@ -835,6 +840,15 @@ impl From<Query> for WireQuery {
                 offset: offset as u64,
                 limit: limit as u64,
             },
+            Query::QueueIdentityBatch {
+                query,
+                after,
+                limit,
+            } => Self::QueueIdentityBatch {
+                query,
+                after,
+                limit: limit as u64,
+            },
             Query::QueueEntryLocations { query, queue_ids } => {
                 Self::QueueEntryLocations { query, queue_ids }
             }
@@ -1086,6 +1100,15 @@ impl TryFrom<WireQuery> for Query {
             } => Self::QueueIdentityPage {
                 query,
                 offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::QueueIdentityBatch {
+                query,
+                after,
+                limit,
+            } => Self::QueueIdentityBatch {
+                query,
+                after,
                 limit: wire_usize(limit, "limit")?,
             },
             WireQuery::QueueEntryLocations { query, queue_ids } => {

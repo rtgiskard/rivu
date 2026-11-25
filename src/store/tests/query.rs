@@ -112,7 +112,7 @@ fn projection_totals_and_rows_follow_filters_and_writer_changes() {
     assert_eq!(counts[4](), 147);
 }
 
-fn filtered_traversal_steps(total: usize) -> (u64, u64) {
+fn filtered_traversal_steps(total: usize) -> (u64, u64, u64) {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
         .conn
@@ -162,6 +162,32 @@ fn filtered_traversal_steps(total: usize) -> (u64, u64) {
     }
     assert_eq!(queue_count, 2 * (total / 7));
     let queue_steps = counter.take();
+    // A range can begin at any matching rank. Only this first page pays for OFFSET.
+    let start = queue_count / 3;
+    let first = store
+        .queue_identity_page(Some("needle"), start, 17, stamp)
+        .unwrap();
+    assert_eq!(first.total, queue_count);
+    let mut rank = start;
+    let mut rows = first.rows;
+    let mut next = first.next;
+    loop {
+        for row in rows {
+            assert_eq!(row.offset, rank);
+            assert_eq!(row.track_id as usize, (rank / 2 + 1) * 7);
+            assert_eq!(row.position, 2 * (row.track_id as usize - 1) + rank % 2);
+            rank += 1;
+        }
+        let Some(after) = next else { break };
+        assert_eq!(after.offset, rank);
+        let batch = store
+            .queue_identity_batch(Some("needle"), after, 17, stamp)
+            .unwrap();
+        rows = batch.rows;
+        next = batch.next;
+    }
+    assert_eq!(rank, queue_count);
+    let identity_steps = counter.take();
     let mut entry_after = None;
     let mut entry_count = 0;
     loop {
@@ -196,7 +222,7 @@ fn filtered_traversal_steps(total: usize) -> (u64, u64) {
     assert_eq!(entry_page.total, entry_count);
     assert_eq!(entry_page.rows[0].offset, jump);
     assert_eq!(entry_page.rows[0].position, (jump + 1) * 7 - 1);
-    (queue_steps, entry_steps)
+    (queue_steps, entry_steps, identity_steps)
 }
 
 #[test]
@@ -247,11 +273,17 @@ fn unfiltered_occurrence_lookup_work_is_bounded_by_requested_ids() {
 fn filtered_continuation_sql_vm_steps_scale_linearly() {
     let small = filtered_traversal_steps(4096);
     let large = filtered_traversal_steps(8192);
-    eprintln!("filtered traversal VM steps (queue, playlist): 4096={small:?}, 8192={large:?}");
-    assert!(small.0 > 0 && small.1 > 0);
+    eprintln!(
+        "filtered traversal VM steps (queue, playlist, queue identities): 4096={small:?}, 8192={large:?}"
+    );
+    assert!(small.0 > 0 && small.1 > 0 && small.2 > 0);
     // Doubling the sequence must not approach the fourfold prefix-rescan cost.
     assert!(large.0 < small.0 * 3, "queue: {small:?} -> {large:?}");
     assert!(large.1 < small.1 * 3, "playlist: {small:?} -> {large:?}");
+    assert!(
+        large.2 < small.2 * 3,
+        "queue identities: {small:?} -> {large:?}"
+    );
 }
 
 #[test]

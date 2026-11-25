@@ -1,15 +1,12 @@
 use super::*;
 use crate::core::dispatch::BusinessEvent;
 
-#[test]
-fn output_diagnostics_reject_old_sources_segments_and_reactivation() {
+fn output_diagnostics(generation: u64) -> rivu_protocol::model::AudioOutputState {
     use rivu_protocol::model::{
         AudioOutputState, AudioSourceFormat, AudioStreamFormat, OutputMetrics, ReplayGainStatus,
     };
-    let (_directory, mut core) = fixture();
-    playing(&mut core, 1);
-    let mut state = AudioOutputState {
-        source_generation: core.transport.generation,
+    AudioOutputState {
+        source_generation: generation,
         segment: 2,
         active: true,
         source: Arc::new(AudioSourceFormat {
@@ -46,7 +43,14 @@ fn output_diagnostics_reject_old_sources_segments_and_reactivation() {
         metrics: OutputMetrics::default(),
         session_underruns: 1,
         session_missing_seconds: 0.01,
-    };
+    }
+}
+
+#[test]
+fn output_diagnostics_reject_old_sources_segments_and_reactivation() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    let mut state = output_diagnostics(core.transport.generation);
     core.transport.output_prior_underruns = 3;
     core.transport.output_prior_missing_seconds = 0.02;
     core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state.clone())))
@@ -90,6 +94,54 @@ fn output_diagnostics_reject_old_sources_segments_and_reactivation() {
     core.audio_event(AudioEvent::OutputDiagnostics(Arc::new(state)))
         .unwrap();
     assert_eq!(core.state.playback.audio_output, retired);
+}
+
+#[test]
+fn playback_snapshots_include_current_diagnostics_even_on_progress_updates() {
+    use rivu_protocol::{
+        transport::{decode_response_frame, encode_response_frame_into, validate_state},
+        wire::{WireResponse, state_response, wire_state},
+    };
+    let (_directory, mut core) = fixture();
+    let (handle, _requests) = request_handle(&core, 1);
+    let sections = StateSections {
+        playback: true,
+        ..Default::default()
+    };
+    let read = |since| {
+        let request = StateRequest { sections, since };
+        let mut bytes = Vec::new();
+        encode_response_frame_into(
+            &WireResponse::State(wire_state(handle.read_state(request))),
+            &mut bytes,
+        )
+        .unwrap();
+        let WireResponse::State(wire) = decode_response_frame(&bytes[4..]).unwrap() else {
+            panic!("expected state")
+        };
+        let response = validate_state(state_response(wire), request).unwrap();
+        (response.revisions, response.playback.unwrap().playback)
+    };
+    let output = Arc::new(output_diagnostics(1));
+    core.state.playback.audio_output = Some(output.clone());
+    core.publish();
+    let (initial_revision, initial) = read(None);
+    assert_eq!(initial.audio_output.as_ref(), Some(&output));
+    core.state.playback.position = 3.0;
+    core.publish();
+    let (progress_revision, progress) = read(Some(initial_revision));
+    assert_eq!(progress.position, 3.0);
+    assert_eq!(progress.audio_output.as_ref(), Some(&output));
+
+    Arc::make_mut(core.state.playback.audio_output.as_mut().unwrap()).segment += 1;
+    core.publish();
+    let (updated_revision, updated) = read(Some(progress_revision));
+    assert_eq!(updated.audio_output.unwrap().segment, output.segment + 1);
+
+    core.state.playback.audio_output = None;
+    core.publish();
+    let (_, cleared) = read(Some(updated_revision));
+    assert!(cleared.audio_output.is_none());
 }
 
 #[test]

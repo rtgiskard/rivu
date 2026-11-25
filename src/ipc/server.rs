@@ -22,7 +22,10 @@ use rivu_protocol::wire::{
 use rivu_protocol::{
     model::Query,
     query_tracking::QueryEpoch,
-    response::{QueryError, QueryResponse, StateRequest, StateResponse, StateWatch, TaskOutcome},
+    response::{
+        QueryError, QueryResponse, StateRequest, StateResponse, StateSections, StateWatch,
+        TaskOutcome,
+    },
 };
 use std::{
     fs,
@@ -253,11 +256,17 @@ async fn wait_for_query(
     }
 }
 
+#[derive(Default)]
+struct ConnectionWatch {
+    subscription: Option<(StateSections, Receiver<()>)>,
+}
+
 fn wait_for_state<'a>(
     stream: &'a mut UnixStream,
     reader: &'a mut RequestReader,
     write_buffer: &'a mut Vec<u8>,
     handle: &'a CoreHandle,
+    connection: &'a mut ConnectionWatch,
     watch: StateWatch,
     shutdown: &'a Receiver<()>,
 ) -> impl Future<Output = Result<Option<StateResponse>>> + 'a {
@@ -265,21 +274,45 @@ fn wait_for_state<'a>(
         sections: watch.sections,
         since: Some(watch.revisions),
     };
+    if connection
+        .subscription
+        .as_ref()
+        .is_some_and(|(sections, _)| *sections != watch.sections)
+    {
+        connection.subscription = None;
+    }
+    // Consume the coalesced wakeup before reading the state it announces. A
+    // publication after that read must keep its wakeup for the next wait.
+    if let Some((_, updates)) = &connection.subscription {
+        let _ = updates.try_recv();
+    }
     let initial = handle.read_state(request);
-    // No subscription is needed for an available delta. Otherwise recheck
-    // after subscribing so a publication in the gap cannot be missed.
-    let updates = initial.sections().is_empty().then(|| {
-        handle.subscribe_revisions(crate::core::RevisionInterest::Sections(watch.sections))
-    });
+    let updates = if initial.sections().is_empty() {
+        let registering = connection.subscription.is_none();
+        let (_, receiver) = connection.subscription.get_or_insert_with(|| {
+            (
+                watch.sections,
+                handle.subscribe_revisions(crate::core::RevisionInterest::Sections(watch.sections)),
+            )
+        });
+        Some((receiver, registering))
+    } else {
+        None
+    };
     async move {
-        let Some(updates) = updates else {
+        let Some((updates, registering)) = updates else {
             return Ok(Some(initial));
         };
-        loop {
+        // Only a newly registered receiver can have missed the publication
+        // between the initial read and registration. Reconcile it before waiting.
+        if registering {
+            let _ = updates.try_recv();
             let response = handle.read_state(request);
             if !response.sections().is_empty() {
                 return Ok(Some(response));
             }
+        }
+        loop {
             futures::select_biased! {
                 _ = shutdown.recv().fuse() => return Ok(None),
                 interrupted = reader.read_wait_interrupt(stream, |_| {}).fuse() => {
@@ -288,8 +321,11 @@ fn wait_for_state<'a>(
                 },
                 changed = updates.recv().fuse() => { if changed.is_err() { return Ok(None); } }
             }
+            let response = handle.read_state(request);
+            if !response.sections().is_empty() {
+                return Ok(Some(response));
+            }
         }
-        drop(updates);
         write_error_frame(
             stream,
             write_buffer,
@@ -340,6 +376,7 @@ async fn serve_connection(
     let mut reader = RequestReader::default();
     let mut write_buffer = Vec::new();
     let mut session = SessionState::Unbound;
+    let mut state_watch = ConnectionWatch::default();
     let mut desktop_registration = None;
     loop {
         // Socket readiness alone does not impose a cooperative execution budget.
@@ -518,6 +555,7 @@ async fn serve_connection(
                     &mut reader,
                     &mut write_buffer,
                     &handle,
+                    &mut state_watch,
                     watch,
                     &shutdown,
                 )
@@ -641,7 +679,7 @@ fn log_connection_result(result: Result<()>) {
 mod tests {
     use super::*;
     use futures::io::AsyncWriteExt;
-    use rivu_protocol::{response::StateSections, transport::encode_request_frame_into};
+    use rivu_protocol::transport::encode_request_frame_into;
     use std::{
         future::Future,
         task::{Context as TaskContext, Waker},
@@ -1258,11 +1296,13 @@ mod tests {
             let mut write_buffer = Vec::new();
             let (_stop, shutdown) = async_channel::bounded(1);
             let baseline = handle.state_revisions();
+            let mut connection = ConnectionWatch::default();
             let waiting = wait_for_state(
                 &mut stream,
                 &mut reader,
                 &mut write_buffer,
                 &handle,
+                &mut connection,
                 baseline.into(),
                 &shutdown,
             );
@@ -1274,24 +1314,64 @@ mod tests {
                 timeout(Duration::from_secs(2), waiting).await.unwrap().unwrap(),
                 Some(state) if state.revisions == current && state.sections().library
             ));
-            assert_eq!(handle.test_revision_subscriptions().1, 0);
-            // An already changed baseline replies without another subscription.
+            assert_eq!(handle.test_revision_subscriptions(), (1, 1));
+            let first = connection.subscription.as_ref().unwrap().1.clone();
+            // An immediate delta consumes its coalesced notification and reuses the receiver.
+            let current = handle.test_advance_revision(true);
+            assert!(!first.is_empty());
             assert!(matches!(
                 wait_for_state(
-                    &mut stream, &mut reader, &mut write_buffer, &handle, baseline.into(), &shutdown,
+                    &mut stream, &mut reader, &mut write_buffer, &handle, &mut connection, baseline.into(), &shutdown,
                 ).await.unwrap(),
                 Some(state) if state.revisions == current && state.sections().library
             ));
-            let (slots, live) = handle.test_revision_subscriptions();
-            assert_eq!(live, 0);
-            assert!(slots <= 1);
+            assert!(first.is_empty());
+            let waiting = wait_for_state(
+                &mut stream,
+                &mut reader,
+                &mut write_buffer,
+                &handle,
+                &mut connection,
+                current.into(),
+                &shutdown,
+            );
+            handle.test_advance_revision(true);
+            assert!(waiting.await.unwrap().unwrap().sections().library);
+            assert!(first.same_channel(&connection.subscription.as_ref().unwrap().1));
+            drop(first);
+            // Changing selection retires the old registration even if the new
+            // wait finds an immediate delta and needs no receiver of its own.
+            let library = StateWatch {
+                revisions: baseline,
+                sections: StateSections {
+                    library: true,
+                    ..Default::default()
+                },
+            };
+            assert!(
+                wait_for_state(
+                    &mut stream,
+                    &mut reader,
+                    &mut write_buffer,
+                    &handle,
+                    &mut connection,
+                    library,
+                    &shutdown,
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .sections()
+                .library
+            );
+            assert!(connection.subscription.is_none());
             handle.test_advance_revision(true);
             assert_eq!(handle.test_revision_subscriptions(), (0, 0));
         });
     }
 
     #[test]
-    fn state_wait_coalesces_notifications_and_releases_on_each_exit() {
+    fn state_watch_coalesces_notifications_and_releases_on_connection_exit() {
         use rivu_protocol::transport::read_response_frame;
 
         if rivu_utils::test_support::run_in_subprocess(Duration::from_secs(20)) {
@@ -1305,11 +1385,13 @@ mod tests {
                 let mut write_buffer = Vec::new();
                 let (stop, shutdown) = async_channel::bounded(1);
                 let baseline = handle.state_revisions();
+                let mut connection = ConnectionWatch::default();
                 let mut waiting = Box::pin(wait_for_state(
                     &mut stream,
                     &mut reader,
                     &mut write_buffer,
                     &handle,
+                    &mut connection,
                     baseline.into(),
                     &shutdown,
                 ));
@@ -1381,6 +1463,7 @@ mod tests {
                         );
                     }
                 }
+                drop(connection);
                 let (slots, live) = handle.test_revision_subscriptions();
                 assert_eq!(live, 0);
                 assert!(slots <= 1);
@@ -1388,11 +1471,13 @@ mod tests {
                 let baseline = handle.state_revisions();
                 let (_peer, mut stream) = socket_pair();
                 let (_stop, shutdown) = async_channel::bounded(1);
+                let mut connection = ConnectionWatch::default();
                 let waiting = wait_for_state(
                     &mut stream,
                     &mut reader,
                     &mut write_buffer,
                     &handle,
+                    &mut connection,
                     baseline.into(),
                     &shutdown,
                 );
@@ -1402,6 +1487,7 @@ mod tests {
                     timeout(Duration::from_secs(2), waiting).await.unwrap().unwrap(),
                     Some(state) if state.revisions == current && state.sections().library
                 ));
+                drop(connection);
                 let (slots, live) = handle.test_revision_subscriptions();
                 assert_eq!(live, 0);
                 assert!(slots <= 1);

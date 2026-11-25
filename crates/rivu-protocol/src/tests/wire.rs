@@ -1817,7 +1817,7 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
 #[test]
 fn queue_identity_replies_round_trip() {
     use rivu_protocol::{
-        model::{Page, QueueIdentity},
+        model::{Batch, BatchContinuation, QueueCursor, QueueIdentity, QueueIdentityPage},
         response::{QueryRevisions, ViewResponse},
     };
 
@@ -1836,10 +1836,31 @@ fn queue_identity_replies_round_trip() {
         },
     ];
     let mut encoded = Vec::new();
+    let next = BatchContinuation {
+        cursor: QueueCursor {
+            position: 12,
+            id: 20,
+        },
+        offset: 5,
+        scope: [17; 32],
+    };
+    assert_query_round_trip(
+        &mut encoded,
+        Query::QueueIdentityBatch {
+            query: Some("needle".into()),
+            after: next,
+            limit: 4,
+        },
+    );
     for result in [
-        ViewResponse::QueueIdentityPage(Page {
+        ViewResponse::QueueIdentityPage(QueueIdentityPage {
             rows: rows.clone(),
             total: 9,
+            next: Some(next),
+        }),
+        ViewResponse::QueueIdentityBatch(Batch {
+            rows: rows.clone(),
+            next: Some(next),
         }),
         ViewResponse::QueueEntryLocations(rows),
     ] {

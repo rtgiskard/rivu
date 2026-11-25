@@ -5,7 +5,7 @@ use super::{Store, batch_limit};
 use anyhow::{Context, Result, ensure};
 use rivu_protocol::model::{
     Batch, BatchContinuation, MAX_QUERY_ROWS, Page, QueryStamp, QueueCursor, QueueIdentity,
-    QueueRow, QueueState,
+    QueueIdentityPage, QueueRow, QueueState,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::collections::HashSet;
@@ -89,10 +89,6 @@ impl QueueProjection {
             ""
         }
     }
-}
-
-fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
-    queue_row_at_rank(row, None)
 }
 
 fn queue_row_at_rank(row: &rusqlite::Row<'_>, rank: Option<usize>) -> rusqlite::Result<QueueRow> {
@@ -244,7 +240,7 @@ impl Store {
         limit: usize,
     ) -> Result<Page<QueueRow>> {
         self.queue_page_with(
-            query,
+            search_query(query).as_deref(),
             offset,
             limit,
             QueueProjection::Full,
@@ -257,14 +253,38 @@ impl Store {
         query: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<Page<QueueIdentity>> {
-        self.queue_page_with(
-            query,
+        revisions: QueryStamp,
+    ) -> Result<QueueIdentityPage> {
+        let query = search_query(query);
+        let Page { rows, total } = self.queue_page_with(
+            query.as_deref(),
             offset,
             limit,
             QueueProjection::Identity,
             queue_identity,
-        )
+        )?;
+        let next = rows
+            .last()
+            .filter(|row| row.offset + 1 < total)
+            .map(|row| BatchContinuation {
+                cursor: QueueCursor {
+                    position: row.position,
+                    id: row.id,
+                },
+                offset: row.offset + 1,
+                scope: revisions.continuation_scope(query.as_deref(), None),
+            });
+        Ok(QueueIdentityPage { total, rows, next })
+    }
+
+    fn queue_match_count(&self, query: Option<&str>) -> Result<usize> {
+        self.cached_count(super::CountDomain::Queue, &[query.unwrap_or("")], || {
+            if query.is_some() {
+                Ok(self.conn.prepare_cached(concat!("SELECT COUNT(*) FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND ", search_filter!("t", "?1")))?.query_row([query], |row| integer(row, 0))?)
+            } else {
+                Ok(self.conn.prepare_cached("SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0")?.query_row([], |row| integer(row, 0))?)
+            }
+        })
     }
 
     fn queue_page_with<T>(
@@ -275,14 +295,7 @@ impl Store {
         projection: QueueProjection,
         decode: impl Fn(&rusqlite::Row<'_>, Option<usize>) -> rusqlite::Result<T>,
     ) -> Result<Page<T>> {
-        let query = search_query(query);
-        let total = self.cached_count(super::CountDomain::Queue, &[query.as_deref().unwrap_or("")], || {
-            if query.is_some() {
-                Ok(self.conn.prepare_cached(concat!("SELECT COUNT(*) FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND ", search_filter!("t", "?1")))?.query_row([query.as_deref()], |row| integer(row, 0))?)
-            } else {
-                Ok(self.conn.prepare_cached("SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=0")?.query_row([], |row| integer(row, 0))?)
-            }
-        })?;
+        let total = self.queue_match_count(query)?;
         if limit == 0 || offset >= total {
             return Ok(Page {
                 total,
@@ -331,14 +344,61 @@ impl Store {
         limit: usize,
         revisions: QueryStamp,
     ) -> Result<Batch<QueueRow, BatchContinuation<QueueCursor>>> {
+        self.queue_batch_with(
+            query,
+            after,
+            limit,
+            revisions,
+            QueueProjection::Full,
+            queue_row_at_rank,
+        )
+    }
+
+    pub(crate) fn queue_identity_batch(
+        &self,
+        query: Option<&str>,
+        after: BatchContinuation<QueueCursor>,
+        limit: usize,
+        revisions: QueryStamp,
+    ) -> Result<Batch<QueueIdentity, BatchContinuation<QueueCursor>>> {
+        self.queue_batch_with(
+            query,
+            Some(after),
+            limit,
+            revisions,
+            QueueProjection::Identity,
+            queue_identity,
+        )
+    }
+
+    fn queue_batch_with<T>(
+        &self,
+        query: Option<&str>,
+        after: Option<BatchContinuation<QueueCursor>>,
+        limit: usize,
+        revisions: QueryStamp,
+        projection: QueueProjection,
+        decode: impl Fn(&rusqlite::Row<'_>, Option<usize>) -> rusqlite::Result<T>,
+    ) -> Result<Batch<T, BatchContinuation<QueueCursor>>> {
         let limit = batch_limit(limit)?;
         let query = search_query(query);
         let scope = revisions.continuation_scope(query.as_deref(), None);
         if after.is_some_and(|after| after.scope != scope) {
             return Err(rivu_protocol::response::QueryError::RevisionChanged.into());
         }
-        let filter = search_filter!("t", "?4");
-        let mut statement = self.conn.prepare_cached(&format!("SELECT q.id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM playlist_entries q JOIN tracks t ON t.id=q.track_id WHERE q.playlist_id=0 AND (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;
+        let filtered = query.is_some();
+        let filter = if filtered {
+            search_filter!("t", "?4")
+        } else {
+            "?4 IS NULL"
+        };
+        let columns = projection.track_columns();
+        let join = projection.tracks_join(filtered);
+        let mut statement = self.conn.prepare_cached(&format!(
+            "SELECT q.id,q.position,{columns} FROM playlist_entries q {join}
+             WHERE q.playlist_id=0 AND (q.position,q.id)>(?1,?2) AND {filter}
+             ORDER BY q.position,q.id LIMIT ?3"
+        ))?;
         let (position, id) = after.map_or((-1, 0), |cursor| {
             (
                 cursor.cursor.position.min(i64::MAX as usize) as i64,
@@ -347,35 +407,53 @@ impl Store {
         });
         let id = i64::try_from(id).context("Queue cursor ID exceeds database range")?;
         let start = after.map_or(0, |cursor| cursor.offset);
-        let mut rows = statement
-            .query_map(params![position, id, limit + 1, query], queue_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if query.is_some() {
-            for (index, row) in rows.iter_mut().enumerate() {
-                row.offset = start
-                    .checked_add(index)
-                    .context("Queue matching offset overflow")?;
+        let mut rows = Vec::new();
+        let mut has_more = false;
+        let sql_limit = match projection {
+            QueueProjection::Identity => {
+                let remaining = self
+                    .queue_match_count(query.as_deref())?
+                    .saturating_sub(start);
+                let size = remaining.min(limit as usize);
+                rows.reserve_exact(size);
+                has_more = remaining > size;
+                size as i64
             }
-        }
-        let next = if rows.len() > limit as usize {
-            rows.pop();
-            rows.last()
-                .map(|row| {
-                    Ok::<_, anyhow::Error>(BatchContinuation {
-                        cursor: QueueCursor {
-                            position: row.position,
-                            id: row.id,
-                        },
+            QueueProjection::Full => limit + 1,
+        };
+        let mut result = statement.query(params![position, id, sql_limit, query])?;
+        let mut next = None;
+        while let Some(row) = result.next()? {
+            let rank = if filtered {
+                Some(
+                    start
+                        .checked_add(rows.len())
+                        .context("Queue matching offset overflow")?,
+                )
+            } else {
+                None
+            };
+            rows.push(decode(row, rank)?);
+            if rows.len() == limit as usize {
+                let cursor = QueueCursor {
+                    position: integer(row, 1)?,
+                    id: integer(row, 0)?,
+                };
+                if matches!(projection, QueueProjection::Full) {
+                    has_more = result.next()?.is_some();
+                }
+                if has_more {
+                    next = Some(BatchContinuation {
+                        cursor,
                         offset: start
                             .checked_add(rows.len())
                             .context("Queue matching offset overflow")?,
                         scope,
-                    })
-                })
-                .transpose()?
-        } else {
-            None
-        };
+                    });
+                }
+                break;
+            }
+        }
         Ok(Batch { rows, next })
     }
 

@@ -364,6 +364,9 @@ own `source_generation` and output `segment`. Core rejects observations from old
 sources or superseded segments; a retired segment cannot become active again.
 Audio owns measured values and negotiated output facts. Frontends format them
 without inferring hardware state from stream requests or library metadata.
+Each delivered Playback section carries the current diagnostic. Clients replace
+the entire section, including clearing their diagnostic when the slot is empty.
+See link:91_design_decisions.adoc#DEC-030[Playback diagnostic granularity].
 Periodic diagnostics are best-effort, bounded to one update per second; accepted
 control changes can publish sooner, and output retirement publishes final counters.
 No diagnostic timer is added to stable paused playback. See
@@ -588,9 +591,11 @@ and after its token changes; a runtime-only response cannot clear a retained
 configuration or acknowledge an unread configuration revision. Selected sections,
 including simultaneous runtime/configuration changes, come from one publication.
 
-Each in-flight `WaitState` owns its revision subscription. Reply or disconnection
-drops the receiver immediately. The closed registration is pruned on the next
-subscription or state-changing publication.
+A connection registers a revision subscription on its first blocking `WaitState`
+and rechecks state after registration. Subsequent waits for the same sections
+reuse its capacity-one receiver. Changing the selection retires the previous
+receiver, and disconnecting retires the connection's subscription. The next
+registration or state-changing publication prunes closed registrations.
 
 The Queue state section is constant-size: `{total, current_id, current_position,
 revision, structure_revision}`. It never embeds all occurrence IDs or track
@@ -815,18 +820,25 @@ matching rank, never the SQL keyset position. Queue content validates both
 unfiltered and filtered batches; bitrate-bearing payloads also select bitrate.
 Playback-only selection changes do not interrupt traversal.
 
-`QueueIdentityPage {query, offset, limit}` returns `Page<QueueIdentity>` for
-offset-based selection with the same filter, matching total, order, and page
-limit as `QueuePage`. Its rows are `{id, track_id, position, offset}` without
-display metadata. Duplicate track occurrences keep distinct IDs.
+`QueueIdentityPage {query, offset, limit}` starts selection at a matching rank.
+It returns the exact matching `total`, compact `rows` and an optional `next`.
+The filter, order and page limit match `QueuePage`. Each row carries the
+occurrence's `{id, track_id, position, offset}`, so duplicate tracks remain distinct.
+A nonempty page with more matches supplies a continuation, including when the
+first page starts in the middle of the queue. Pass `next` unchanged to
+`QueueIdentityBatch {query, after, limit}` to read subsequent compact rows by
+position and ID. Each batch validates the continuation scope and uses the exact
+matching total for that revision to decide whether to return `next`. A range
+selection can request just the rows through its ending rank, even when the
+next match is far away.
 `QueueEntryLocations {query, queue_ids}` returns the same compact rows for at
 most 256 requested occurrence IDs. It deduplicates repeated IDs, omits missing,
 filtered-out, and non-queue entries, and returns matches in queue order.
-For both projections, `position` is absolute and `offset` is the zero-based rank
+For these identity projections, `position` is absolute and `offset` is the zero-based rank
 among all matches, not among the requested IDs. Unfiltered requests select the
 queue `structure_revision`; filtered requests select the content `revision`,
 because queued title, artist, album or file-name edits can change match ranks.
-Neither selects the bitrate revision. Discard late results when the filter,
+These projections omit the bitrate revision. Discard late results when the filter,
 request generation, or captured revision is no longer current.
 
 `PlaylistEntryLocations {playlist_id, query, entry_ids}` resolves at most 256 stable
@@ -861,7 +873,7 @@ depend on library content and structure; the page also selects bitrate.
 identifies the collection, not a filesystem path.
 Display track rows include their logical source `path`.
 
-`QueuePage`, `QueueBatch`, `QueueIdentityPage`, `QueueEntryLocations`, `PlaylistSummaries`,
+`QueuePage`, `QueueBatch`, `QueueIdentityPage`, `QueueIdentityBatch`, `QueueEntryLocations`, `PlaylistSummaries`,
 `PlaylistSummaryBatch`, `PlaylistEntries`, `PlaylistEntryBatch`,
 `PlaylistEntryLocations`, and `AlbumTracks` accept an optional `query`.
 Summary searches match playlist names; track searches match effective title,

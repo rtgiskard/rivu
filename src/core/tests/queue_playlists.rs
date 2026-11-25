@@ -2368,9 +2368,32 @@ fn queue_queries_recover_committed_structure_before_reply_without_replaying_muta
     use rivu_protocol::model::QueueIdentity;
 
     for worker in [false, true] {
-        for kind in ["page", "batch", "identity-page", "locations"] {
+        for kind in [
+            "page",
+            "batch",
+            "identity-page",
+            "identity-batch",
+            "locations",
+        ] {
             let (directory, mut core) = fixture();
             pending(&mut core, 5);
+            let identity_batch = (kind == "identity-batch").then(|| {
+                let ViewResponse::QueueIdentityPage(page) = core
+                    .view(&Query::QueueIdentityPage {
+                        query: None,
+                        offset: 0,
+                        limit: 1,
+                    })
+                    .unwrap()
+                else {
+                    panic!("expected identity page")
+                };
+                Query::QueueIdentityBatch {
+                    query: None,
+                    after: page.next.unwrap(),
+                    limit: 10,
+                }
+            });
             let connection = committed_queue_scalar_refresh_failure(&mut core, directory.path());
             let revision = core.state.queue.revision;
             let generation = core.transport.generation;
@@ -2396,6 +2419,7 @@ fn queue_queries_recover_committed_structure_before_reply_without_replaying_muta
                     offset: 0,
                     limit: 10,
                 },
+                "identity-batch" => identity_batch.unwrap(),
                 "locations" => Query::QueueEntryLocations {
                     query: None,
                     queue_ids: vec![1, 4, 5],
@@ -2432,22 +2456,26 @@ fn queue_queries_recover_committed_structure_before_reply_without_replaying_muta
                 };
                 assert_eq!(response.revisions.queue, revision);
                 if repaired {
-                    let rows = match response.result.unwrap() {
-                        ViewResponse::QueuePage(page) => {
-                            assert_eq!(page.total, 3);
-                            page.rows.iter().map(QueueIdentity::from).collect()
-                        }
-                        ViewResponse::QueueBatch(batch) => {
-                            batch.rows.iter().map(QueueIdentity::from).collect()
-                        }
-                        ViewResponse::QueueIdentityPage(page) => {
-                            assert_eq!(page.total, 3);
-                            page.rows
-                        }
-                        ViewResponse::QueueEntryLocations(rows) => rows,
-                        _ => panic!("expected queue rows"),
-                    };
-                    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 4, 5]);
+                    if kind == "identity-batch" {
+                        assert!(matches!(response.result, Err(QueryError::RevisionChanged)));
+                    } else {
+                        let rows = match response.result.unwrap() {
+                            ViewResponse::QueuePage(page) => {
+                                assert_eq!(page.total, 3);
+                                page.rows.iter().map(QueueIdentity::from).collect()
+                            }
+                            ViewResponse::QueueBatch(batch) => {
+                                batch.rows.iter().map(QueueIdentity::from).collect()
+                            }
+                            ViewResponse::QueueIdentityPage(page) => {
+                                assert_eq!(page.total, 3);
+                                page.rows
+                            }
+                            ViewResponse::QueueEntryLocations(rows) => rows,
+                            _ => panic!("expected queue rows"),
+                        };
+                        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 4, 5]);
+                    }
                     assert_eq!(core.shared.read().queue.current_id, Some(5));
                     assert_eq!(core.shared.read().queue.current_position, Some(2));
                     assert!(!core.transport.selection_pending);
