@@ -735,6 +735,19 @@ At this rate, roughly 2.5 kB/s across both clients buys little for a separate
 revision, client-side merge rule and CLI serialization layout. Reconsider if
 the diagnostic payload, update rate or typical client count grows substantially.
 
+[[DEC-031]]
+=== DEC-031: Trim TUI pages directly at viewport reflow
+
+Each paged list retains its viewport, neighbouring batches and any held reorder
+row. Applying that rule directly keeps page admission and eviction together.
+
+A release-build comparison used a 10,000-entry queue and ratatui's in-memory
+terminal at 80×24, 120×40 and 200×64. Across ten paired rounds of idle redraws,
+scrolls and held-row navigation, caching the retention bounds changed median
+frame time by −2.09 to +6.05 microseconds depending on the workload. Each case
+varied in both directions. Revisit if the number of resident batches grows
+enough for trimming to account for a material share of frame time.
+
 [[unapproved-candidates]]
 == Unapproved candidates
 

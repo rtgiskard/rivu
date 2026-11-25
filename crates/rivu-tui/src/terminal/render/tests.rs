@@ -979,6 +979,32 @@ fn drawing_without_a_layout_commit_cannot_change_retention_or_navigation() {
 }
 
 #[test]
+fn smaller_draw_frame_reflows_the_selection_after_a_larger_layout_commit() {
+    let mut ui = UiState::default();
+    let state = TuiSnapshot::default();
+    commit_layout(Rect::new(0, 0, 80, 24), &mut ui);
+    ui.queue
+        .insert(0, 32, 32, (0..32).map(|n| queue_row(n, n as u64)).collect());
+    ui.queue.selection.select(Some(12));
+    assert_eq!(ui.queue.selection.offset(), 0);
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+    let body = page_layout(Rect::new(0, 0, 80, 14))[1];
+    terminal
+        .draw(|frame| {
+            commit_layout(frame.area(), &mut ui);
+            draw(frame, &state, &mut ui);
+        })
+        .unwrap();
+
+    assert_eq!(ui.page_size, usize::from(body.height));
+    assert_eq!(ui.queue.selection.offset(), 13 - ui.page_size);
+    let selected_bg = TerminalColors::new(state.configuration.ui_theme).selected;
+    let buffer = terminal.backend().buffer();
+    assert!((body.x..body.right()).any(|x| buffer[(x, body.bottom() - 1)].bg == selected_bg));
+}
+
+#[test]
 fn missing_titles_use_shared_fallback_in_lists_playback_and_details() {
     let colors = TerminalColors::new(rivu_presentation::theme::Theme::default());
     let i18n = Arc::new(Localizer::for_terminal("en-US"));

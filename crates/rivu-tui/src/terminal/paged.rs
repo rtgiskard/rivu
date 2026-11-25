@@ -356,11 +356,11 @@ impl<T> PagedList<T> {
         let first = (self.selection.offset() / fetch_size * fetch_size).saturating_sub(fetch_size);
         let last = self.visible_end().saturating_sub(1) / fetch_size * fetch_size;
         let last = last.saturating_add(fetch_size);
-        let origin = self
+        let held = self
             .reorder_indices()
             .map(|(from, _)| from / fetch_size * fetch_size);
         // Keep the viewport, its neighbors, and at most one held-row batch.
-        self.retain_pages(|offset, _| (first..=last).contains(&offset) || Some(offset) == origin);
+        self.retain_pages(|offset, _| (first..=last).contains(&offset) || Some(offset) == held);
     }
 
     pub(super) fn navigate_action(&mut self, action: Action, page_size: usize) -> bool {

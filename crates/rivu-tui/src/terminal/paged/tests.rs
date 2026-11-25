@@ -54,6 +54,41 @@ fn loaded_list() -> PagedList<usize> {
 }
 
 #[test]
+fn page_replies_and_reordering_keep_only_relevant_rows() {
+    let mut list = loaded_list();
+    assert!(list.navigate_action(Action::Down, 4));
+    list.insert(2, 2, 10, vec![12, 13]);
+    // A fetch started before a jump can arrive outside the current window.
+    list.insert(8, 2, 10, vec![8, 9]);
+    assert_eq!(list.get(2), Some(&12));
+    assert_eq!(list.get(8), None);
+
+    list.begin_reorder();
+    assert!(list.navigate_action(Action::Last, 4));
+    assert_eq!(list.selection.offset(), 6);
+    assert_eq!(list.get(1), Some(&1));
+    assert_eq!(list.get(2), None);
+    list.insert(8, 2, 10, vec![8, 9]);
+    assert_eq!(list.display(9), Some(&1));
+    list.end_reorder();
+    assert_eq!(list.selected(), Some(&1));
+    assert_eq!(list.selection.offset(), 0);
+    assert_eq!(list.get(8), None);
+}
+
+#[test]
+fn a_reply_reflows_selection_before_checking_its_page() {
+    let mut list = loaded_list();
+    list.selection.select(Some(9));
+    list.set_viewport(4);
+    assert_eq!(list.selection.offset(), 6);
+    list.insert(0, 3, 3, vec![10, 11, 12]);
+    assert_eq!(list.selected(), Some(&12));
+    assert_eq!(list.selection.offset(), 0);
+    assert_eq!(list.next_offset(3), None);
+}
+
+#[test]
 fn invalidation_moves_non_clone_rows_into_display_without_authority() {
     struct Row(usize);
 
