@@ -117,7 +117,7 @@ fn cue_lookup_batches_share_sources_across_sheet_batches() -> Result<()> {
     }
     fs::write(
         root.join("shared.cue"),
-        "FILE \"000.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+        "FILE \"000.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 09 AUDIO\nINDEX 01 00:00:37\n",
     )?;
     let mut batches = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -142,7 +142,12 @@ fn cue_lookup_batches_share_sources_across_sheet_batches() -> Result<()> {
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(batches, [super::source::SOURCE_BATCH_SIZE, 1]);
     assert_eq!(seen.len(), count);
-    assert_eq!(result.track_count(), 2 * count + 1);
+    assert_eq!(result.track_count(), 2 * count + 2);
+    let segment_keys = result.segments.iter().map(|segment| {
+        let cue = segment.cue();
+        (cue.sheet, cue.number)
+    });
+    assert!(segment_keys.is_sorted());
     assert_eq!(
         result
             .tracks()
@@ -2051,9 +2056,15 @@ fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result
         fs::create_dir(&changed)?;
         wav(&changed.join("hidden.wav"), 75)?;
         let playlist = root.join("list.m3u8");
+        let missing: Vec<_> = (0..=super::source::SOURCE_BATCH_SIZE)
+            .map(|i| format!("{i:03}-missing.wav"))
+            .collect();
         fs::write(
             &playlist,
-            "good.wav\n./good.wav\nchanged.wav\n./changed.wav\n",
+            format!(
+                "{}\ngood.wav\n./good.wav\nchanged.wav\n./changed.wav\n",
+                missing.join("\n")
+            ),
         )?;
         let cancellation = ScanCancellation::default();
         assert!(
@@ -2080,6 +2091,7 @@ fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result
         wav(&changed.join("hidden.wav"), 75)?;
         let paths = prepared.paths;
         let mut looked_up = Vec::new();
+        let mut discovery = Vec::new();
         let result = super::scan_paths_with_cues(
             workers,
             &paths,
@@ -2093,10 +2105,21 @@ fn playlist_import_never_traverses_directory_entries_or_type_changes() -> Result
                 max_depth: 4,
             },
             (&cancellation, Some(prepared.sheets)),
-            |_, _, _, _, _| {},
+            |phase, _, _, errors, path| {
+                assert_eq!(phase, ScanPhase::Discovering);
+                discovery.push((path.unwrap().to_owned(), errors));
+            },
         )
         .await;
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!("Import source is not a regular file: {}", changed.display())
+        );
+        assert_eq!(discovery.len(), missing.len());
+        for (index, (path, errors)) in discovery.iter().enumerate() {
+            assert_eq!(*path, root.join(&missing[index]));
+            assert_eq!(*errors, index + 1);
+        }
         assert!(
             looked_up.is_empty(),
             "all import scopes are admitted before probing"

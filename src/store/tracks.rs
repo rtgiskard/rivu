@@ -120,6 +120,21 @@ fn directory_prefix(path: &Path) -> Result<String> {
     Ok(format!("{}/", path.trim_end_matches('/')))
 }
 
+/// The query sees each normalized prefix once. Indices restore the original root order.
+fn unique_root_prefixes(roots: &[PathBuf]) -> Result<(Vec<String>, Vec<usize>)> {
+    let mut by_prefix = HashMap::with_capacity(roots.len());
+    let mut indices = Vec::with_capacity(roots.len());
+    for root in roots {
+        let next = by_prefix.len();
+        indices.push(*by_prefix.entry(directory_prefix(root)?).or_insert(next));
+    }
+    let mut unique = vec![String::new(); by_prefix.len()];
+    for (prefix, index) in by_prefix {
+        unique[index] = prefix;
+    }
+    Ok((unique, indices))
+}
+
 pub(super) fn other_root_prefixes(roots: &[PathBuf]) -> Result<Vec<String>> {
     crate::library::normalize_roots(roots)?
         .iter()
@@ -869,19 +884,7 @@ impl Store {
         if roots.is_empty() {
             return Ok(Vec::new());
         }
-        let prefixes = roots
-            .iter()
-            .map(|path| directory_prefix(path))
-            .collect::<Result<Vec<_>>>()?;
-        let mut unique = Vec::with_capacity(prefixes.len());
-        let mut indices = HashMap::with_capacity(prefixes.len());
-        for prefix in &prefixes {
-            if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(prefix.as_str())
-            {
-                entry.insert(unique.len());
-                unique.push(prefix.as_str());
-            }
-        }
+        let (unique, indices) = unique_root_prefixes(roots)?;
         let mut stmt = self.conn.prepare_cached("SELECT roots.key,CASE WHEN roots.value='' THEN (SELECT COUNT(*) FROM tracks) ELSE (SELECT COUNT(*) FROM tracks WHERE tracks.path>=roots.value AND tracks.path<(rtrim(roots.value,'/')||'0')) END FROM json_each(?1) AS roots ORDER BY roots.key")?;
         let totals = stmt
             .query_map([serde_json::to_string(&unique)?], |row| {
@@ -890,10 +893,10 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(roots
             .iter()
-            .zip(prefixes.iter())
-            .map(|(path, prefix)| rivu_protocol::model::LibraryRootCount {
+            .zip(indices)
+            .map(|(path, index)| rivu_protocol::model::LibraryRootCount {
                 path: path.clone(),
-                total: totals[indices[prefix.as_str()]],
+                total: totals[index],
             })
             .collect())
     }
@@ -912,19 +915,7 @@ impl Store {
         if roots.is_empty() {
             return Ok(Vec::new());
         }
-        let prefixes = roots
-            .iter()
-            .map(|path| directory_prefix(path))
-            .collect::<Result<Vec<_>>>()?;
-        let mut unique = Vec::with_capacity(prefixes.len());
-        let mut indices = HashMap::with_capacity(prefixes.len());
-        for prefix in &prefixes {
-            if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(prefix.as_str())
-            {
-                entry.insert(unique.len());
-                unique.push(prefix.as_str());
-            }
-        }
+        let (unique, indices) = unique_root_prefixes(roots)?;
         // Keep grouping in path-index order instead of staging all (root, path) pairs.
         let mut totals = Vec::with_capacity(unique.len());
         for prefix in unique {
@@ -956,9 +947,9 @@ impl Store {
         }
         Ok(roots
             .iter()
-            .zip(prefixes.iter())
-            .map(|(path, prefix)| {
-                let (total, file_size) = totals[indices[prefix.as_str()]];
+            .zip(indices)
+            .map(|(path, index)| {
+                let (total, file_size) = totals[index];
                 rivu_protocol::model::LibraryRootStats {
                     path: path.clone(),
                     total,

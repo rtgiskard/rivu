@@ -138,9 +138,11 @@ impl ScanResult {
         if self.skipped_directories_truncated {
             return false;
         }
-        if self.skipped_directories.iter().any(|entry| {
-            self.roots[entry.root_index] == self.roots[root_index] && entry.path == path
-        }) {
+        if self
+            .skipped_directories
+            .iter()
+            .any(|entry| entry.root_index == root_index && entry.path == path)
+        {
             return false;
         }
         if self.skipped_directories.len() == MAX_RECORDED_SKIPPED_DIRECTORIES {
@@ -319,6 +321,7 @@ where
         retained_budget: budget.clone(),
         ..Default::default()
     };
+    let mut roots = Vec::new();
     let mut seen_requests = HashSet::with_capacity(paths.len());
     for requested in paths {
         cancellation.check()?;
@@ -355,46 +358,73 @@ where
             );
             continue;
         }
-        result.roots.push(root.clone());
+        roots.push(root);
     }
-    // Every explicit request owns its own reconciliation/depth boundary, even
-    // when an ancestor is requested first. Ancestors never enter these paths.
-    let requested_roots = Arc::new(result.roots.iter().cloned().collect::<HashSet<_>>());
-    for root_index in 0..result.roots.len() {
+    drop(seen_requests);
+    // Every explicit request owns its own reconciliation/depth boundary. Only
+    // recursive scans need the set of roots to skip during ancestor traversal.
+    let requested_roots = (!importing).then(|| Arc::new(roots.iter().cloned().collect()));
+    let batch_size = if importing { SOURCE_BATCH_SIZE } else { 1 };
+    let mut metadata_batch = Vec::with_capacity(batch_size.min(roots.len()));
+    for start in (0..roots.len()).step_by(batch_size) {
         cancellation.check()?;
-        let root = result.roots[root_index].clone();
-        let metadata = match workers
-            .execute({
-                let root = root.clone();
-                move || fs::metadata(root)
+        let token = cancellation.clone();
+        (roots, metadata_batch) = workers
+            .execute(move || -> Result<_> {
+                for (root_index, root) in roots.iter().enumerate().skip(start).take(batch_size) {
+                    token.check()?;
+                    let metadata = fs::metadata(root);
+                    let fatal = importing && metadata.as_ref().is_ok_and(|m| !m.is_file());
+                    metadata_batch.push((root_index, metadata));
+                    if fatal {
+                        break;
+                    }
+                }
+                Ok((roots, metadata_batch))
             })
             .await
-            .context("Scan root metadata worker failed")?
-        {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                cancellation.check()?;
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    result.push_uncertainty(ScanUncertainty::Root { root_index });
+            .context("Scan root metadata worker failed")??;
+        for (root_index, metadata) in metadata_batch.drain(..) {
+            cancellation.check()?;
+            let root = &roots[root_index];
+            let metadata = match metadata {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        result.push_uncertainty(ScanUncertainty::Root { root_index });
+                    }
+                    result.push_error(|| format!("{}: {error}", root.display()));
+                    progress(
+                        ScanPhase::Discovering,
+                        files.len(),
+                        None,
+                        result.errors.len(),
+                        Some(root.as_path()),
+                    );
+                    continue;
                 }
-                result.push_error(|| format!("{}: {error}", root.display()));
-                progress(
-                    ScanPhase::Discovering,
-                    files.len(),
-                    None,
-                    result.errors.len(),
-                    Some(root.as_path()),
-                );
-                continue;
+            };
+            if importing && !metadata.is_file() {
+                bail!("Import source is not a regular file: {}", root.display());
             }
-        };
-        cancellation.check()?;
-        if importing && !metadata.is_file() {
-            bail!("Import source is not a regular file: {}", root.display());
-        }
-        if !metadata.is_dir() {
-            if is_audio_path(&root) || is_cue_path(&root) {
-                if files.insert(root.clone()) {
+            if !metadata.is_dir() {
+                if is_audio_path(root) || is_cue_path(root) {
+                    if files.insert(root.clone()) {
+                        progress(
+                            ScanPhase::Discovering,
+                            files.len(),
+                            None,
+                            result.errors.len(),
+                            Some(root.as_path()),
+                        );
+                    }
+                } else {
+                    result.push_error(|| {
+                        format!(
+                            "{} is not a supported audio file or CUE sheet",
+                            root.display()
+                        )
+                    });
                     progress(
                         ScanPhase::Discovering,
                         files.len(),
@@ -404,33 +434,26 @@ where
                     );
                 }
             } else {
-                result.push_error(|| {
-                    format!(
-                        "{} is not a supported audio file or CUE sheet",
-                        root.display()
-                    )
-                });
-                progress(
-                    ScanPhase::Discovering,
-                    files.len(),
-                    None,
-                    result.errors.len(),
-                    Some(root.as_path()),
-                );
+                discover_directory(
+                    workers,
+                    root,
+                    metadata,
+                    (
+                        root_index,
+                        max_depth,
+                        requested_roots.as_ref().expect("directory scan"),
+                    ),
+                    cancellation,
+                    (&mut files, &mut result),
+                    &mut progress,
+                )
+                .await?;
             }
-        } else {
-            discover_directory(
-                workers,
-                &root,
-                metadata,
-                (root_index, max_depth, &requested_roots),
-                cancellation,
-                (&mut files, &mut result),
-                &mut progress,
-            )
-            .await?;
         }
     }
+    result.roots = roots;
+    drop(metadata_batch);
+    drop(requested_roots);
     cancellation.check()?;
     progress(
         ScanPhase::Discovering,
@@ -460,6 +483,8 @@ where
     let mut sources = HashMap::new();
     let mut cue_sources = HashSet::new();
     let mut scratch = Vec::new();
+    // Sheet paths are sorted, and the parser enforces increasing track numbers.
+    // Appending each successful sheet preserves final segment order across batches.
     let mut cue_paths = files.iter().filter(|path| is_cue_path(path));
     loop {
         let mut prepared = Vec::new();
@@ -622,11 +647,6 @@ where
                     .then_with(|| a.root_index.cmp(&b.root_index))
             });
             result.records.sort_by(|a, b| a.path.cmp(&b.path));
-            result.segments.sort_by(|a, b| {
-                let a = a.cue();
-                let b = b.cue();
-                a.sheet.cmp(b.sheet).then_with(|| a.number.cmp(&b.number))
-            });
             result
         })
         .await
