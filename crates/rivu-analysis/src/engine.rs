@@ -1,6 +1,6 @@
 use crate::{
     AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, DisplayDemand, PcmSnapshot,
-    SpatialBin, SpectrumSnapshot, VisualizerDemand, VisualizerFrame,
+    SpatialBin, SpatialSnapshot, SpectrumSnapshot, VisualizerDemand, VisualizerFrame,
 };
 use rivu_format::config::AnalysisWindow;
 use rivu_protocol::pcm::{PcmHeader, PcmState};
@@ -17,6 +17,9 @@ const DENSITY_SNAPSHOT_COUNT: usize = 3;
 // At FFT32768, three reusable slots retain at most 192 KiB of sample storage.
 // Retained publications never cause this optional pool to grow.
 const SPECTRUM_SNAPSHOT_COUNT: usize = 3;
+
+// One slot each for window staging, transport staging and the next transform.
+const SPATIAL_SNAPSHOT_COUNT: usize = 3;
 
 // Each prepared analyzer owns at most 160 KiB of reusable PCM sample storage.
 // Slow consumers omit optional PCM instead of growing this pool.
@@ -128,6 +131,7 @@ struct SpectrumAnalyzer {
     density: Option<DensityField>,
     pcm_snapshots: Option<[Arc<Vec<[f32; 2]>>; PCM_SNAPSHOT_COUNT]>,
     spectrogram_snapshots: Option<[Arc<Vec<f32>>; SPECTRUM_SNAPSHOT_COUNT]>,
+    spatial_snapshots: Option<[Arc<Vec<SpatialBin>>; SPATIAL_SNAPSHOT_COUNT]>,
     // Unnormalized conjugate-pair power for band energy, also reusable by the spectrum.
     bin_powers: Vec<f32>,
 }
@@ -158,6 +162,7 @@ impl SpectrumAnalyzer {
             density: None,
             pcm_snapshots: None,
             spectrogram_snapshots: None,
+            spatial_snapshots: None,
             bin_powers: Vec::new(),
         };
         if spectrum {
@@ -240,7 +245,7 @@ impl SpectrumAnalyzer {
             density.clear();
         }
         self.visualizer.density = DensitySnapshot::default();
-        self.visualizer.spatial.clear();
+        self.visualizer.spatial = SpatialSnapshot::default();
         self.visualizer.correlation = None;
         self.visualizer.balance = None;
         self.visualizer.side_ratio = None;
@@ -266,11 +271,12 @@ impl SpectrumAnalyzer {
             self.visualizer.side_ratio = None;
         }
         if demand.spatial_spectrum {
-            if !self.visualizer.demand.spatial_spectrum {
-                self.visualizer.spatial.reserve(self.rolling.len() / 2);
-            }
+            self.spatial_snapshots.get_or_insert_with(|| {
+                std::array::from_fn(|_| Arc::new(Vec::with_capacity(self.rolling.len() / 2)))
+            });
         } else {
-            self.visualizer.spatial = Vec::new();
+            self.visualizer.spatial = SpatialSnapshot::default();
+            self.spatial_snapshots = None;
         }
         if !demand.band_energy {
             self.visualizer.band_rms = [0.0; 3];
@@ -376,28 +382,7 @@ impl SpectrumAnalyzer {
             .expect("frequency demand prepares the FFT")
             .process_with_scratch(&mut self.frequency, &mut self.scratch);
         if self.visualizer.demand.spatial_spectrum {
-            self.visualizer.spatial.clear();
-            let normalization_squared = self.normalization * self.normalization;
-            for bin in 1..=n / 2 {
-                let packed = self.frequency[bin];
-                let partner = self.frequency[n - bin].conj();
-                let left = (packed + partner) * 0.5;
-                let right = (packed - partner) * Complex32::new(0.0, -0.5);
-                let left_power = left.norm_sqr();
-                let right_power = right.norm_sqr();
-                let total = left_power + right_power;
-                let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
-                let power = total * 0.5 * endpoint_gain;
-                self.visualizer.spatial.push(SpatialBin {
-                    frequency_hz: bin as f32 * self.sample_rate as f32 / n as f32,
-                    pan: if total > 0.0 {
-                        ((right_power - left_power) / total).clamp(-1.0, 1.0)
-                    } else {
-                        0.0
-                    },
-                    power: calibrated_spatial_power(power, normalization_squared),
-                });
-            }
+            self.snapshot_spatial();
         }
         let has_spectrogram = self.visualizer.demand.spectrogram && self.snapshot_spectrogram();
         let cached_bins = if !has_spectrogram && self.spectrum && self.visualizer.demand.band_energy
@@ -458,6 +443,52 @@ impl SpectrumAnalyzer {
             }
         }
         rms
+    }
+
+    fn snapshot_spatial(&mut self) {
+        self.visualizer.spatial = SpatialSnapshot::default();
+        let slots = self
+            .spatial_snapshots
+            .as_mut()
+            .expect("spatial demand prepares slots");
+        let n = self.frequency.len();
+        let slot = if let Some(index) = slots
+            .iter_mut()
+            .position(|slot| Arc::get_mut(slot).is_some())
+        {
+            &mut slots[index]
+        } else {
+            // Every cached slot is still visible to a reader. Hand one over to
+            // its readers and replace it so this frame still has fresh bins.
+            slots.rotate_left(1);
+            let slot = slots.last_mut().unwrap();
+            *slot = Arc::new(Vec::with_capacity(n / 2));
+            slot
+        };
+        let bins = Arc::get_mut(slot).unwrap();
+        bins.clear();
+        let normalization_squared = self.normalization * self.normalization;
+        bins.extend((1..=n / 2).map(|bin| {
+            let packed = self.frequency[bin];
+            let partner = self.frequency[n - bin].conj();
+            let left = (packed + partner) * 0.5;
+            let right = (packed - partner) * Complex32::new(0.0, -0.5);
+            let left_power = left.norm_sqr();
+            let right_power = right.norm_sqr();
+            let total = left_power + right_power;
+            let endpoint_gain = if bin == n / 2 { 0.25 } else { 1.0 };
+            let power = total * 0.5 * endpoint_gain;
+            SpatialBin {
+                frequency_hz: bin as f32 * self.sample_rate as f32 / n as f32,
+                pan: if total > 0.0 {
+                    ((right_power - left_power) / total).clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                },
+                power: calibrated_spatial_power(power, normalization_squared),
+            }
+        }));
+        self.visualizer.spatial = SpatialSnapshot::from_shared(Arc::clone(slot));
     }
 
     fn snapshot_spectrogram(&mut self) -> bool {
@@ -660,15 +691,10 @@ impl AnalysisEngine {
         frame.rms_left = 0.0;
         frame.rms_right = 0.0;
         let demand = self.demand.visualizer;
-        let mut spatial = std::mem::take(&mut frame.visualizer.spatial);
-        spatial.clear();
         frame.visualizer = VisualizerFrame {
             demand,
             ..VisualizerFrame::default()
         };
-        if demand.spatial_spectrum {
-            frame.visualizer.spatial = spatial;
-        }
     }
 
     /// Revoke a local capture without inventing a source discontinuity.
@@ -790,6 +816,9 @@ impl AnalysisEngine {
         self.fresh = false;
         self.last_frame_at = Some(now);
         let analyzer = self.analyzer.as_mut().unwrap();
+        // The accepted result replaces this frame. Release its previous slot
+        // before choosing writable storage, even when other frames are pinned.
+        frame.visualizer.spatial = SpatialSnapshot::default();
         let rms = analyzer.transform();
         analyzer.publish(frame, rms, self.sample_time);
         frame.display_token = self.display_token;
@@ -1373,7 +1402,11 @@ mod tests {
         assert_eq!(payload.balance, Some(0.0));
         assert_eq!(payload.side_ratio, Some(1.0));
         assert_eq!(payload.spatial.len(), settings.fft_size as usize / 2);
-        for (actual, expected) in payload.spatial.iter().zip(&separate[1].visualizer.spatial) {
+        for (actual, expected) in payload
+            .spatial
+            .iter()
+            .zip(separate[1].visualizer.spatial.iter())
+        {
             assert_eq!(actual.frequency_hz, expected.frequency_hz);
             assert_eq!(actual.pan, expected.pan);
             assert_eq!(actual.power, expected.power);
@@ -1432,17 +1465,23 @@ mod tests {
                 .each_ref()
                 .map(|slot| slot.as_ptr());
             let cells = analyzer.density.as_ref().unwrap().cells.as_ptr();
-            let spatial = analyzer.visualizer.spatial.as_ptr();
+            let spatial_slots = analyzer
+                .spatial_snapshots
+                .as_ref()
+                .unwrap()
+                .each_ref()
+                .map(|slot| slot.as_ptr());
             let published_density = frame.visualizer.density.as_ptr();
             assert_eq!(published_density, density);
             let published_spatial = frame.visualizer.spatial.as_ptr();
+            assert_eq!(published_spatial, analyzer.visualizer.spatial.as_ptr());
             analyzer.set_visualizer_demand(ALL_DEMAND);
             analyzer.transform();
             analyzer.publish(&mut frame, rms, Duration::from_millis(100));
             assert!(snapshots.contains(&analyzer.visualizer.density.as_ptr()));
             assert_ne!(analyzer.visualizer.density.as_ptr(), density);
             assert_eq!(analyzer.density.as_ref().unwrap().cells.as_ptr(), cells);
-            assert_eq!(analyzer.visualizer.spatial.as_ptr(), spatial);
+            assert!(spatial_slots.contains(&analyzer.visualizer.spatial.as_ptr()));
             assert_eq!(
                 frame.visualizer.density.as_ptr(),
                 analyzer.visualizer.density.as_ptr(),
@@ -1457,21 +1496,26 @@ mod tests {
                     .map(|slot| slot.as_ptr()),
                 snapshots,
             );
-            assert_eq!(frame.visualizer.spatial.as_ptr(), published_spatial);
+            assert_ne!(frame.visualizer.spatial.as_ptr(), published_spatial);
+            assert_eq!(
+                frame.visualizer.spatial.as_ptr(),
+                analyzer.visualizer.spatial.as_ptr()
+            );
             assert_eq!(
                 analyzer.visualizer.density.len(),
                 DENSITY_SIDE * DENSITY_SIDE
             );
-            assert_eq!(analyzer.visualizer.spatial.capacity(), 256);
+            assert_eq!(analyzer.visualizer.spatial.len(), 256);
             let drive = analyzer.visualizer.band_rms;
             analyzer.set_visualizer_demand(BAND_ENERGY_DEMAND);
             frame.visualizer.clone_from(&analyzer.visualizer);
             assert!(analyzer.density.is_none());
             assert!(analyzer.spectrogram_snapshots.is_none());
+            assert!(analyzer.spatial_snapshots.is_none());
             for payload in [&analyzer.visualizer, &frame.visualizer] {
                 assert!(payload.density.is_empty());
                 assert!(payload.spectrogram.is_empty());
-                assert_eq!(payload.spatial.capacity(), 0);
+                assert!(payload.spatial.shared_storage().is_none());
                 assert_eq!(payload.correlation, None);
                 assert_eq!(payload.balance, None);
                 assert_eq!(payload.side_ratio, None);
@@ -1483,6 +1527,33 @@ mod tests {
             assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
             assert!(Arc::ptr_eq(analyzer.fft.as_ref().unwrap(), &fft));
             assert_eq!(analyzer.frequency.as_ptr(), frequency);
+        }
+    }
+
+    #[test]
+    fn retained_spatial_frames_remain_immutable_while_new_frames_publish() {
+        let mut analyzer = visualizer_analyzer(SPATIAL_DEMAND);
+        let mut frame = AnalysisFrame::default();
+        let mut retained = Vec::new();
+        for index in 1..=SPATIAL_SNAPSHOT_COUNT + 2 {
+            let amplitude = index as f32 / 8.0;
+            for i in 0..512 {
+                analyzer.push([amplitude * period_32_sample(i), 0.0]);
+            }
+            let rms = analyzer.transform();
+            analyzer.publish(&mut frame, rms, Duration::from_millis(index as u64 * 100));
+            retained.push((frame.clone(), amplitude * amplitude / 2.0));
+        }
+        analyzer.set_visualizer_demand(VisualizerDemand::default());
+        frame.visualizer.clone_from(&analyzer.visualizer);
+        assert!(frame.visualizer.spatial.shared_storage().is_none());
+        assert!(analyzer.spatial_snapshots.is_none());
+        for (frame, expected) in retained {
+            assert_eq!(frame.visualizer.spatial.len(), 256);
+            let tone = frame.visualizer.spatial[15];
+            assert_eq!(tone.frequency_hz, 160.0);
+            assert!((tone.pan + 1.0).abs() < 1e-5);
+            assert!((tone.power - expected).abs() < 1e-5);
         }
     }
 

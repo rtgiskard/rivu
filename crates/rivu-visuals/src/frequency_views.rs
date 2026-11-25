@@ -1941,13 +1941,12 @@ mod tests {
         }))
     }
 
-    fn history_snapshot(data: &FrequencyState) -> Vec<(u64, Option<Duration>, Duration, Vec<f32>)> {
+    fn history_snapshot(data: &FrequencyState) -> Vec<(Option<Duration>, Duration, Vec<f32>)> {
         data.spectrogram
             .columns
             .iter()
             .map(|column| {
                 (
-                    column.revision,
                     column.sample_time,
                     column.interval_start,
                     column.levels.clone(),
@@ -2273,7 +2272,9 @@ mod tests {
         assert_eq!(visuals.data.borrow().spectrogram.len, 2);
         {
             let mut data = visuals.data.borrow_mut();
-            data.spectrogram.tiles.resize_with(3, || None);
+            data.spectrogram
+                .tiles
+                .resize_with(3, || spectrogram::SpectrogramTile::Dirty);
             data.spectrogram.tile_values.resize(1024, 1.0);
         }
 
@@ -2628,6 +2629,53 @@ mod tests {
         drop(current);
         visuals.retain_presentation_panels(&[], &[]);
         assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn spectrogram_rebuilds_only_written_tiles_across_ring_wrap() {
+        use spectrogram::SpectrogramTile::{Dirty, Empty, Ready};
+
+        let mut visuals = configured_visuals();
+        let capacity = 2 * SPECTROGRAM_TILE_COLUMNS + 1;
+        visuals.data.borrow_mut().resize_history(capacity);
+        let bucket = Duration::from_secs_f64(
+            visuals.data.borrow().spectrogram.history_limit_seconds / (capacity - 1) as f64,
+        );
+        let mut audio = frame(0.0, -30.0);
+        let mut push = |visuals: &mut FrequencyViews| {
+            audio.sequence += 1;
+            audio.sample_time += bucket;
+            collect_and_present(visuals, &audio, audio.sample_time);
+        };
+        for _ in 0..capacity - 1 {
+            push(&mut visuals);
+        }
+        let middle = {
+            let mut data = visuals.data.borrow_mut();
+            data.prepare_spectrogram_presentation(1).unwrap();
+            let [Ready { .. }, Ready { publication, .. }, Empty] = &data.spectrogram.tiles[..]
+            else {
+                panic!("expected two full tiles and one unused column");
+            };
+            Arc::clone(publication)
+        };
+        push(&mut visuals);
+        assert!(matches!(
+            visuals.data.borrow().spectrogram.tiles[..],
+            [Ready { .. }, Ready { .. }, Dirty]
+        ));
+        push(&mut visuals);
+        let mut data = visuals.data.borrow_mut();
+        assert!(matches!(
+            data.spectrogram.tiles[..],
+            [Dirty, Ready { .. }, Dirty]
+        ));
+        data.prepare_spectrogram_presentation(1).unwrap();
+        let [Ready { .. }, Ready { publication, .. }, Ready { .. }] = &data.spectrogram.tiles[..]
+        else {
+            panic!("expected every tile to contain current history");
+        };
+        assert!(Arc::ptr_eq(publication, &middle));
     }
 
     #[test]
@@ -3225,8 +3273,7 @@ mod tests {
                         data.spectrogram
                             .tiles
                             .iter()
-                            .flatten()
-                            .any(|tile| Arc::ptr_eq(&tile.publication, after))
+                            .any(|tile| matches!(tile, spectrogram::SpectrogramTile::Ready { publication, .. } if Arc::ptr_eq(publication, after)))
                     );
                 }
             }

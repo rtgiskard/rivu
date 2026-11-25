@@ -810,7 +810,7 @@ pub(in crate::gui) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand:
     }
     if !demand.visualizer.spatial_spectrum {
         visualizer.demand.spatial_spectrum = false;
-        visualizer.spatial = Vec::new();
+        visualizer.spatial = rivu_analysis::SpatialSnapshot::default();
     }
     if !demand.visualizer.band_energy {
         visualizer.demand.band_energy = false;

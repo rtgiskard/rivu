@@ -307,7 +307,7 @@ impl VisualClient {
         drop(desired);
         let _ = self.notifications.try_send(());
     }
-    /// Run only the local staging copy while all acceptance guards remain live.
+    /// Stage the musical bands and shared payload handles under live acceptance guards.
     /// The closure must not call renderers or re-enter this transport.
     pub(crate) fn consume_current_analysis(
         &self,

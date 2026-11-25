@@ -927,7 +927,8 @@ mod tests {
                     frequency_hz: 1000.0,
                     pan: 0.0,
                     power: 0.001,
-                }],
+                }]
+                .into(),
                 density: if style == AudioVisualizerStyle::StereoDensity {
                     vec![0.0; DENSITY_SIDE * DENSITY_SIDE].into()
                 } else {
@@ -937,6 +938,15 @@ mod tests {
             },
             ..AnalysisFrame::default()
         }
+    }
+
+    fn set_spatial_bin(frame: &mut AnalysisFrame, pan: f32, power: f32) {
+        frame.visualizer.spatial = vec![SpatialBin {
+            pan,
+            power,
+            ..frame.visualizer.spatial[0]
+        }]
+        .into();
     }
 
     fn set_density_cell(frame: &mut AnalysisFrame, index: usize, value: f32) {
@@ -1084,7 +1094,7 @@ mod tests {
             (0.75, f32::INFINITY, 0.0),
             (1.0, f32::NEG_INFINITY, 0.0),
         ];
-        frame.visualizer.spatial = cases
+        let mut bins: Vec<_> = cases
             .iter()
             .map(|&(pan, power, _)| SpatialBin {
                 frequency_hz: 1000.0,
@@ -1092,11 +1102,12 @@ mod tests {
                 power,
             })
             .collect();
-        frame.visualizer.spatial.push(SpatialBin {
+        bins.push(SpatialBin {
             frequency_hz: 1001.0,
             pan: 0.0,
             power: 0.125,
         });
+        frame.visualizer.spatial = bins.into();
         plot.update(&frame);
         let data = plot.data.borrow();
         for (pan, _, expected) in cases {
@@ -1109,7 +1120,7 @@ mod tests {
     fn trail_decays_only_in_accepted_sample_time_and_does_not_sum_bins() {
         let plot = plot(AudioVisualizerStyle::SpatialSpectrum);
         let mut frame = frame(AudioVisualizerStyle::SpatialSpectrum);
-        frame.visualizer.spatial.push(frame.visualizer.spatial[0]);
+        frame.visualizer.spatial = vec![frame.visualizer.spatial[0]; 2].into();
         plot.update(&frame);
         let (x, y) = spatial_cell(1000.0, 0.0, 20_000.0).unwrap();
         let index = y * SPATIAL_WIDTH + x;
@@ -1124,9 +1135,11 @@ mod tests {
         assert!(Arc::ptr_eq(&published, &publication(&plot).unwrap()));
         frame.sample_time += Duration::from_millis(500);
         frame.sequence += 1;
-        for bin in &mut frame.visualizer.spatial {
-            bin.power = 0.0;
-        }
+        let silent = SpatialBin {
+            power: 0.0,
+            ..frame.visualizer.spatial[0]
+        };
+        frame.visualizer.spatial = vec![silent; 2].into();
         plot.update(&frame);
         assert!((plot.data.borrow().field[index] - 0.001 / std::f32::consts::E).abs() < 1e-7);
     }
@@ -1147,7 +1160,7 @@ mod tests {
             pending.sequence += 1;
             pending.sample_time += Duration::from_secs(1);
             pending.visualizer.density = DensitySnapshot::default();
-            pending.visualizer.spatial.clear();
+            pending.visualizer.spatial = Default::default();
             pending.visualizer.correlation = Some(-1.0);
             pending.visualizer.balance = Some(1.0);
             pending.visualizer.side_ratio = Some(1.0);
@@ -1168,7 +1181,7 @@ mod tests {
             plot.set_visible(false);
             pending.generation += 1;
             pending.visualizer.density = DensitySnapshot::default();
-            pending.visualizer.spatial.clear();
+            pending.visualizer.spatial = Default::default();
             plot.update(&pending);
             assert!(publication(&plot).is_none());
         }
@@ -1517,8 +1530,7 @@ mod tests {
             if style == AudioVisualizerStyle::StereoDensity {
                 set_density_cell(&mut audio, 0, 0.125);
             }
-            audio.visualizer.spatial[0].pan = 1.0;
-            audio.visualizer.spatial[0].power = 0.0001;
+            set_spatial_bin(&mut audio, 1.0, 0.0001);
             plot.update(&audio);
             // Spatial's displayed field contains the decaying previous peak,
             // not merely the latest frame's bins. It is the remapping authority.
@@ -1590,8 +1602,7 @@ mod tests {
             if style == AudioVisualizerStyle::StereoDensity {
                 set_density_cell(&mut audio, 0, 0.5);
             }
-            audio.visualizer.spatial[0].pan = -1.0;
-            audio.visualizer.spatial[0].power = 0.5;
+            set_spatial_bin(&mut audio, -1.0, 0.5);
             plot.update(&audio);
             let resumed = publication(&plot).unwrap();
             let gpui::GpuContent::Field {
@@ -1701,7 +1712,7 @@ mod tests {
         ));
         frame.sequence += 1;
         frame.sample_time += Duration::from_millis(50);
-        frame.visualizer.spatial[0].power = 0.1;
+        set_spatial_bin(&mut frame, 0.0, 0.1);
         density.update(&frame);
         spatial.update(&frame);
         assert!(publication(&density).is_some());

@@ -103,6 +103,35 @@ pub struct SpatialBin {
     pub power: f32,
 }
 
+/// Immutable non-DC spatial FFT bins shared by the worker and display readers.
+#[derive(Clone, Debug, Default)]
+pub struct SpatialSnapshot(Option<Arc<Vec<SpatialBin>>>);
+
+impl SpatialSnapshot {
+    pub(crate) fn from_shared(storage: Arc<Vec<SpatialBin>>) -> Self {
+        Self(Some(storage))
+    }
+
+    pub fn shared_storage(&self) -> Option<&Arc<Vec<SpatialBin>>> {
+        self.0.as_ref()
+    }
+}
+
+impl std::ops::Deref for SpatialSnapshot {
+    type Target = [SpatialBin];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl From<Vec<SpatialBin>> for SpatialSnapshot {
+    fn from(bins: Vec<SpatialBin>) -> Self {
+        Self(Some(Arc::new(bins)))
+    }
+}
+
 /// Immutable recent stereo PCM, shared without copying between displays.
 /// An empty snapshot owns no allocation; live publications use bounded slots.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -142,7 +171,7 @@ impl From<Vec<[f32; 2]>> for PcmSnapshot {
 pub struct VisualizerFrame {
     pub demand: VisualizerDemand,
     pub density: DensitySnapshot,
-    pub spatial: Vec<SpatialBin>,
+    pub spatial: SpatialSnapshot,
     pub pcm: PcmSnapshot,
     pub spectrogram: SpectrumSnapshot,
     pub correlation: Option<f32>,
@@ -169,7 +198,7 @@ impl Clone for VisualizerFrame {
         if source.demand.spatial_spectrum {
             self.spatial.clone_from(&source.spatial);
         } else {
-            self.spatial = Vec::new();
+            self.spatial = SpatialSnapshot::default();
         }
         if source.demand.pcm {
             self.pcm.clone_from(&source.pcm);

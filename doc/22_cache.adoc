@@ -568,10 +568,13 @@ release these publications. There is no general screenshot cache. Physical GPU
 retirement is defined in
 link:25_gpu_rendering.adoc#admission-and-retirement[GPU admission and retirement].
 
-Analysis publications reuse the destination frequency, spectrum and requested
-spatial buffers across same-sized updates, both in transport staging and window
-staging. Immutable density, PCM and spectrogram snapshots keep shared ownership
-of their bounded producer slots rather than copying their samples.
+Transport and window staging reuse their musical-band axis and level buffers.
+Spatial Spectrum, density, PCM and spectrogram carry immutable shared snapshots
+through both stages. For Spatial Spectrum the analyzer prepares three reusable
+arrays of `analysis_fft_size / 2` bins (576 KiB total at FFT 32768). If readers
+hold all three, one array stays with its readers and the analyzer allocates a
+replacement to publish the current window. Dropping spatial demand releases the
+analyzer's slots. Each reader retains its own publication until release.
 
 The GUI staging frame releases optional Density, Spatial Spectrum, metrics, and
 band-energy payloads when their last display demand disappears; losing all

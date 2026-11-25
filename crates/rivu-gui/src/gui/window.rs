@@ -1556,6 +1556,7 @@ mod state_tests {
             let spectrum = staging.spectrum_db.as_ptr();
             let density = staging.visualizer.density.as_ptr();
             let spatial = staging.visualizer.spatial.as_ptr();
+            assert_eq!(spatial, publication.visualizer.spatial.as_ptr());
             let pcm = staging.visualizer.pcm.as_ptr();
             let spectrogram = staging.visualizer.spectrogram.as_ptr();
             retain_analysis_staging(
@@ -1585,7 +1586,7 @@ mod state_tests {
             if survivor.spatial_spectrum {
                 assert_eq!(staging.visualizer.spatial.as_ptr(), spatial);
             } else {
-                assert_eq!(staging.visualizer.spatial.capacity(), 0);
+                assert!(staging.visualizer.spatial.shared_storage().is_none());
             }
             if survivor.pcm {
                 assert_eq!(staging.visualizer.pcm.as_ptr(), pcm);
@@ -1611,14 +1612,14 @@ mod state_tests {
             assert_eq!(staging.spectrum_db.capacity(), 0);
             assert!(staging.visualizer.density.is_empty());
             assert!(staging.visualizer.pcm.is_empty());
-            assert_eq!(staging.visualizer.spatial.capacity(), 0);
+            assert!(staging.visualizer.spatial.shared_storage().is_none());
             assert_eq!(staging.settings, None);
             retain_analysis_staging(&mut staging, all);
             assert_eq!(staging.settings, None);
             assert_eq!(staging.visualizer.demand, VisualizerDemand::default());
             assert!(staging.visualizer.density.is_empty());
             assert!(staging.visualizer.pcm.is_empty());
-            assert_eq!(staging.visualizer.spatial.capacity(), 0);
+            assert!(staging.visualizer.spatial.shared_storage().is_none());
         }
 
         worker.configure(settings, DisplayDemand::default(), state, 2, &mut frame);

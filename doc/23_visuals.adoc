@@ -603,10 +603,12 @@ Only accepted analysis frames write or pool history. Native display ticks move
 the time cursor and tile placements without rebuilding unchanged numerical
 publications; portions newer than the display cursor remain clipped.
 
-When history and sampling are unchanged, scrolling reuses validated tile metadata
-and adjusts placements without rechecking individual historical columns. Frequency
-labels reuse their formatted values while their physical domain is unchanged;
-reveal refreshes a changed hidden domain even without another live audio frame.
+A new peak, interval extension or ring overwrite dirties the containing tile.
+The next presentation examines at most 32 columns per dirty tile. Changes to
+history geometry or sampling invalidate the full tile cache. Scrolling only
+adjusts tile placements. Frequency labels reuse their formatted values while
+their physical domain is unchanged. Reveal refreshes a changed hidden domain
+even without another live audio frame.
 
 The horizontal scale is fixed by the configured history duration. New audio
 enters at the right and scrolls left with accepted audio time; startup history
