@@ -12,6 +12,7 @@
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     io::{self, Read},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -782,7 +783,7 @@ impl Config {
         expected_revision: u64,
         edit: processing_graph::GraphEdit,
     ) -> Result<ValidatedConfig> {
-        self.processing_graph.edit(expected_revision, edit)?;
+        self.processing_graph = edit.apply(Cow::Owned(self.processing_graph), expected_revision)?;
         self.validate_settings()?;
         Ok(ValidatedConfig(Arc::new(self)))
     }

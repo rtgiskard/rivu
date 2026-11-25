@@ -2,6 +2,7 @@
 use super::{DenoiseConfig, EqualizerConfig, NeuralConfig};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_GRAPH_NODES: usize = 64;
@@ -362,57 +363,64 @@ impl ProcessingGraph {
     pub fn ancestors(&self, target: GraphPort) -> Result<Vec<u64>> {
         self.validated()?.ancestors(target)
     }
+    fn add_node(&mut self, kind: GraphNodeKind, position: [f32; 2]) -> Result<()> {
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).context("Graph node ids exhausted")?;
+        self.nodes.push(GraphNode { id, position, kind });
+        Ok(())
+    }
+
+    fn node_mut(&mut self, id: u64) -> Result<&mut GraphNode> {
+        self.nodes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .context("Unknown graph node")
+    }
+
+    /// Commit the edit only if the resulting graph is valid.
     pub fn edit(&mut self, expected_revision: u64, edit: GraphEdit) -> Result<()> {
+        *self = edit.apply(Cow::Borrowed(self), expected_revision)?;
+        Ok(())
+    }
+}
+
+impl GraphEdit {
+    pub(super) fn apply(
+        self,
+        mut graph: Cow<'_, ProcessingGraph>,
+        expected_revision: u64,
+    ) -> Result<ProcessingGraph> {
         ensure!(
-            expected_revision == self.revision,
+            expected_revision == graph.revision,
             "Graph changed; refresh before editing"
         );
-        let mut next = self.clone();
-        match edit {
-            GraphEdit::Add { kind, position } => {
-                let id = next.next_id;
-                next.next_id = id.checked_add(1).context("Graph node ids exhausted")?;
-                next.nodes.push(GraphNode { id, position, kind });
+        let previous_next_id = graph.next_id;
+        match self {
+            Self::ReplaceGraph { graph: replacement } => graph = Cow::Owned(replacement),
+            Self::Add { kind, position } => graph.to_mut().add_node(kind, position)?,
+            Self::Duplicate { id, position } => {
+                let kind = graph.node(id)?.kind.clone();
+                graph.to_mut().add_node(kind, position)?;
             }
-            GraphEdit::Duplicate { id, position } => {
-                let kind = next.node(id)?.kind.clone();
-                let id = next.next_id;
-                next.next_id = id.checked_add(1).context("Graph node ids exhausted")?;
-                next.nodes.push(GraphNode { id, position, kind });
+            Self::Remove { id } => {
+                graph.node(id)?;
+                let graph = graph.to_mut();
+                graph.nodes.retain(|n| n.id != id);
+                graph.edges.retain(|e| e.from.node != id && e.to.node != id);
             }
-            GraphEdit::Remove { id } => {
-                next.node(id)?;
-                next.nodes.retain(|n| n.id != id);
-                next.edges.retain(|e| e.from.node != id && e.to.node != id);
-            }
-            GraphEdit::Replace { id, kind } => {
-                let node = next
-                    .nodes
-                    .iter_mut()
-                    .find(|n| n.id == id)
-                    .context("Unknown graph node")?;
-                node.kind = kind;
-            }
-            GraphEdit::Move { id, position } => {
-                next.nodes
-                    .iter_mut()
-                    .find(|n| n.id == id)
-                    .context("Unknown graph node")?
-                    .position = position;
-            }
-            GraphEdit::Connect { from, to } => next.edges.push(GraphEdge { from, to }),
-            GraphEdit::Disconnect { to } => next.edges.retain(|e| e.to != to),
-            GraphEdit::ReplaceGraph { graph } => next = graph,
+            Self::Replace { id, kind } => graph.to_mut().node_mut(id)?.kind = kind,
+            Self::Move { id, position } => graph.to_mut().node_mut(id)?.position = position,
+            Self::Connect { from, to } => graph.to_mut().edges.push(GraphEdge { from, to }),
+            Self::Disconnect { to } => graph.to_mut().edges.retain(|e| e.to != to),
         }
-        next.revision = self
-            .revision
+        let mut graph = graph.into_owned();
+        graph.revision = expected_revision
             .checked_add(1)
             .context("Graph revision exhausted")?;
         // Undo/replacement must never reuse identities allocated in a previous graph revision.
-        next.next_id = next.next_id.max(self.next_id);
-        next.validate()?;
-        *self = next;
-        Ok(())
+        graph.next_id = graph.next_id.max(previous_next_id);
+        graph.validate()?;
+        Ok(graph)
     }
 }
 
@@ -446,6 +454,32 @@ mod tests {
                         to: p(2, 0)
                     }
                 )
+                .is_err()
+        );
+        assert_eq!(graph, before);
+    }
+    #[test]
+    fn replacement_keeps_revision_and_id_history_and_validates_atomically() {
+        let mut graph = ProcessingGraph {
+            revision: 42,
+            next_id: 10,
+            ..Default::default()
+        };
+        let mut replacement = ProcessingGraph::default();
+        replacement.nodes[0].position = [7.0, 9.0];
+        graph
+            .edit(42, GraphEdit::ReplaceGraph { graph: replacement })
+            .unwrap();
+        assert_eq!(graph.revision, 43);
+        assert_eq!(graph.next_id, 10);
+        assert_eq!(graph.nodes[0].position, [7.0, 9.0]);
+
+        let before = graph.clone();
+        let mut invalid = ProcessingGraph::default();
+        invalid.nodes.clear();
+        assert!(
+            graph
+                .edit(43, GraphEdit::ReplaceGraph { graph: invalid })
                 .is_err()
         );
         assert_eq!(graph, before);
