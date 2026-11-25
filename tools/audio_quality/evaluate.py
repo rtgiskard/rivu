@@ -111,7 +111,8 @@ class PreparedChannel:
 
 
 def channel_metrics(reference, estimate):
-    si_sdr, alpha = reference.projection.score(estimate)
+    estimate_mean = float(estimate.mean(dtype="float64"))
+    si_sdr, alpha = reference.projection.score(estimate, estimate_mean=estimate_mean)
     reference_energy = reference.energy
     reference_dc = reference.dc
     reference = reference.projection.reference
@@ -132,7 +133,7 @@ def channel_metrics(reference, estimate):
         "reference_rms": float(np.sqrt(reference_energy/len(reference))),
         "estimate_rms": float(np.sqrt(estimate_energy/len(estimate))),
         "reference_dc": reference_dc,
-        "estimate_dc": float(estimate.mean()),
+        "estimate_dc": estimate_mean,
         "peak_abs": peak_abs,
         "peak_error_abs": peak_error,
         "snr_db": db_ratio(reference_energy, error_energy),

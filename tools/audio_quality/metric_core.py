@@ -31,12 +31,12 @@ class PreparedProjection:
             ref = reference[start:start+65536].astype("float64") - self.mean
             self.energy += float(np.dot(ref, ref))
 
-    def score(self, estimate):
+    def score(self, estimate, *, estimate_mean=None):
         import numpy as np
         if not self.energy:
             return None, None
         reference = self.reference
-        est_mean = float(np.mean(estimate, dtype="float64"))
+        est_mean = float(np.mean(estimate, dtype="float64")) if estimate_mean is None else estimate_mean
         product = 0.0
         for start in range(0, len(reference), 65536):
             ref = reference[start:start+65536].astype("float64") - self.mean
