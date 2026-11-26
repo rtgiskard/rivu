@@ -5,9 +5,8 @@ use crate::gui::{
     appearance::fonts::tabular_numbers,
     components::{search::set_search_counts, track::track_favorite_toggle},
 };
-use chrono::{DateTime, Local};
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px, rgb};
-use rivu_protocol::model::{Command, PlaybackStatus};
+use rivu_protocol::model::Command;
 use rivu_ui::{
     VirtualList, caption, column, hover_actions, list_panel_header, list_row, list_viewport,
     panel_header_actions, panel_heading_row, panel_surface, row, sortable_header,
@@ -25,13 +24,9 @@ pub(super) struct HistoryColumnWidths {
 
 impl History {
     fn format_played_at(&self, played_at: Option<i64>) -> String {
-        match played_at.and_then(|time| DateTime::from_timestamp(time, 0)) {
-            Some(time) => time
-                .with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string(),
-            None => self.context.i18n.text("gl-played-none").into(),
-        }
+        played_at
+            .and_then(rivu_presentation::time::format_played_at)
+            .unwrap_or_else(|| self.context.i18n.text("gl-played-none").into())
     }
 
     fn history_sort_button(
@@ -228,19 +223,15 @@ impl History {
                                     let item = this.model.get(index)?;
                                     let id = item.track_id;
                                     let favorite = item.favorite;
-                                    let title = if item.title.is_empty() {
-                                        this.context.i18n.text("gl-untitled").to_owned()
-                                    } else {
-                                        item.title.clone()
-                                    };
+                                    let title = rivu_presentation::history::history_title(
+                                        &item.title,
+                                        &this.context.i18n,
+                                    )
+                                    .to_owned();
                                     let last_played = playback
                                         .filter(|(track, _)| *track == id)
                                         .map(|(_, status)| {
-                                            this.tr(match status {
-                                                PlaybackStatus::Playing => "gl-playing",
-                                                PlaybackStatus::Paused => "gl-paused",
-                                                PlaybackStatus::Stopped => "gl-stopped",
-                                            })
+                                            this.tr(crate::gui::playback::status_key(status))
                                         })
                                         .unwrap_or_else(|| {
                                             this.format_played_at(Some(item.played_at)).into()

@@ -1,5 +1,6 @@
 //! Embedded startup-only Fluent presentation resources.
 use fluent_bundle::{FluentArgs, FluentResource, FluentValue, concurrent::FluentBundle};
+use rivu_protocol::model::PlaybackStatus;
 use std::collections::HashMap;
 
 const EN: &str = concat!(
@@ -176,6 +177,14 @@ impl Localizer {
     pub fn text(&self, id: &str) -> &str {
         self.get_text(id)
             .unwrap_or_else(|| panic!("unknown or dynamic Fluent text ID: {id}"))
+    }
+
+    pub fn playback_status(&self, status: PlaybackStatus) -> &str {
+        self.text(match status {
+            PlaybackStatus::Stopped => "core-stopped",
+            PlaybackStatus::Playing => "core-playing",
+            PlaybackStatus::Paused => "core-paused",
+        })
     }
 
     /// Format named arguments. Missing/incorrect arguments are programming errors,

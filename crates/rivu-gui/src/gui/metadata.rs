@@ -16,7 +16,6 @@ use super::{
     feature::FeatureContext,
 };
 use crate::projection::GuiSnapshot;
-use chrono::{DateTime, Local};
 use gpui::{
     AnyElement, App, Context, Div, Entity, EventEmitter, Focusable, Font, SharedString,
     Subscription, Window, div, prelude::*, px, rgb,
@@ -1170,17 +1169,11 @@ impl Metadata {
         } else {
             stored_at
         };
-        match played_at.and_then(|time| DateTime::from_timestamp(time, 0)) {
+        match played_at.and_then(rivu_presentation::time::format_played_at) {
             Some(time) => self.context.i18n.format(
                 "gl-played-at",
                 &[
-                    (
-                        "time",
-                        time.with_timezone(&Local)
-                            .format("%Y-%m-%d %H:%M:%S")
-                            .to_string()
-                            .into(),
-                    ),
+                    ("time", time.into()),
                     (
                         "paused",
                         usize::from(

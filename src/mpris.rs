@@ -14,6 +14,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use futures::{FutureExt, channel::oneshot};
+use rivu_presentation::time::display_duration;
 use rivu_protocol::AppCommand;
 use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode, Track};
 use std::{
@@ -895,12 +896,7 @@ impl TrackMetadata {
             album: track.album.clone(),
             url: url::Url::from_file_path(&track.path).ok()?.into(),
             art_url: art(track),
-            length: state
-                .playback
-                .duration
-                .or(track.duration)
-                .filter(|duration| duration.is_finite() && *duration >= 0.0)
-                .map(microseconds),
+            length: display_duration(state.playback.duration, track.duration).map(microseconds),
         })
     }
 }
@@ -2308,7 +2304,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_notification_follows_path_changes_without_queue_revision_changes() {
+    fn metadata_notification_follows_track_changes_without_queue_revision_changes() {
         let directory = tempfile::tempdir().unwrap();
         let artwork = ArtworkManager::new(directory.path())
             .with_default_image(rivu_presentation::DEFAULT_ARTWORK_SVG);
@@ -2333,6 +2329,16 @@ mod tests {
             &mut metadata,
             &artwork
         ));
+
+        Arc::make_mut(current.current_track.as_mut().unwrap()).duration = Some(2.25);
+        assert!(refresh_metadata(
+            &previous,
+            &current,
+            &mut metadata,
+            &artwork
+        ));
+        assert_eq!(metadata.as_ref().unwrap().length, Some(2_250_000));
+        let previous = current.clone();
 
         Arc::make_mut(current.current_track.as_mut().unwrap()).path =
             PathBuf::from("/music/moved/7.flac");

@@ -1132,12 +1132,10 @@ impl WindowView {
         } else {
             0.0
         };
-        let duration = if current.is_some() {
-            self.state.playback.duration
-        } else {
-            None
-        }
-        .or_else(|| track.and_then(|track| track.duration));
+        let duration = rivu_presentation::time::display_duration(
+            current.and(self.state.playback.duration),
+            track.and_then(|track| track.duration),
+        );
         self.presentation.update(cx, |presentation, cx| {
             presentation.sync(
                 visualization::runtime::VisualizerInputs {

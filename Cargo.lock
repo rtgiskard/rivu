@@ -5482,6 +5482,7 @@ dependencies = [
 name = "rivu-presentation"
 version = "0.2.28"
 dependencies = [
+ "chrono",
  "fluent-bundle",
  "fluent-syntax",
  "rivu-format",

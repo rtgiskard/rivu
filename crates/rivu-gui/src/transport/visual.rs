@@ -259,7 +259,7 @@ impl VisualClient {
                 &track.path,
                 range,
                 track.decoder_hint,
-                duration.or(track.duration),
+                rivu_presentation::time::display_duration(duration, track.duration),
                 Some(generation),
                 None,
             );

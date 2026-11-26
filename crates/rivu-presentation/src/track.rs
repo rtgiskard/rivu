@@ -15,6 +15,26 @@ pub fn track_title<'a>(title: &'a str, path: &'a Path, cue_number: Option<u32>) 
     }
 }
 
+pub fn playback_title(track: &Track) -> Cow<'_, str> {
+    track_title(
+        &track.title,
+        &track.path,
+        track.cue.as_ref().map(|cue| cue.number),
+    )
+}
+
+pub fn playback_title_changed(old: &Track, new: &Track) -> bool {
+    if std::ptr::eq(old, new) {
+        return false;
+    }
+    if old.title != new.title {
+        return true;
+    }
+    old.title.trim().is_empty()
+        && (old.path.file_stem() != new.path.file_stem()
+            || old.cue.as_ref().map(|cue| cue.number) != new.cue.as_ref().map(|cue| cue.number))
+}
+
 /// Audio labels before the frontend applies its missing-value treatment.
 #[derive(Default)]
 pub struct AudioDetails {

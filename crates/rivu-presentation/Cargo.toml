@@ -7,5 +7,6 @@ description = "Toolkit-neutral Rivu localization, keyboard bindings, and color p
 [dependencies]
 rivu-format = { path = "../rivu-format", default-features = false }
 rivu-protocol = { path = "../rivu-protocol" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fluent-bundle = "0.16"
 fluent-syntax = "0.12"

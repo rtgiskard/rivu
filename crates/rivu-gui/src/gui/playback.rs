@@ -7,7 +7,8 @@ use super::{
 use crate::projection::GuiSnapshot;
 use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rems, rgb};
 use rivu_presentation::keyboard::VOLUME_STEP;
-use rivu_presentation::time::format_time;
+use rivu_presentation::time::{display_duration, format_time};
+use rivu_presentation::track::{playback_title, playback_title_changed};
 use rivu_protocol::model::{Command, PlaybackState, PlaybackStatus, RepeatMode};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Slider, SliderInput,
@@ -29,6 +30,14 @@ pub(super) enum PlaybackEvent {
         queue_id: Option<u64>,
     },
     Error(String),
+}
+
+pub(super) fn status_key(status: PlaybackStatus) -> &'static str {
+    match status {
+        PlaybackStatus::Playing => "gl-playing",
+        PlaybackStatus::Paused => "gl-paused",
+        PlaybackStatus::Stopped => "gl-stopped",
+    }
 }
 
 pub(super) fn hold_normal_speed<T: 'static>(
@@ -163,6 +172,7 @@ impl VolumeIntent {
 pub(super) struct Playback {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
+    title: Option<gpui::SharedString>,
     speed_hold: Option<gpui::Task<()>>,
     seek_preview: Option<f64>,
     dragging: Option<Dragging>,
@@ -177,9 +187,13 @@ impl EventEmitter<PlaybackEvent> for Playback {}
 impl Playback {
     pub(super) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
+        let title = state
+            .current_track()
+            .map(|track| playback_title(track).into_owned().into());
         Self {
             context,
             state,
+            title,
             speed_hold: None,
             seek_preview: None,
             dragging: None,
@@ -194,10 +208,20 @@ impl Playback {
         if Rc::ptr_eq(&self.state, &state) {
             return;
         }
+        let title_changed = match (self.state.current_track(), state.current_track()) {
+            (Some(old), Some(new)) => playback_title_changed(old, new),
+            (None, None) => false,
+            _ => true,
+        };
+        if title_changed {
+            self.title = state
+                .current_track()
+                .map(|track| playback_title(track).into_owned().into());
+        }
         let track_changed = match (self.state.current_track(), state.current_track()) {
             (Some(old), Some(new)) => {
                 old.id != new.id
-                    || old.title != new.title
+                    || title_changed
                     || old.artist != new.artist
                     || old.album != new.album
                     || old.duration != new.duration
@@ -322,24 +346,20 @@ impl Playback {
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
         let track = self.state.current_track();
-        let title = track
-            .map(|track| track.title.clone())
-            .unwrap_or_else(|| self.context.i18n.text("gl-choose-track").into());
+        let title = self
+            .title
+            .clone()
+            .unwrap_or_else(|| self.context.tr("gl-choose-track"));
         let artist = track.map(|track| track.artist.clone()).unwrap_or_default();
         let album = track.map(|track| track.album.clone()).unwrap_or_default();
-        let status = match self.state.playback.status {
-            PlaybackStatus::Playing => self.context.tr("gl-playing"),
-            PlaybackStatus::Paused => self.context.tr("gl-paused"),
-            PlaybackStatus::Stopped => self.context.tr("gl-stopped"),
-        };
-        let duration = self
-            .state
-            .playback
-            .duration
-            .or_else(|| track.and_then(|track| track.duration));
+        let status = self.context.tr(status_key(self.state.playback.status));
+        let duration = display_duration(
+            self.state.playback.duration,
+            track.and_then(|track| track.duration),
+        );
         let preview_position = self.seek_preview.unwrap_or(self.state.playback.position);
         let progress = duration
-            .filter(|duration| duration.is_finite() && *duration > 0.)
+            .filter(|duration| *duration > 0.)
             .map_or(0., |duration| (preview_position / duration) as f32);
         let seek_enabled = self.state.queue.current_id.is_some()
             && self
@@ -394,6 +414,11 @@ impl Playback {
                             .child(format!("{:.0}%", displayed_volume * 100.)),
                     ),
             ))
+        });
+        let repeat_label = self.context.tr(match self.state.playback.repeat {
+            RepeatMode::Off => "gl-repeat-off",
+            RepeatMode::All => "gl-repeat-all",
+            RepeatMode::One => "gl-repeat-one",
         });
         let controls = row()
             .gap_2()
@@ -498,11 +523,7 @@ impl Playback {
                     } else {
                         "󰑖"
                     },
-                    match self.state.playback.repeat {
-                        RepeatMode::Off => self.context.tr("gl-repeat-off"),
-                        RepeatMode::All => self.context.tr("gl-repeat-all"),
-                        RepeatMode::One => self.context.tr("gl-repeat-one"),
-                    },
+                    repeat_label.clone(),
                 )
                 .surface(crate::gui::appearance::material::surface(cx))
                 .selected(self.state.playback.repeat != RepeatMode::Off)
@@ -512,13 +533,10 @@ impl Playback {
                     cx,
                     |this, _, cx| this.send(Command::CycleRepeat, cx),
                     |button| {
-                        button.aspect_square().rounded_full().aria_value(
-                            match self.state.playback.repeat {
-                                RepeatMode::Off => self.context.tr("gl-repeat-off"),
-                                RepeatMode::All => self.context.tr("gl-repeat-all"),
-                                RepeatMode::One => self.context.tr("gl-repeat-one"),
-                            },
-                        )
+                        button
+                            .aspect_square()
+                            .rounded_full()
+                            .aria_value(repeat_label)
                     },
                 ),
             )

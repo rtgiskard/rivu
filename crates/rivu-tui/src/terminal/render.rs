@@ -17,8 +17,8 @@ use ratatui::{
 use rivu_presentation::{
     i18n::Localizer,
     keyboard::{self, Action, Context as KeyboardContext},
-    time::format_time,
-    track::{AudioDetails, CueDetails, track_kind_key, track_title},
+    time::{TimeLabel, display_duration, format_time},
+    track::{AudioDetails, CueDetails, playback_title, track_kind_key, track_title},
 };
 use rivu_protocol::model::{
     DirectoryRow, LibraryRow, PlaybackStatus, PlaylistEntryRow, PlaylistSummary, QueueRow,
@@ -475,12 +475,7 @@ fn details_lines(
                         "gl-last-played",
                         track
                             .last_played
-                            .and_then(|time| chrono::DateTime::from_timestamp(time, 0))
-                            .map(|time| {
-                                time.with_timezone(&chrono::Local)
-                                    .format("%Y-%m-%d %H:%M:%S")
-                                    .to_string()
-                            })
+                            .and_then(rivu_presentation::time::format_played_at)
                             .unwrap_or_default(),
                     ),
                 ],
@@ -782,11 +777,14 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, color
     draw_cached_lines(frame, inner, lines, ui.help_scroll);
 }
 
+const MISSING_TIME: &str = "–:––";
+const MISSING_TIME_WIDTH: u16 = 4;
+
 /// Cell-level playback presentation, shared by invalidation and drawing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct PlaybackProgress {
-    seconds: u64,
-    duration: Option<u64>,
+    position: TimeLabel,
+    duration: Option<TimeLabel>,
     gauge_width: u16,
     filled: u16,
 }
@@ -794,26 +792,25 @@ pub(super) struct PlaybackProgress {
 impl PlaybackProgress {
     pub(super) fn new(width: u16, state: &TuiSnapshot) -> Self {
         let position = state.playback.position.max(0.0);
-        let duration = state
-            .playback
-            .duration
-            .filter(|d| d.is_finite() && *d > 0.0);
-        let seconds = if position.is_finite() {
-            position as u64
-        } else {
-            0
-        };
-        let duration_seconds = duration.map(|d| d as u64);
-        let time_width = |s: u64| (s / 60).checked_ilog10().unwrap_or(0) as u16 + 4;
+        let duration = display_duration(
+            state.playback.duration,
+            state.current_track().and_then(|track| track.duration),
+        );
+        let position_label = TimeLabel::from_seconds(position);
+        let duration_label = duration.map(TimeLabel::from_seconds);
         // Outer margins, plus the leading space, separator and trailing space.
         let width = width.saturating_sub(2);
-        let label = 5 + time_width(seconds) + duration_seconds.map_or(4, time_width);
+        let label = 5
+            + position_label.width()
+            + duration_label.map_or(MISSING_TIME_WIDTH, TimeLabel::width);
         let gauge_width = width.saturating_sub(label).max(width.min(1));
-        let ratio = duration.map_or(0.0, |d| (position / d).clamp(0.0, 1.0));
+        let ratio = duration
+            .filter(|d| *d > 0.0)
+            .map_or(0.0, |d| (position / d).clamp(0.0, 1.0));
         let filled = (f64::from(gauge_width.saturating_sub(1)) * ratio).floor() as u16;
         Self {
-            seconds,
-            duration: duration_seconds,
+            position: position_label,
+            duration: duration_label,
             gauge_width,
             filled,
         }
@@ -834,10 +831,10 @@ impl PlaybackProgress {
                     colors.border
                 });
         }
-        let s = self.seconds;
+        let position = self.position;
         let time = match self.duration {
-            Some(d) => format!(" {}:{:02} / {}:{:02} ", s / 60, s % 60, d / 60, d % 60),
-            None => format!(" {}:{:02} / –:–– ", s / 60, s % 60),
+            Some(duration) => format!(" {position} / {duration} "),
+            None => format!(" {position} / {MISSING_TIME} "),
         };
         frame.render_widget(
             Paragraph::new(time).style(Style::default().fg(colors.secondary)),
@@ -1002,11 +999,7 @@ pub(super) fn draw(
             format!(" {}  ", playback_symbol(state.playback.status)),
             Style::default().fg(colors.positive),
         ));
-        let title = track_title(
-            &track.title,
-            &track.path,
-            track.cue.as_ref().map(|cue| cue.number),
-        );
+        let title = playback_title(track);
         let title_is_empty = title.is_empty();
         now.push(Span::raw(title));
         if !track.artist.is_empty() {
@@ -1423,14 +1416,10 @@ impl IntrinsicColumns {
                 artist = artist.max(Span::raw(row.artist).width().min(24));
                 album = album.max(Span::raw(row.album).width().min(24));
                 codec = codec.max(Span::raw(row.codec).width());
-                let minutes = row.duration.map_or(0, |seconds| {
-                    if seconds.is_finite() && seconds >= 0.0 {
-                        seconds as u64 / 60
-                    } else {
-                        0
-                    }
+                let width = row.duration.map_or(MISSING_TIME_WIDTH, |seconds| {
+                    TimeLabel::from_seconds(seconds).width()
                 });
-                duration = duration.max(minutes.checked_ilog10().unwrap_or(0) as usize + 4);
+                duration = duration.max(usize::from(width));
             }
         }
         // Widths include a two-cell gap. Reserve readable title space before
@@ -1550,7 +1539,8 @@ impl BrowserColumns {
         }
         if self.duration != 0 {
             let duration = if row.is_track {
-                row.duration.map_or_else(|| "–:––".into(), format_time)
+                row.duration
+                    .map_or_else(|| MISSING_TIME.into(), format_time)
             } else {
                 String::new()
             };
@@ -1725,23 +1715,19 @@ fn draw_recent(
             let count_width = count.len().min(width.saturating_sub(1));
             let time = (width >= count_width + 2 + 19 + 2 + 12)
                 .then(|| recent.played_at(entry))
-                .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0));
+                .and_then(rivu_presentation::time::format_played_at);
             let time_width = if time.is_some() { 21 } else { 0 };
             let gap = usize::from(width > count_width);
             let title_width = width.saturating_sub(count_width + gap + time_width);
-            let mut title = cell_text(&entry.title, title_width, false);
+            let title = rivu_presentation::history::history_title(&entry.title, i18n);
+            let mut title = cell_text(title, title_width, false);
             if gap != 0 {
                 title.push(' ');
             }
             title.push_str(&cell_text(&count, count_width, true));
             if let Some(time) = time {
                 title.push_str("  ");
-                title.push_str(
-                    &time
-                        .with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d %H:%M:%S")
-                        .to_string(),
-                );
+                title.push_str(&time);
             }
             let mut row = RowContent::label(Cow::Owned(title), " ");
             row.fitted_label_width = Some(width);

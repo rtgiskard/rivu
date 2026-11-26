@@ -38,6 +38,24 @@ fn progress_changes_at_seconds_or_visible_cell_boundaries() {
 }
 
 #[test]
+fn progress_uses_track_duration_until_engine_reports_its_own() {
+    let mut track = full_track(1);
+    track.duration = Some(180.0);
+    let mut state = TuiSnapshot {
+        current_track: Some(Arc::new(track)),
+        ..Default::default()
+    };
+    state.playback.position = 90.0;
+    let fallback = PlaybackProgress::new(80, &state);
+    assert_eq!(fallback.duration.unwrap().to_string(), "3:00");
+    assert!(fallback.filled > 0);
+    state.playback.duration = Some(0.0);
+    let empty = PlaybackProgress::new(80, &state);
+    assert_eq!(empty.duration.unwrap().to_string(), "0:00");
+    assert_eq!(empty.filled, 0);
+}
+
+#[test]
 fn queue_replacement_confirmation_uses_status_row_without_hiding_notices() {
     let mut tui = queue_replace_tui();
     tui.ui

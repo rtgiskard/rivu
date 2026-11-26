@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
-use rivu_presentation::i18n::Localizer;
+use rivu_presentation::{i18n::Localizer, time::display_duration};
 use rivu_protocol::{
-    model::{Batch, MAX_QUERY_ROWS, PlaybackStatus, Query},
+    model::{Batch, MAX_QUERY_ROWS, Query},
     response::{QueryError, QueryRevisions, StateResponse, StateSections, ViewResponse},
     wire::{CommandOutput, CommandReceipt, CommandReply},
 };
@@ -602,16 +602,13 @@ pub(super) fn show_state(
         .system
         .as_ref()
         .context("State omitted system section")?;
-    let status = match playback.playback.status {
-        PlaybackStatus::Stopped => i18n.text("core-stopped"),
-        PlaybackStatus::Playing => i18n.text("core-playing"),
-        PlaybackStatus::Paused => i18n.text("core-paused"),
-    };
+    let status = i18n.playback_status(playback.playback.status);
     if let Some(track) = response
         .current_track
         .as_ref()
         .and_then(|source| source.track.as_deref())
     {
+        let title = rivu_presentation::track::playback_title(track);
         writeln!(
             output,
             "{}",
@@ -620,17 +617,15 @@ pub(super) fn show_state(
                 &[
                     ("status", status.into()),
                     ("artist", terminal_text(&track.artist).into()),
-                    ("title", terminal_text(&track.title).into()),
+                    ("title", terminal_text(&title).into()),
                     (
                         "position",
                         format!("{:.1}", playback.playback.position).into()
                     ),
                     (
                         "duration",
-                        playback
-                            .playback
-                            .duration
-                            .map_or("?".into(), |v| format!("{v:.1}"))
+                        display_duration(playback.playback.duration, track.duration)
+                            .map_or_else(|| "?".into(), |v| format!("{v:.1}"))
                             .into()
                     ),
                     (

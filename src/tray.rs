@@ -6,6 +6,7 @@ use crate::{
 use futures::{FutureExt, StreamExt, channel::oneshot, future::Shared};
 use parking_lot::RwLock;
 use rivu_presentation::i18n::Localizer;
+use rivu_presentation::track::{playback_title, playback_title_changed};
 use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode};
 use serde::Serialize;
 use std::{
@@ -302,7 +303,7 @@ fn tooltip_changed(previous: &TraySnapshot, current: &TraySnapshot) -> bool {
     match (previous.current_track(), current.current_track()) {
         (Some(previous), Some(current)) => {
             !std::ptr::eq(previous, current)
-                && (previous.title != current.title || previous.artist != current.artist)
+                && (playback_title_changed(previous, current) || previous.artist != current.artist)
         }
         (None, None) => previous.status != current.status,
         _ => true,
@@ -417,13 +418,9 @@ impl StatusNotifierItem {
         let data = self.data.read();
         let snapshot = &data.snapshot;
         let description = match snapshot.current_track() {
-            Some(track) if track.artist.is_empty() => track.title.clone(),
-            Some(track) => format!("{} — {}", track.title, track.artist),
-            None => match snapshot.status {
-                PlaybackStatus::Playing => self.i18n.text("core-playing").to_owned(),
-                PlaybackStatus::Paused => self.i18n.text("core-paused").to_owned(),
-                PlaybackStatus::Stopped => self.i18n.text("core-stopped").to_owned(),
-            },
+            Some(track) if track.artist.is_empty() => playback_title(track).into_owned(),
+            Some(track) => format!("{} — {}", playback_title(track), track.artist),
+            None => self.i18n.playback_status(snapshot.status).to_owned(),
         };
         (
             "rivu".to_owned(),
@@ -846,6 +843,24 @@ mod tests {
             data.publish(TraySnapshot::from_core(&state)).0,
             (true, None)
         );
+        let current = Arc::make_mut(state.current_track.as_mut().unwrap());
+        current.path = "renamed.wav".into();
+        assert!(!data.publish(TraySnapshot::from_core(&state)).0.0);
+        let current = Arc::make_mut(state.current_track.as_mut().unwrap());
+        current.title.clear();
+        assert!(data.publish(TraySnapshot::from_core(&state)).0.0);
+        let current = Arc::make_mut(state.current_track.as_mut().unwrap());
+        current.path = "side-b.wav".into();
+        assert!(data.publish(TraySnapshot::from_core(&state)).0.0);
+        let current = Arc::make_mut(state.current_track.as_mut().unwrap());
+        current.cue = Some(rivu_protocol::model::CueSegment {
+            sheet: "disc.cue".into(),
+            number: 2,
+            start_frame: 0,
+            end_frame: None,
+        });
+        assert_eq!(playback_title(current), "side-b · #02");
+        assert!(data.publish(TraySnapshot::from_core(&state)).0.0);
         let track = state.current_track.take();
         assert_eq!(
             data.publish(TraySnapshot::from_core(&state)).0,

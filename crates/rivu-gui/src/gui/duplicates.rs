@@ -1485,12 +1485,7 @@ impl Duplicates {
             };
             let last_played = track
                 .last_played
-                .and_then(|timestamp| chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0))
-                .map(|time| {
-                    time.with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d %H:%M:%S")
-                        .to_string()
-                })
+                .and_then(rivu_presentation::time::format_played_at)
                 .unwrap_or_else(|| self.context.i18n.text("gl-played-none").into());
             let mut card = column()
                 .flex_shrink_0()

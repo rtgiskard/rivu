@@ -2983,11 +2983,7 @@ impl AudioProcessing {
                 }),
             );
         }
-        let transport = self.tr(match self.state.playback.status {
-            rivu_protocol::model::PlaybackStatus::Playing => "gl-playing",
-            rivu_protocol::model::PlaybackStatus::Paused => "gl-paused",
-            rivu_protocol::model::PlaybackStatus::Stopped => "gl-stopped",
-        });
+        let transport = self.tr(super::playback::status_key(self.state.playback.status));
         let audio_label = |audition: Option<rivu_protocol::model::ProcessingAudition>| {
             audition.map_or_else(
                 || self.tr("processing-workspace-original"),

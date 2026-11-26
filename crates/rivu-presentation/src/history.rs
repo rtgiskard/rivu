@@ -1,5 +1,14 @@
+use crate::i18n::Localizer;
 use rivu_protocol::model::{HistoryEntry, PlaybackStatus};
 use std::cmp::Ordering;
+
+pub fn history_title<'a>(title: &'a str, i18n: &'a Localizer) -> &'a str {
+    if title.is_empty() {
+        i18n.text("gl-untitled")
+    } else {
+        title
+    }
+}
 
 /// Live activity participates in Recent while playing or paused, never stopped.
 pub fn playback_activity(
@@ -78,6 +87,16 @@ pub fn reorder_changed_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_history_title_is_localized_in_gui_and_terminal() {
+        for (language, expected) in [("en-US", "Untitled"), ("zh-CN", "无标题")] {
+            for i18n in [Localizer::new(language), Localizer::for_terminal(language)] {
+                assert_eq!(history_title("", &i18n), expected);
+                assert_eq!(history_title("My track", &i18n), "My track");
+            }
+        }
+    }
 
     #[test]
     fn live_activity_overrides_history_and_breaks_ties_before_source_order() {
