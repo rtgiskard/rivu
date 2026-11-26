@@ -22,14 +22,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Bound FIFO dequeues, including coalesced seeks and read-ahead barriers.
+// Bound FIFO dequeues, including coalesced controls and read-ahead barriers.
 const MAX_COMMANDS_PER_ROUND: usize = 64;
 
 struct CommandInbox {
     receiver: async_channel::Receiver<QueuedAudioCommand>,
-    // A non-seek read ahead is an ordering barrier, not a command to discard.
+    // A read-ahead barrier stays in FIFO order.
     pending: Option<QueuedAudioCommand>,
-    // Every admitted fence is settled, including discarded seek targets.
+    // Settle every admitted fence, including commands replaced by newer targets.
     admitted_intents: usize,
 }
 
@@ -49,33 +49,28 @@ impl CommandInbox {
 
     fn try_recv_round(&mut self, remaining: &mut usize) -> Result<AudioCommand, TryRecvError> {
         let command = if let Some(command) = self.pending.take() {
-            // Already dequeued by seek read-ahead, even at the end of the round.
+            // Read-ahead already counted this command against a round budget.
             command
         } else {
             self.try_dequeue(remaining)?
         };
         self.admitted_intents += usize::from(command.pcm_intent);
-        let AudioCommand::Seek {
-            mut seconds,
-            mut revision,
-        } = command.command
-        else {
-            return Ok(command.command);
-        };
-        while let Ok(queued) = self.try_dequeue(remaining) {
-            let AudioCommand::Seek {
-                seconds: target,
-                revision: target_revision,
-            } = queued.command
-            else {
-                self.pending = Some(queued);
-                break;
-            };
-            seconds = target;
-            self.admitted_intents += usize::from(queued.pcm_intent);
-            revision = target_revision;
+        let mut command = command.command;
+        if matches!(command, AudioCommand::Seek { .. } | AudioCommand::Speed(_)) {
+            while let Ok(queued) = self.try_dequeue(remaining) {
+                if !matches!(
+                    (&command, &queued.command),
+                    (AudioCommand::Seek { .. }, AudioCommand::Seek { .. })
+                        | (AudioCommand::Speed(_), AudioCommand::Speed(_))
+                ) {
+                    self.pending = Some(queued);
+                    break;
+                }
+                command = queued.command;
+                self.admitted_intents += usize::from(queued.pcm_intent);
+            }
         }
-        Ok(AudioCommand::Seek { seconds, revision })
+        Ok(command)
     }
 }
 
@@ -3171,6 +3166,44 @@ mod tests {
             admitted_intents: 0,
         }
     }
+
+    #[test]
+    fn consecutive_speed_targets_keep_the_latest_within_each_fifo_batch() {
+        let (send, receiver) = async_channel::bounded(7);
+        let speed = |value| AudioCommand::Speed(super::super::PlaybackSpeed::new(value).unwrap());
+        for command in [
+            speed(1.05),
+            speed(1.10),
+            AudioCommand::Pause(true),
+            speed(1.15),
+            speed(1.20),
+            speed(1.25),
+            speed(1.30),
+        ] {
+            send.try_send(QueuedAudioCommand::test_unfenced(command))
+                .unwrap();
+        }
+        let mut inbox = inbox(receiver);
+        let mut remaining = 5;
+        assert!(
+            matches!(inbox.try_recv_round(&mut remaining), Ok(AudioCommand::Speed(speed)) if speed.get() == 1.10)
+        );
+        assert!(matches!(
+            inbox.try_recv_round(&mut remaining),
+            Ok(AudioCommand::Pause(true))
+        ));
+        assert!(
+            matches!(inbox.try_recv_round(&mut remaining), Ok(AudioCommand::Speed(speed)) if speed.get() == 1.20)
+        );
+        assert!(matches!(
+            inbox.try_recv_round(&mut remaining),
+            Err(TryRecvError::Empty)
+        ));
+        assert!(
+            matches!(inbox.try_recv_round(&mut 2), Ok(AudioCommand::Speed(speed)) if speed.get() == 1.30)
+        );
+    }
+
     #[test]
     fn consecutive_seeks_stop_at_every_non_seek_barrier() {
         let (reply, _snapshot) = oneshot::channel();

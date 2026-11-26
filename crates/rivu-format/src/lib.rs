@@ -5,4 +5,5 @@ pub mod database;
 pub mod decoder_hint;
 pub mod ownership;
 pub mod palette;
+pub mod playback_speed;
 pub mod tags;

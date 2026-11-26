@@ -1,9 +1,9 @@
 //! Existing executable composition; the GUI library never starts a service.
 use super::frontend_host::{absolute, ensure_service};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-pub(super) fn open(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
+pub(super) fn open(data_dir: PathBuf, config_path: PathBuf) -> Result<()> {
     let data_dir = absolute(data_dir)?;
     let config_path = absolute(config_path)?;
     let expected = std::env::var_os("RIVU_DESKTOP_INSTANCE")
@@ -20,20 +20,11 @@ pub(super) fn open(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>)
         None => async_io::block_on(ensure_service(&data_dir, &config_path, true))?,
     };
     // Service-originated desktops must verify that original owner without
-    // bootstrapping a replacement. Ordinary launches reuse bootstrap's Hello;
-    // only a scan needs another, independently identity-bound session.
-    if expected.is_some() || !paths.is_empty() {
+    // bootstrapping a replacement. Ordinary launches reuse bootstrap's Hello.
+    if expected.is_some() {
         let mut session = rivu_client::client_session(&data_dir);
         session.bind_instance(instance)?;
-        if paths.is_empty() {
-            session.get_state(rivu_protocol::response::StateSections::default())?;
-        } else {
-            let ack = session.request_command(rivu_protocol::model::Command::Scan {
-                paths,
-                force: false,
-            })?;
-            ensure!(ack.is_success(), "{}", ack.error().unwrap_or("Scan failed"));
-        }
+        session.get_state(rivu_protocol::response::StateSections::default())?;
     }
     rivu_gui::run(data_dir, instance, super::build_info())
 }
@@ -54,7 +45,6 @@ mod tests {
         let error = crate::app::App::open_gui(
             directory.path().to_owned(),
             directory.path().join("config.toml"),
-            Vec::new(),
         )
         .unwrap_err();
         // The original owner's absence is the failure, and no replacement was launched.

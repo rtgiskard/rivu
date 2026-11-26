@@ -160,6 +160,18 @@ mod speed;
 mod timeline;
 pub use pcm::{PcmAudio, PcmBudget, PcmBuilder};
 pub use speed::PlaybackSpeed;
+
+#[derive(Debug)]
+pub struct SeekAfterEnd;
+
+impl std::fmt::Display for SeekAfterEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Cannot seek: playback has ended")
+    }
+}
+
+impl std::error::Error for SeekAfterEnd {}
+
 mod render;
 mod source;
 #[cfg(any(test, feature = "test-support"))]
@@ -636,7 +648,7 @@ impl AudioEngine {
                 if admission.seek_revision.is_none() {
                     drop(admission);
                     reject(command);
-                    anyhow::bail!("Cannot seek: playback has ended");
+                    return Err(SeekAfterEnd.into());
                 }
                 Some((admission.generation, *revision))
             }

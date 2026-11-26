@@ -39,8 +39,15 @@ One core runs per data directory; clients must share `--data-dir`. `--config`
 selects configuration at core startup. Restart the core after upgrading and use
 matching client binaries.
 
-`rivu gui PATH...` and `rivu serve PATH...` request scans within configured roots,
-not new roots; the GUI also accepts paths when raising an existing window.
+`rivu gui FILE` opens a separate single-file player. Use it from the file
+manager's Open With menu or from a terminal. Space toggles playback, dragging
+the progress bar seeks, and `{` / `}` lower or raise playback speed by 0.05×
+within 0.5–2×. Closing the window stops playback. The window closes when
+playback finishes. See link:09_cli.adoc#play-file[Single-file playback]
+for how this stream relates to the main player.
+
+Use `rivu library scan PATH...` to scan selected paths within configured roots.
+`rivu serve PATH...` can also request scans at startup.
 Ctrl-C/SIGTERM stop only the receiving process. See
 link:04_playback.adoc[Playback and desktop integration] for details.
 

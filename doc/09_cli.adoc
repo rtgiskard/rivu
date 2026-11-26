@@ -88,11 +88,14 @@ link:01_config.adoc#logging-and-diagnostics[logging and diagnostics].
 ----
 rivu play-file "$HOME/Music/example.flac"
 rivu play-file --device 'PipeWire: your-device-name' "$HOME/Music/example.flac"
+rivu play-file --speed 1.25 "$HOME/Music/example.flac"
 ----
 
-The foreground process plays one local audio file once. It exits silently
-with status 0 after the audio finishes playing. A file, decoder, or output
-error goes to stderr and exits with status 1. Press Ctrl+C to stop early.
+The foreground process plays one local audio file once and exits with status 0
+when playback finishes. `--speed` sets the initial multiplier from 0.5× to 2×.
+In a foreground terminal, `{` and `}` lower and raise the speed by 0.05× and
+print the new multiplier to stderr. Press Ctrl+C to stop early. File, decoder,
+and output errors go to stderr and exit with status 1.
 
 The command follows the system's default PipeWire sink unless `--device` selects
 an exact name from `rivu playback devices` for this invocation. An unavailable

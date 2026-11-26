@@ -383,11 +383,9 @@ impl Core {
             }
             Command::AdjustSpeed { delta } => {
                 ensure!(delta.is_finite(), "Speed delta must be finite");
-                // Hundredths keep repeated steps on exact presets such as 1.25.
-                let value = ((self.preferences.live().speed + delta) * 100.0).round() / 100.0;
-                return self.apply_command(Command::Speed {
-                    value: value.clamp(audio::PlaybackSpeed::MIN, audio::PlaybackSpeed::MAX),
-                });
+                let value =
+                    rivu_format::playback_speed::adjust(self.preferences.live().speed, delta);
+                return self.apply_command(Command::Speed { value });
             }
             Command::Enqueue { track_ids } => self.enqueue(&track_ids)?,
             Command::EnqueueSources {

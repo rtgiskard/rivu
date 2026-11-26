@@ -38,9 +38,9 @@ fn parse_log_level(value: &str) -> Result<rivu_utils::logging::LogLevel, String>
 
 #[derive(Subcommand)]
 pub(super) enum Action {
-    /// Open the independent desktop and optionally import paths into Core.
+    /// Open the desktop, or play one local audio file in a small window.
     #[cfg(feature = "gui")]
-    Gui { paths: Vec<PathBuf> },
+    Gui { path: Option<PathBuf> },
     /// Run the Core service in the foreground, independently of the desktop.
     Serve { paths: Vec<PathBuf> },
     /// Open the terminal UI, starting an independent Core service if absent.
@@ -53,6 +53,9 @@ pub(super) enum Action {
         /// Exact PipeWire device name from `rivu playback devices`.
         #[arg(long, value_name = "NAME")]
         device: Option<String>,
+        /// Initial playback speed as a multiplier (0.5–2.0).
+        #[arg(long, value_parser = parse_finite_speed)]
+        speed: Option<f64>,
     },
     /// Show playback and library state from the running instance.
     Status,

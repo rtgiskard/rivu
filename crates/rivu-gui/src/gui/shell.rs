@@ -6,6 +6,7 @@ mod shortcuts;
 mod view;
 
 use crate::gui::window::*;
+pub(super) use shortcuts::modifiers as key_modifiers;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum KeyboardSurface {

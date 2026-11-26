@@ -8,6 +8,7 @@ mod test_support;
 mod transport;
 
 pub use desktop::{ActivationOutcome, raise_async};
+pub use gui::audition::{AuditionCommand, AuditionEvent, run as run_audition};
 
 /// Executable build metadata displayed by the standalone desktop.
 #[derive(Clone, Copy, Debug)]
@@ -19,7 +20,7 @@ pub struct BuildInfo {
 impl gpui::Global for BuildInfo {}
 
 /// Attach a desktop to a ready, explicitly identified Core service.
-/// The executable owns Core startup and initial path submission.
+/// The executable owns Core startup.
 pub fn run(
     data_dir: std::path::PathBuf,
     expected_instance: u32,

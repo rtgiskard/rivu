@@ -13,8 +13,8 @@ use std::{ffi::c_void, ops::Range, ptr::NonNull};
 pub struct PlaybackSpeed(f64);
 
 impl PlaybackSpeed {
-    pub const MIN: f64 = 0.5;
-    pub const MAX: f64 = 2.0;
+    pub const MIN: f64 = rivu_format::playback_speed::MIN;
+    pub const MAX: f64 = rivu_format::playback_speed::MAX;
     pub const NORMAL: Self = Self(1.0);
 
     pub fn new(speed: f64) -> Option<Self> {

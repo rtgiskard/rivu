@@ -4,6 +4,7 @@ mod appearance;
 mod artwork;
 mod artwork_panel;
 mod audio_processing;
+pub(crate) mod audition;
 mod components;
 mod coordination;
 mod duplicates;

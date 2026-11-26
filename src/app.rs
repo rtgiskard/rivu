@@ -186,8 +186,8 @@ pub(crate) fn build_info() -> rivu_gui::BuildInfo {
 impl App {
     /// Attach a standalone desktop, starting an independent service only if absent.
     #[cfg(feature = "gui")]
-    pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
-        desktop_host::open(data_dir, config_path, paths)
+    pub fn open_gui(data_dir: PathBuf, config_path: PathBuf) -> Result<()> {
+        desktop_host::open(data_dir, config_path)
     }
     /// Attach a terminal client, starting an independent service only if absent.
     #[cfg(feature = "tui")]

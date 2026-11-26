@@ -13,7 +13,7 @@ fn visible_panel(node: &Node, id: u64) -> Option<&layout::Panel> {
     }
 }
 
-fn modifiers(event: &KeyDownEvent) -> KeyModifiers {
+pub(in crate::gui) fn modifiers(event: &KeyDownEvent) -> KeyModifiers {
     let modifiers = event.keystroke.modifiers;
     KeyModifiers {
         control: modifiers.control,

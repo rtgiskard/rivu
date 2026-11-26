@@ -124,15 +124,20 @@ fn execute(args: Args, i18n: Localizer) -> Result<()> {
         OutputMode::Text
     };
     let command = match action {
-        Action::PlayFile { path, device } => return play_file::run(path, device, &config_path),
+        Action::PlayFile {
+            path,
+            device,
+            speed,
+        } => {
+            return play_file::run(path, device, speed, &config_path);
+        }
         Action::Processing(action) => return processing::run(&i18n, &data_dir, action, mode),
         #[cfg(feature = "gui")]
-        Action::Gui { paths } => {
-            return App::open_gui(
-                data_dir,
-                config_path,
-                paths.into_iter().map(client_path).collect::<Result<_>>()?,
-            );
+        Action::Gui { path } => {
+            return match path {
+                Some(path) => play_file::run_window(client_path(path)?, &config_path),
+                None => App::open_gui(data_dir, config_path),
+            };
         }
         Action::Serve { paths } => {
             return App::start(

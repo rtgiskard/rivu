@@ -503,6 +503,23 @@ pub fn resolve(key: &str, mut modifiers: Modifiers, context: Context) -> Option<
         .map(|binding| binding.action)
 }
 
+/// Resolve a speed shortcut for standalone playback.
+pub fn speed_delta(key: &str, modifiers: Modifiers) -> Option<f64> {
+    speed_action_delta(resolve(key, modifiers, Context::Gui)?)
+}
+
+fn speed_action_delta(action: Action) -> Option<f64> {
+    use rivu_format::playback_speed::STEP;
+    match action {
+        Action::SpeedUp => Some(STEP),
+        Action::SpeedDown => Some(-STEP),
+        _ => None,
+    }
+}
+
+pub const SEEK_STEP_SECONDS: f64 = 5.0;
+pub const VOLUME_STEP: f32 = 0.05;
+
 pub fn playback_command(
     action: Action,
     playback: &PlaybackState,
@@ -517,9 +534,9 @@ pub fn playback_command(
             queue_id.map(|queue_id| Command::SeekRelative {
                 queue_id,
                 delta: if action == Action::SeekForward {
-                    5.0
+                    SEEK_STEP_SECONDS
                 } else {
-                    -5.0
+                    -SEEK_STEP_SECONDS
                 },
             })
         }
@@ -535,10 +552,13 @@ pub fn playback_command(
         }),
         Action::Repeat => Some(Command::CycleRepeat),
         Action::Shuffle => Some(Command::ToggleShuffle),
-        Action::VolumeUp => Some(Command::AdjustVolume { delta: 0.05 }),
-        Action::VolumeDown => Some(Command::AdjustVolume { delta: -0.05 }),
-        Action::SpeedUp => Some(Command::AdjustSpeed { delta: 0.05 }),
-        Action::SpeedDown => Some(Command::AdjustSpeed { delta: -0.05 }),
+        Action::VolumeUp => Some(Command::AdjustVolume { delta: VOLUME_STEP }),
+        Action::VolumeDown => Some(Command::AdjustVolume {
+            delta: -VOLUME_STEP,
+        }),
+        Action::SpeedUp | Action::SpeedDown => {
+            speed_action_delta(action).map(|delta| Command::AdjustSpeed { delta })
+        }
         _ => None,
     }
 }

@@ -6,6 +6,7 @@ use super::{
 };
 use crate::projection::GuiSnapshot;
 use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rems, rgb};
+use rivu_presentation::keyboard::VOLUME_STEP;
 use rivu_presentation::time::format_time;
 use rivu_protocol::model::{Command, PlaybackState, PlaybackStatus, RepeatMode};
 use rivu_ui::{
@@ -28,6 +29,50 @@ pub(super) enum PlaybackEvent {
         queue_id: Option<u64>,
     },
     Error(String),
+}
+
+pub(super) fn hold_normal_speed<T: 'static>(
+    speed: f64,
+    hold: fn(&mut T) -> &mut Option<gpui::Task<()>>,
+    cx: &mut Context<T>,
+) -> Option<gpui::Task<()>> {
+    (speed == 1.0).then(|| {
+        let timer = cx
+            .background_executor()
+            .timer(std::time::Duration::from_secs(1));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                *hold(this) = None;
+                cx.notify();
+            });
+        })
+    })
+}
+
+pub(super) fn speed_badge(
+    theme: &'static rivu_format::palette::Palette,
+    speed: f64,
+    cx: &gpui::App,
+) -> gpui::Div {
+    caption(theme, format!("{speed:.2}×"))
+        .font_features(tabular_numbers())
+        .text_color(rgb(theme.accent))
+        .bg(crate::gui::appearance::material::surface(cx).fill(theme.selected))
+        .rounded(rems(0.5))
+        .px_2()
+        .py_1()
+        .whitespace_nowrap()
+        .flex_shrink_0()
+}
+
+pub(super) fn seek_slider_delta(key: SliderKey) -> f64 {
+    use rivu_presentation::keyboard::SEEK_STEP_SECONDS;
+    match key {
+        SliderKey::Decrease => -SEEK_STEP_SECONDS,
+        SliderKey::Increase => SEEK_STEP_SECONDS,
+        SliderKey::Start | SliderKey::End => unreachable!("relative seek key required"),
+    }
 }
 
 fn slider_command(
@@ -58,7 +103,7 @@ fn slider_command(
                 },
                 SliderKey::Decrease | SliderKey::Increase => Command::SeekRelative {
                     queue_id,
-                    delta: if key == SliderKey::Increase { 5. } else { -5. },
+                    delta: seek_slider_delta(key),
                 },
             })
         }
@@ -67,9 +112,9 @@ fn slider_command(
             SliderKey::End => Command::Volume { value: 1. },
             SliderKey::Decrease | SliderKey::Increase => Command::AdjustVolume {
                 delta: if key == SliderKey::Increase {
-                    0.05
+                    VOLUME_STEP
                 } else {
-                    -0.05
+                    -VOLUME_STEP
                 },
             },
         }),
@@ -118,6 +163,7 @@ impl VolumeIntent {
 pub(super) struct Playback {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
+    speed_hold: Option<gpui::Task<()>>,
     seek_preview: Option<f64>,
     dragging: Option<Dragging>,
     volume: VolumeIntent,
@@ -134,6 +180,7 @@ impl Playback {
         Self {
             context,
             state,
+            speed_hold: None,
             seek_preview: None,
             dragging: None,
             volume: VolumeIntent::default(),
@@ -162,6 +209,10 @@ impl Playback {
         let changed = self.state.playback != state.playback
             || self.state.queue.current_id != state.queue.current_id
             || track_changed;
+        if self.state.playback.speed != state.playback.speed {
+            self.speed_hold =
+                hold_normal_speed(state.playback.speed, |this| &mut this.speed_hold, cx);
+        }
         self.state = state;
         if changed {
             cx.notify();
@@ -471,21 +522,16 @@ impl Playback {
                     },
                 ),
             )
-            .when(self.state.playback.speed != 1.0, |view| {
-                view.child(
-                    caption(theme, format!("{:.2}×", self.state.playback.speed))
-                        .id(("playback-speed", panel_id))
-                        .font_features(tabular_numbers())
-                        .text_color(rgb(theme.accent))
-                        .bg(crate::gui::appearance::material::surface(cx).fill(theme.selected))
-                        .rounded(rems(0.5))
-                        .px_2()
-                        .py_1()
-                        .whitespace_nowrap()
-                        .flex_shrink_0()
-                        .tooltip(rivu_ui::text_tooltip(self.context.tr("gl-playback-speed"))),
-                )
-            });
+            .when(
+                self.state.playback.speed != 1.0 || self.speed_hold.is_some(),
+                |view| {
+                    view.child(
+                        speed_badge(theme, self.state.playback.speed, cx)
+                            .id(("playback-speed", panel_id))
+                            .tooltip(rivu_ui::text_tooltip(self.context.tr("gl-playback-speed"))),
+                    )
+                },
+            );
         let volume_control = row()
             .id(("volume-control", panel_id))
             .gap_1()
