@@ -193,6 +193,10 @@ impl WindowView {
             return;
         }
         let Some(action) = action else { return };
+        if action == Action::Toggle && event.is_held {
+            cx.stop_propagation();
+            return;
+        }
         match action {
             Action::Cancel => self.request_clear_selection(cx),
             Action::Up | Action::Down => {

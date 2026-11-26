@@ -10,7 +10,10 @@ use worker::{CommandFeedback, spawn_command_worker, spawn_query_worker, spawn_wa
 use crate::projection::TuiSnapshot;
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{
+        self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -47,6 +50,18 @@ pub fn run(
     let i18n = Arc::new(Localizer::for_terminal(language));
     let mut restore = TerminalRestoreGuard::new()?;
     execute!(restore.stdout, EnterAlternateScreen)?;
+    // Printable Space needs all-keys reporting to carry its repeat event type.
+    // Alternate key codes retain shifted text such as `}` in this mode.
+    execute!(
+        restore.stdout,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        )
+    )?;
+    restore.keyboard_flags_pushed = true;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let result = run_loop(
@@ -75,6 +90,7 @@ pub fn run(
 struct TerminalRestoreGuard {
     stdout: Stdout,
     active: bool,
+    keyboard_flags_pushed: bool,
 }
 
 impl TerminalRestoreGuard {
@@ -84,12 +100,13 @@ impl TerminalRestoreGuard {
         Ok(Self {
             stdout,
             active: true,
+            keyboard_flags_pushed: false,
         })
     }
 
     fn restore(&mut self) -> Result<()> {
         self.active = false;
-        restore_terminal(&mut self.stdout)
+        restore_terminal(&mut self.stdout, self.keyboard_flags_pushed)
     }
 }
 
@@ -101,9 +118,16 @@ impl Drop for TerminalRestoreGuard {
     }
 }
 
-fn restore_terminal(stdout: &mut Stdout) -> Result<()> {
+fn restore_terminal(stdout: &mut Stdout, keyboard_flags_pushed: bool) -> Result<()> {
     let mut first = None;
     if let Err(error) = disable_raw_mode().context("restore terminal raw mode") {
+        first = Some(error);
+    }
+    if keyboard_flags_pushed
+        && let Err(error) =
+            execute!(stdout, PopKeyboardEnhancementFlags).context("restore keyboard mode")
+        && first.is_none()
+    {
         first = Some(error);
     }
     if let Err(error) = execute!(stdout, LeaveAlternateScreen).context("leave alternate screen")

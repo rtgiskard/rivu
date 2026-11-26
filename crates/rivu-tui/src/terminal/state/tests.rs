@@ -2957,6 +2957,20 @@ fn question_mark_opens_help_except_when_owned_by_query_input() {
 }
 
 #[test]
+fn repeated_space_only_suppresses_the_playback_toggle() {
+    let state = TuiSnapshot::default();
+    let mut ui = UiState::default();
+    let held = KeyEvent {
+        kind: crossterm::event::KeyEventKind::Repeat,
+        ..KeyEvent::from(KeyCode::Char(' '))
+    };
+    assert!(matches!(ui.key_action(held, &state), KeyAction::Ignored));
+    ui.open_search();
+    ui.key_action(held, &state);
+    assert_eq!(ui.search.query, " ");
+}
+
+#[test]
 fn leaving_query_editor_restores_page_bindings() {
     let state = TuiSnapshot::default();
     let mut ui = UiState::default();

@@ -2110,6 +2110,9 @@ impl UiState {
         let Some(action) = resolved else {
             return KeyAction::Ignored;
         };
+        if action == Action::Toggle && key.kind == crossterm::event::KeyEventKind::Repeat {
+            return KeyAction::Ignored;
+        }
         if let View::Tree(tree) = &mut self.view
             && let Some(result) = tree.other_action(action)
         {
