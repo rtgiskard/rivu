@@ -828,28 +828,11 @@ fn can_seek(state: &MprisSnapshot) -> bool {
 }
 
 fn can_go_next(state: &MprisSnapshot) -> bool {
-    if state.queue.total == 0 {
-        return false;
-    }
-    if state.playback.shuffle || state.playback.repeat == RepeatMode::All {
-        return true;
-    }
-    state
-        .queue
-        .current_position
-        .is_none_or(|index| index + 1 < state.queue.total)
+    rivu_presentation::navigation::Navigation::availability(&state.queue, &state.playback).next
 }
 
 fn can_go_previous(state: &MprisSnapshot) -> bool {
-    if state.queue.total == 0 {
-        return false;
-    }
-    // Shuffle history belongs to the core, so unknown navigation availability
-    // is true per MPRIS.
-    if state.playback.shuffle {
-        return true;
-    }
-    state.queue.current_position.is_none_or(|index| index > 0)
+    rivu_presentation::navigation::Navigation::availability(&state.queue, &state.playback).previous
 }
 
 fn microseconds(seconds: f64) -> i64 {

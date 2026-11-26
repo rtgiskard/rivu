@@ -42,6 +42,7 @@ struct TrayMenuState {
     playing: bool,
     shuffle: bool,
     repeat: RepeatMode,
+    navigation: rivu_presentation::navigation::Navigation,
 }
 
 impl From<&TraySnapshot> for TrayMenuState {
@@ -50,6 +51,7 @@ impl From<&TraySnapshot> for TrayMenuState {
             playing: snapshot.status == PlaybackStatus::Playing,
             shuffle: snapshot.shuffle,
             repeat: snapshot.repeat,
+            navigation: snapshot.navigation,
         }
     }
 }
@@ -693,6 +695,8 @@ impl MenuItem {
                 }
                 .to_owned(),
             ),
+            "enabled" if self == Self::Previous => menu.navigation.previous.into(),
+            "enabled" if self == Self::Next => menu.navigation.next.into(),
             "enabled" | "visible" => OwnedVariant::from(true),
             "toggle-type" if self == Self::Shuffle => owned_variant("checkmark".to_owned()),
             "toggle-state" if self == Self::Shuffle => OwnedVariant::from(i32::from(menu.shuffle)),
@@ -784,6 +788,7 @@ mod tests {
             playing: false,
             shuffle: false,
             repeat: RepeatMode::Off,
+            navigation: Default::default(),
         };
         let label = owned_variant(i18n.text("core-shuffle").to_owned());
         let checkmark = owned_variant("checkmark".to_owned());
@@ -892,6 +897,7 @@ mod tests {
             status: PlaybackStatus::Stopped,
             shuffle: false,
             repeat: RepeatMode::Off,
+            navigation: Default::default(),
             shutting_down: false,
         };
         let i18n = Localizer::new("en-US");

@@ -51,7 +51,14 @@ impl PublicationChanges {
                 || current.playback.duration != previous.playback.duration
                 || current.playback.seek_revision != previous.playback.seek_revision,
             #[cfg(feature = "gui")]
-            tray: transport_changed,
+            tray: transport_changed
+                || rivu_presentation::navigation::Navigation::availability(
+                    &current.queue,
+                    &current.playback,
+                ) != rivu_presentation::navigation::Navigation::availability(
+                    &previous.queue,
+                    &previous.playback,
+                ),
         }
     }
 

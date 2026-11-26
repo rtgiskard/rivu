@@ -35,6 +35,7 @@ pub(crate) struct TraySnapshot {
     pub(crate) status: PlaybackStatus,
     pub(crate) shuffle: bool,
     pub(crate) repeat: RepeatMode,
+    pub(crate) navigation: rivu_presentation::navigation::Navigation,
     pub(crate) shutting_down: bool,
 }
 
@@ -46,6 +47,10 @@ impl TraySnapshot {
             status: state.playback.status,
             shuffle: state.playback.shuffle,
             repeat: state.playback.repeat,
+            navigation: rivu_presentation::navigation::Navigation::availability(
+                &state.queue,
+                &state.playback,
+            ),
             shutting_down: state.system.shutting_down,
         }
     }

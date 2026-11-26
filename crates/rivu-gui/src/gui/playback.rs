@@ -232,6 +232,8 @@ impl Playback {
         };
         let changed = self.state.playback != state.playback
             || self.state.queue.current_id != state.queue.current_id
+            || self.state.queue.current_position != state.queue.current_position
+            || self.state.queue.total != state.queue.total
             || track_changed;
         if self.state.playback.speed != state.playback.speed {
             self.speed_hold =
@@ -420,6 +422,10 @@ impl Playback {
             RepeatMode::All => "gl-repeat-all",
             RepeatMode::One => "gl-repeat-one",
         });
+        let navigation = rivu_presentation::navigation::Navigation::availability(
+            &self.state.queue,
+            &self.state.playback,
+        );
         let controls = row()
             .gap_2()
             .flex_shrink_0()
@@ -453,7 +459,8 @@ impl Playback {
                             ("previous", panel_id),
                             "󰒮",
                             self.context.tr("gl-previous-track"),
-                        ),
+                        )
+                        .enabled(navigation.previous),
                         cx,
                         |this, _, cx| this.send(Command::Previous, cx),
                         |button| {
@@ -501,7 +508,8 @@ impl Playback {
                         },
                     )
                     .button_with(
-                        IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track")),
+                        IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track"))
+                            .enabled(navigation.next),
                         cx,
                         |this, _, cx| this.send(Command::Next, cx),
                         |button| {

@@ -385,6 +385,13 @@ fn desktop_subscriptions_filter_clock_and_management_but_retain_owner_changes() 
             true,
         ),
         (
+            "empty shuffled queue",
+            |s| s.state.queue.total = 0,
+            false,
+            true,
+            true,
+        ),
+        (
             "queue order",
             |s| s.state.queue.revision += 1,
             false,

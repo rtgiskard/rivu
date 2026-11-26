@@ -2,6 +2,7 @@ pub mod audio_output;
 pub mod history;
 pub mod i18n;
 pub mod keyboard;
+pub mod navigation;
 pub mod processing;
 pub mod refresh;
 pub mod theme;
